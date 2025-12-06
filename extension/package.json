@@ -1,0 +1,328 @@
+{
+  "name": "aspect-code",
+  "displayName": "Aspect Code",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.92.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "aspectcode-container",
+          "title": "Aspect Code",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "aspectcode-container": [
+        {
+          "type": "webview",
+          "id": "aspectcode.panel",
+          "name": "Extension Panel",
+          "icon": "$(beaker)"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "aspectcode.showPanel",
+        "title": "Aspect Code: Show Panel"
+      },
+      {
+        "command": "aspectcode.scanWorkspace",
+        "title": "Aspect Code: Scan Workspace",
+        "icon": "$(search)"
+      },
+      {
+        "command": "aspectcode.scanActiveFile",
+        "title": "Aspect Code: Scan Active File",
+        "icon": "$(file)"
+      },
+      {
+        "command": "aspectcode.openFinding",
+        "title": "Aspect Code: Open Finding"
+      },
+      {
+        "command": "aspectcode.insertSuppression",
+        "title": "Aspect Code: Insert Suppression Comment"
+      },
+      {
+        "command": "aspectcode.configureRules",
+        "title": "Aspect Code: Configure Rule Categories",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "aspectcode.index",
+        "title": "Aspect Code: Index"
+      },
+      {
+        "command": "aspectcode.examine",
+        "title": "Aspect Code: Examine"
+      },
+      {
+        "command": "aspectcode.configureAssistants",
+        "title": "Aspect Code: Configure AI Assistants",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "aspectcode.generateInstructionFiles",
+        "title": "Aspect Code: Generate Instruction Files",
+        "icon": "$(book)"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Aspect Code",
+      "properties": {
+        "aspectcode.serverBaseUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "Base URL of the Aspect Code server"
+        },
+        "aspectcode.apiUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "Base URL of the Aspect Code hosted API"
+        },
+        "aspectcode.engine.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the Aspect Code rule engine"
+        },
+        "aspectcode.engine.pythonPath": {
+          "type": "string",
+          "description": "Path to Python executable for running the engine"
+        },
+        "aspectcode.engine.timeout": {
+          "type": "number",
+          "default": 30000,
+          "description": "Engine timeout in milliseconds"
+        },
+        "aspectcode.engine.maxJobs": {
+          "type": "number",
+          "default": 4,
+          "description": "Maximum parallel jobs for analysis"
+        },
+        "aspectcode.rules.enabled": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": ["imports.*", "security.*", "deadcode.*", "style.*"],
+          "description": "Enabled rule patterns (e.g., 'imports.*', 'security.*')"
+        },
+        "aspectcode.rules.disabled": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Disabled rule patterns or specific rule IDs"
+        },
+        "aspectcode.rules.categories": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["imports", "security", "memory", "deadcode", "style", "complexity", "concurrency", "types", "errors", "naming", "performance"]
+          },
+          "default": ["imports", "security", "deadcode", "style"],
+          "description": "Rule categories to run"
+        },
+        "aspectcode.treeSitter.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use Tree-sitter for import extraction."
+        },
+        "aspectcode.treeSitter.maxFileSizeKB": {
+          "type": "number",
+          "default": 256,
+          "minimum": 32,
+          "description": "Skip Tree-sitter for files larger than this size."
+        },
+        "aspectcode.treeSitter.only": {
+          "type": "boolean",
+          "default": true,
+          "description": "Tree-sitter is the only parser. If grammar is missing or file too large, imports are skipped (no regex fallback)."
+        },
+        "aspectcode.focusPath": {
+          "type": "string",
+          "default": "",
+          "description": "Only analyze files within this directory path (relative to workspace root). Use empty string to analyze all files."
+        },
+        "aspectcode.examination.onSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run examination on file save"
+        },
+        "aspectcode.examination.debounceMs": {
+          "type": "number",
+          "default": 400,
+          "description": "Debounce time for examination triggers"
+        },
+        "aspectcode.smartExamination.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable dependency-aware smart examination"
+        },
+        "aspectcode.smartExamination.maxDepth": {
+          "type": "number",
+          "default": 5,
+          "description": "Maximum dependency depth for smart examination"
+        },
+        "aspectcode.incremental.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable incremental re-indexing on file save for faster examination"
+        },
+        "aspectcode.incremental.debounceMs": {
+          "type": "number",
+          "default": 300,
+          "minimum": 0,
+          "maximum": 5000,
+          "description": "Debounce time for file save examination (milliseconds)"
+        },
+        "aspectcode.incremental.maxAffectedFiles": {
+          "type": "number",
+          "default": 50,
+          "minimum": 1,
+          "maximum": 500,
+          "description": "Maximum files to re-examine incrementally (falls back to manual examination above this)"
+        },
+        "aspectcode.incremental.maxTransitiveDepth": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 10,
+          "description": "Maximum dependency depth for incremental examination propagation"
+        },
+        "aspectcode.promptGeneration.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable LLM prompt generation features"
+        },
+        "aspectcode.promptGeneration.endpoint": {
+          "type": "string",
+          "default": "http://localhost:11434/api/generate",
+          "description": "LLM endpoint for prompt generation"
+        },
+        "aspectcode.promptGeneration.model": {
+          "type": "string",
+          "default": "llama3.2:3b",
+          "description": "LLM model for prompt generation"
+        },
+        "aspectcode.promptGeneration.useLLM": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use LLM for prompt generation (falls back to template if disabled)"
+        },
+        "aspectcode.devLogs": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable verbose panel logs"
+        },
+        "aspectcode.assistants.copilot": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable Aspect Code GitHub Copilot instruction file generation for this workspace."
+        },
+        "aspectcode.assistants.cursor": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable Aspect Code Cursor rule file generation for this workspace."
+        },
+        "aspectcode.assistants.claude": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable Aspect Code Claude Code instruction file generation for this workspace."
+        },
+        "aspectcode.assistants.other": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable Aspect Code AGENTS.md file generation for general AI coding assistants."
+        },
+        "aspectcode.assistants.alignments": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable ALIGNMENTS.json file for tracking AI issues and verified resolutions."
+        },
+        "aspectcode.assistants.autoGenerate": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically regenerate Aspect Code knowledge base and instruction files after a full examination."
+        },
+        "aspectcode.llm.provider": {
+          "type": "string",
+          "enum": ["none", "openai"],
+          "default": "none",
+          "description": "LLM provider for Aspect Code AI features. Set to 'openai' to enable OpenAI-compatible API calls."
+        },
+        "aspectcode.llm.model": {
+          "type": "string",
+          "default": "gpt-4o-mini",
+          "description": "LLM model to use (e.g., gpt-4o-mini, gpt-4, gpt-3.5-turbo)"
+        },
+        "aspectcode.llm.endpoint": {
+          "type": "string",
+          "default": "https://api.openai.com/v1/chat/completions",
+          "description": "LLM API endpoint URL. Can be customized for OpenAI-compatible APIs."
+        },
+        "aspectcode.llm.maxTokens": {
+          "type": "number",
+          "default": 2000,
+          "description": "Maximum tokens for LLM responses"
+        },
+        "aspectcode.llm.enableQueryExpansion": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use LLM to expand vague user questions into specific, actionable prompts. Significantly improves agent task quality but adds 3-7 seconds latency. Requires LLM to be configured."
+        }
+      }
+    }
+  },
+  "main": "./dist/extension.js",
+  "files": [
+    "dist/**",
+    "parsers/**",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "npm run build:extension && npm run build:webview && npm run copy:css",
+    "build:extension": "esbuild src/extension.ts --bundle --platform=node --outfile=dist/extension.js --external:vscode",
+    "build:webview": "esbuild src/panel/webview/main.ts --bundle --platform=browser --outfile=dist/panel-webview.js",
+    "copy:css": "copy src\\panel\\webview\\style.css dist\\panel-webview.css",
+    "watch": "npm run watch:extension & npm run watch:webview",
+    "watch:extension": "esbuild src/extension.ts --bundle --platform=node --outfile=dist/extension.js --external:vscode --watch",
+    "watch:webview": "esbuild src/panel/webview/main.ts --bundle --platform=browser --outfile=dist/panel-webview.js --watch",
+    "postinstall": "node ./scripts/fetch-parsers.cjs || echo \"(skip wasm fetch)\"",
+    "compile": "npm run build",
+    "test:e2e": "ts-node ./test/e2e/run.ts"
+  },
+  "devDependencies": {
+    "@types/diff": "^5.2.2",
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.92.0",
+    "@vscode/test-electron": "^2.3.8",
+    "chai": "^4.4.1",
+    "esbuild": "^0.21.5",
+    "mocha": "^10.4.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.4"
+  },
+  "dependencies": {
+    "diff": "^5.2.0",
+    "node-fetch": "^3.3.2",
+    "tree-sitter-wasms": "0.1.13",
+    "web-tree-sitter": "^0.21.0",
+    "yaml": "2.8.1"
+  }
+}

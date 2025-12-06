@@ -1,0 +1,282 @@
+{
+  "imports.cycle": [
+    "python",
+    "typescript",
+    "javascript",
+    "go",
+    "java",
+    "csharp",
+    "rust"
+  ],
+  "imports.unused": [
+    "python",
+    "typescript",
+    "javascript",
+    "go",
+    "java",
+    "csharp",
+    "ruby",
+    "rust"
+  ],
+  "arch.global_state_usage": [
+    "python",
+    "typescript",
+    "javascript",
+    "go",
+    "java",
+    "cpp",
+    "c",
+    "csharp",
+    "ruby",
+    "rust",
+    "swift"
+  ],
+  "deadcode.unused_variable": [
+    "python",
+    "typescript",
+    "javascript",
+    "go",
+    "java",
+    "cpp",
+    "c",
+    "csharp",
+    "ruby",
+    "rust",
+    "swift"
+  ],
+  "ident.shadowing": [
+    "python"
+  ],
+  "sec.sql_injection_concat": [
+    "python",
+    "javascript",
+    "typescript",
+    "java",
+    "csharp",
+    "ruby",
+    "go",
+    "php",
+    "sql"
+  ],
+  "sec.hardcoded_secret": [
+    "python",
+    "typescript",
+    "javascript",
+    "go",
+    "java",
+    "cpp",
+    "c",
+    "csharp",
+    "ruby",
+    "rust",
+    "swift",
+    "sql"
+  ],
+  "sec.path_traversal": [
+    "python",
+    "javascript",
+    "typescript",
+    "java",
+    "csharp",
+    "go",
+    "ruby"
+  ],
+  "sec.open_redirect": [
+    "javascript",
+    "typescript",
+    "python",
+    "ruby",
+    "java",
+    "csharp"
+  ],
+  "sec.insecure_random": [
+    "python",
+    "javascript",
+    "java",
+    "csharp",
+    "ruby",
+    "go"
+  ],
+  "security.jwt_without_exp": [
+    "python",
+    "javascript",
+    "typescript",
+    "java",
+    "csharp"
+  ],
+  "bug.incompatible_comparison": [
+    "python",
+    "typescript",
+    "javascript",
+    "go",
+    "java",
+    "cpp",
+    "c",
+    "csharp",
+    "ruby",
+    "rust",
+    "swift"
+  ],
+  "bug.float_equality": [
+    "python",
+    "java",
+    "csharp",
+    "cpp",
+    "c",
+    "javascript",
+    "typescript",
+    "go",
+    "rust"
+  ],
+  "bug.iteration_modification": [
+    "python",
+    "java",
+    "csharp",
+    "javascript",
+    "typescript",
+    "ruby"
+  ],
+  "bug.boolean_bitwise_misuse": [
+    "python",
+    "javascript",
+    "typescript",
+    "java",
+    "csharp",
+    "cpp",
+    "c"
+  ],
+  "bug.recursion_no_base_case": [
+    "python",
+    "typescript",
+    "javascript",
+    "go",
+    "java",
+    "cpp",
+    "c",
+    "csharp",
+    "ruby",
+    "rust",
+    "swift"
+  ],
+  "concurrency.lock_not_released": [
+    "java",
+    "csharp",
+    "cpp",
+    "python"
+  ],
+  "concurrency.blocking_in_async": [
+    "javascript",
+    "typescript",
+    "python"
+  ],
+  "errors.swallowed_exception": [
+    "python",
+    "java",
+    "csharp",
+    "ruby",
+    "javascript",
+    "typescript"
+  ],
+  "errors.broad_catch": [
+    "python",
+    "java",
+    "csharp",
+    "ruby",
+    "javascript",
+    "typescript"
+  ],
+  "errors.partial_function_implementation": [
+    "python",
+    "typescript",
+    "javascript",
+    "go",
+    "java",
+    "cpp",
+    "c",
+    "csharp",
+    "ruby",
+    "rust",
+    "swift"
+  ],
+  "complexity.high_cyclomatic": [
+    "python",
+    "typescript",
+    "javascript",
+    "go",
+    "java",
+    "cpp",
+    "c",
+    "csharp",
+    "ruby",
+    "rust",
+    "swift"
+  ],
+  "complexity.long_function": [
+    "python",
+    "javascript",
+    "typescript",
+    "java",
+    "csharp",
+    "cpp",
+    "c"
+  ],
+  "style.mixed_indentation": [
+    "python",
+    "typescript",
+    "javascript",
+    "go",
+    "java",
+    "cpp",
+    "c",
+    "csharp",
+    "ruby",
+    "rust",
+    "swift"
+  ],
+  "test.flaky_sleep": [
+    "python",
+    "typescript",
+    "javascript",
+    "go",
+    "java",
+    "cpp",
+    "c",
+    "csharp",
+    "ruby",
+    "rust",
+    "swift"
+  ],
+  "test.no_assertions": [
+    "python",
+    "typescript",
+    "javascript",
+    "go",
+    "java",
+    "cpp",
+    "c",
+    "csharp",
+    "ruby",
+    "rust",
+    "swift"
+  ],
+  "naming.project_term_inconsistency": [
+    "python",
+    "typescript",
+    "javascript",
+    "go",
+    "java",
+    "cpp",
+    "c",
+    "csharp",
+    "ruby",
+    "rust",
+    "swift"
+  ],
+  "ident.duplicate_definition": [
+    "python",
+    "typescript",
+    "javascript",
+    "java",
+    "csharp"
+  ]
+}

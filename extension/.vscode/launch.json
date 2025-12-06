@@ -1,0 +1,22 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Aspect Code Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "runtimeExecutable": "${execPath}",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        //"${workspaceFolder}/../benchmarks_repos/full-stack-fastapi-template/"
+        "${workspaceFolder}/../../aspectcode-bench/benchmarks_repos/full-stack-fastapi-template/"
+      ],
+      "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+      "preLaunchTask": "npm: build",
+      "env": {
+        // uncomment if you haven't set the OS env var:
+        // "ASPECT_CODE_PLAYGROUND": "C:\\code\\aspect-code-playground"
+      }
+    }
+  ]
+}

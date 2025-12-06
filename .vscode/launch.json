@@ -1,0 +1,29 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Aspect Code Extension (Panel)",
+      "type": "extensionHost",
+      "request": "launch",
+      "runtimeExecutable": "${execPath}",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}/extension"],
+      "outFiles": ["${workspaceFolder}/extension/out/**/*.js"],
+      "preLaunchTask": "Aspect Code: Build Extension"
+    },
+    {
+      "name": "Test Aspect Code Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}/extension"],
+      "outFiles": ["${workspaceFolder}/extension/dist/**/*.js"]
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Panel E2E (tiny)",
+      "configurations": ["Run Aspect Code Extension (Panel)"],
+      "preLaunchTask": "Aspect Code: Start Server",
+      "postDebugTask": "Aspect Code: Open Playground (tiny)"
+    }
+  ]
+}
