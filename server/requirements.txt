@@ -1,0 +1,36 @@
+# Aspect Code Server Dependencies
+# Pin versions for production stability
+
+# Web framework
+fastapi>=0.104.0,<1.0.0
+uvicorn[standard]>=0.24.0,<1.0.0
+
+# Data validation and settings
+pydantic>=2.0.0,<3.0.0
+pydantic-settings>=2.0.0,<3.0.0
+
+# HTTP client (for potential external API calls)
+httpx>=0.25.0,<1.0.0
+
+# Rate limiting
+slowapi>=0.1.9,<1.0.0
+
+# Database
+asyncpg>=0.29.0,<1.0.0
+
+# Version parsing for client version checks
+packaging>=23.0,<25.0
+
+# Tree-sitter for code parsing
+tree-sitter>=0.20.0,<1.0.0
+tree-sitter-python>=0.20.0
+tree-sitter-javascript>=0.20.0
+tree-sitter-typescript>=0.20.0
+tree-sitter-java>=0.20.0
+tree-sitter-c-sharp>=0.20.0
+tree-sitter-go>=0.20.0
+tree-sitter-c>=0.20.0
+tree-sitter-cpp>=0.20.0
+
+# Environment variables
+python-dotenv>=1.0.0,<2.0.0

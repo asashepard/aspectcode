@@ -9,7 +9,7 @@
       "args": [
         "--extensionDevelopmentPath=${workspaceFolder}",
         //"${workspaceFolder}/../benchmarks_repos/full-stack-fastapi-template/"
-        "${workspaceFolder}/../../aspectcode-bench-failed/benchmarks_repos/full-stack-fastapi-template/"
+        "${workspaceFolder}/../../aspectcode-bench-failed/benchmarks_repos/nextjs-prisma-boilerplate/"
       ],
       "outFiles": ["${workspaceFolder}/dist/**/*.js"],
       "preLaunchTask": "npm: build",

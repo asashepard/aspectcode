@@ -33,6 +33,10 @@
     },
     "commands": [
       {
+        "command": "aspectcode.signInAlpha",
+        "title": "Aspect Code: Sign In to Alpha"
+      },
+      {
         "command": "aspectcode.showPanel",
         "title": "Aspect Code: Show Panel"
       },
@@ -85,7 +89,12 @@
         "aspectcode.serverBaseUrl": {
           "type": "string",
           "default": "http://localhost:8000",
-          "description": "Base URL of the Aspect Code server"
+          "description": "Base URL of the Aspect Code server. Remote servers require an API key for authentication."
+        },
+        "aspectcode.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for authenticating with the Aspect Code server. Required for remote servers."
         },
         "aspectcode.apiUrl": {
           "type": "string",

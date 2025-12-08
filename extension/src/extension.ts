@@ -7,7 +7,7 @@ import { loadGrammarsOnce, getLoadedGrammarsSummary } from './tsParser';
 import { extractPythonImports, extractTSJSImports } from './importExtractors';
 import { AspectCodePanelProvider } from './panel/PanelProvider';
 import { AspectCodeState } from './state';
-import { post, fetchCapabilities } from './http';
+import { post, fetchCapabilities, initHttp } from './http';
 import Parser from 'web-tree-sitter';
 import { activateNewCommands } from './newCommandsIntegration';
 import { IncrementalIndexer } from './services/IncrementalIndexer';
@@ -2061,6 +2061,9 @@ export async function activate(context: vscode.ExtensionContext) {
   statusBarItem.show();
   context.subscriptions.push(statusBarItem);
 
+  // Initialize HTTP module with secrets storage for API key management
+  initHttp(context);
+
   // Initialize state
   const state = new AspectCodeState(context);
   state.load();
@@ -2182,6 +2185,83 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // ===== CORE Aspect Code COMMANDS (4 TOTAL) =====
   
+  // Sign In to Alpha - Register for alpha access and store API key
+  context.subscriptions.push(
+    vscode.commands.registerCommand('aspectcode.signInAlpha', async () => {
+      try {
+        // Check if already signed in
+        const existingKey = await context.secrets.get('aspectcode.apiKey');
+        if (existingKey) {
+          const choice = await vscode.window.showInformationMessage(
+            'You are already signed in to Aspect Code Alpha. Do you want to sign in with a different account?',
+            'Sign in with different account',
+            'Cancel'
+          );
+          if (choice !== 'Sign in with different account') {
+            return;
+          }
+        }
+
+        // Prompt for email
+        const email = await vscode.window.showInputBox({
+          prompt: 'Enter your email address to sign up for Aspect Code Alpha',
+          placeHolder: 'you@example.com',
+          validateInput: (value) => {
+            if (!value) {
+              return 'Email is required';
+            }
+            // Basic email validation
+            if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+              return 'Please enter a valid email address';
+            }
+            return undefined;
+          }
+        });
+
+        if (!email) {
+          return; // User cancelled
+        }
+
+        // Get server URL from config
+        const config = vscode.workspace.getConfiguration('aspectcode');
+        const serverBaseUrl = config.get<string>('serverBaseUrl', 'http://localhost:8000');
+
+        // Call the alpha registration endpoint
+        const response = await fetch(`${serverBaseUrl}/alpha/register`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ email }),
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
+          throw new Error(errorData.detail || `Registration failed: ${response.status}`);
+        }
+
+        const data = await response.json() as { api_key: string; email: string; message: string };
+
+        // Store the API key in SecretStorage
+        await context.secrets.store('aspectcode.apiKey', data.api_key);
+
+        // Store the email in globalState for display purposes
+        await context.globalState.update('aspectcode.userEmail', data.email);
+
+        outputChannel?.appendLine(`[Alpha] Successfully registered: ${data.email}`);
+
+        vscode.window.showInformationMessage(
+          `Welcome to Aspect Code Alpha! Signed in as ${data.email}.`,
+          'OK'
+        );
+
+      } catch (error: any) {
+        outputChannel?.appendLine(`[Alpha] Registration error: ${error.message}`);
+        vscode.window.showErrorMessage(`Failed to sign in: ${error.message}`);
+      }
+    })
+  );
+
   // 1. INDEX - Scan entire repository for analysis
   context.subscriptions.push(
     vscode.commands.registerCommand('aspectcode.index', async () => {
