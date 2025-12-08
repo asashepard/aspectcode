@@ -12,7 +12,7 @@ import { PromptGenerationService } from './services/PromptGenerationService';
 import { AspectCodeState } from './state';
 import { detectAssistants, AssistantId } from './assistants/detection';
 import { generateInstructionFiles } from './assistants/instructions';
-import { addAlignmentEntry, initializeAlignmentsFile } from './assistants/kb';
+import { addAlignmentEntry } from './assistants/kb';
 import type { ScoreResult } from './scoring/scoreEngine';
 
 /**
@@ -477,17 +477,17 @@ async function handleGenerateInstructionFiles(
     // Generate instruction files
     await generateInstructionFiles(workspaceRoot, state, scoreResult, outputChannel);
 
-    // Initialize ALIGNMENTS.json if the alignments setting is enabled
-    const assistantsConfig = vscode.workspace.getConfiguration('aspectcode.assistants');
-    if (assistantsConfig.get<boolean>('alignments', false)) {
-      await initializeAlignmentsFile(workspaceRoot, outputChannel);
-      
-      // Notify the panel to show the align button
-      const panelProvider = (state as any)._panelProvider;
-      if (panelProvider && typeof panelProvider.post === 'function') {
-        panelProvider.post({ type: 'ALIGNMENTS_FILE_STATUS', hasFile: true });
-      }
-    }
+    // DISABLED: ALIGNMENTS.json feature - never generate this file
+    // const assistantsConfig = vscode.workspace.getConfiguration('aspectcode.assistants');
+    // if (assistantsConfig.get<boolean>('alignments', false)) {
+    //   await initializeAlignmentsFile(workspaceRoot, outputChannel);
+    //   
+    //   // Notify the panel to show the align button
+    //   const panelProvider = (state as any)._panelProvider;
+    //   if (panelProvider && typeof panelProvider.post === 'function') {
+    //     panelProvider.post({ type: 'ALIGNMENTS_FILE_STATUS', hasFile: true });
+    //   }
+    // }
 
     vscode.window.showInformationMessage('Aspect Code knowledge base and assistant instruction files have been updated.');
   } catch (error) {

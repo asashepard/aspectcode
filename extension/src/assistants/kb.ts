@@ -5,20 +5,22 @@ import { ScoreResult } from '../scoring/scoreEngine';
 import { DependencyAnalyzer, DependencyLink } from '../panel/DependencyAnalyzer';
 
 /**
- * Ensures .aspect/ is added to .gitignore.
+ * Ensures .aspect/ and AGENTS.md are added to .gitignore.
  * If .gitignore doesn't exist, prompts the user to create one.
  */
 async function ensureGitignore(workspaceRoot: vscode.Uri, outputChannel: vscode.OutputChannel): Promise<void> {
   const gitignorePath = vscode.Uri.joinPath(workspaceRoot, '.gitignore');
   const aspectEntry = '.aspect/';
+  const agentsEntry = 'AGENTS.md';
   
   try {
     // Try to read existing .gitignore
     const content = await vscode.workspace.fs.readFile(gitignorePath);
-    const text = Buffer.from(content).toString('utf8');
+    let text = Buffer.from(content).toString('utf8');
+    const lines = text.split(/\r?\n/);
+    let modified = false;
     
     // Check if .aspect/ is already in .gitignore
-    const lines = text.split(/\r?\n/);
     const hasAspect = lines.some(line => {
       const trimmed = line.trim();
       return trimmed === '.aspect/' || trimmed === '.aspect' || trimmed === '/.aspect/' || trimmed === '/.aspect';
@@ -26,17 +28,35 @@ async function ensureGitignore(workspaceRoot: vscode.Uri, outputChannel: vscode.
     
     if (!hasAspect) {
       // Add .aspect/ to .gitignore, preserving existing content
-      const newContent = text.endsWith('\n') 
+      text = text.endsWith('\n') 
         ? text + aspectEntry + '\n'
         : text + '\n' + aspectEntry + '\n';
-      
-      await vscode.workspace.fs.writeFile(gitignorePath, Buffer.from(newContent, 'utf8'));
+      modified = true;
       outputChannel.appendLine('[KB] Added .aspect/ to .gitignore');
+    }
+    
+    // Check if AGENTS.md is already in .gitignore
+    const hasAgents = lines.some(line => {
+      const trimmed = line.trim();
+      return trimmed === 'AGENTS.md' || trimmed === '/AGENTS.md';
+    });
+    
+    if (!hasAgents) {
+      // Add AGENTS.md to .gitignore
+      text = text.endsWith('\n') 
+        ? text + agentsEntry + '\n'
+        : text + '\n' + agentsEntry + '\n';
+      modified = true;
+      outputChannel.appendLine('[KB] Added AGENTS.md to .gitignore');
+    }
+    
+    if (modified) {
+      await vscode.workspace.fs.writeFile(gitignorePath, Buffer.from(text, 'utf8'));
     }
   } catch (error) {
     // .gitignore doesn't exist - prompt the user
     const action = await vscode.window.showInformationMessage(
-      'No .gitignore found. Create one with .aspect/ excluded?',
+      'No .gitignore found. Create one with .aspect/ and AGENTS.md excluded?',
       'Create .gitignore',
       'Dismiss'
     );
@@ -44,11 +64,12 @@ async function ensureGitignore(workspaceRoot: vscode.Uri, outputChannel: vscode.
     if (action === 'Create .gitignore') {
       const defaultContent = `# Aspect Code knowledge base (auto-generated)
 ${aspectEntry}
+${agentsEntry}
 `;
       await vscode.workspace.fs.writeFile(gitignorePath, Buffer.from(defaultContent, 'utf8'));
-      outputChannel.appendLine('[KB] Created .gitignore with .aspect/ excluded');
+      outputChannel.appendLine('[KB] Created .gitignore with .aspect/ and AGENTS.md excluded');
     } else {
-      outputChannel.appendLine('[KB] Warning: .aspect/ not added to .gitignore');
+      outputChannel.appendLine('[KB] Warning: .aspect/ and AGENTS.md not added to .gitignore');
     }
   }
 }
