@@ -75,20 +75,19 @@ ${agentsEntry}
 }
 
 /**
- * Aspect Code Knowledge Base v2 - Architectural Intelligence for AI Coding Agents
+ * Aspect Code Knowledge Base v3 - Architectural Intelligence for AI Coding Agents
  * 
- * STRUCTURE (5 files):
- * - structure.md: Directory layout + dependency graph + hubs + cycles
- * - awareness.md: Contextual guidance on high-impact areas + risk zones
- * - code.md: Symbol index with call relationships and exports
- * - flows.md: Data flows and request paths through the codebase
- * - conventions.md: Naming patterns, import styles, framework idioms
+ * STRUCTURE (3 files):
+ * - architecture.md: The Guardrail - Project layout, high-risk hubs, entry points
+ * - map.md: The Context - Symbol index with signatures, data models, conventions
+ * - context.md: The Flow - Module clusters, data flows, external integrations
  * 
- * Design philosophy: Provide structural intelligence, not just issue lists.
- * Guide agents toward understanding architecture and making informed changes.
- * Issues are supplementary context, not the primary focus.
+ * Design philosophy:
+ * - DEFENSIVE GUARDRAILS: Orgalion-style warnings on high-risk hubs ("load-bearing walls")
+ * - CONTEXTUAL DENSITY: V2-style symbol mapping with signatures for complex edits
+ * - NO LINTING DISTRACTIONS: No awareness.md, no findings lists that cause regressions
  * 
- * KB-Enriching Rules:
+ * KB-Enriching Rules (architectural intelligence, not issues):
  * - arch.entry_point: HTTP handlers, CLI commands, main functions, event listeners
  * - arch.external_integration: HTTP clients, DB connections, message queues, SDKs
  * - arch.data_model: ORM models, dataclasses, interfaces, schemas
@@ -104,7 +103,6 @@ const KB_ENRICHING_RULES = {
 interface KBEnrichingFinding {
   file: string;
   message: string;
-  meta?: Record<string, unknown>;
 }
 
 /**
@@ -120,7 +118,6 @@ function extractKBEnrichingFindings(
     .map(f => ({
       file: f.file,
       message: f.message,
-      meta: f.meta || {},
     }));
 }
 
@@ -185,12 +182,10 @@ export async function autoRegenerateKBFiles(
 /**
  * Generates the .aspect/ knowledge base directory with architectural intelligence.
  * 
- * Files generated:
- * - structure.md: Codebase layout + dependencies + hubs
- * - awareness.md: Contextual guidance on high-impact areas
- * - code.md: Symbol index with relationships
- * - flows.md: Data flows and request paths
- * - conventions.md: Naming patterns and styles
+ * V3 Files generated:
+ * - architecture.md: The Guardrail - layout, hubs, entry points
+ * - map.md: The Context - symbols, data models, conventions
+ * - context.md: The Flow - clusters, flows, integrations
  */
 export async function generateKnowledgeBase(
   workspaceRoot: vscode.Uri,
@@ -210,35 +205,38 @@ export async function generateKnowledgeBase(
   // Ensure .aspect/ is in .gitignore
   await ensureGitignore(workspaceRoot, outputChannel);
 
-  outputChannel.appendLine('[KB] Generating lean knowledge base in .aspect/');
+  outputChannel.appendLine('[KB] Generating V3 knowledge base in .aspect/');
 
   // Pre-fetch shared data
   const files = await discoverWorkspaceFiles(workspaceRoot);
   const { stats: depData, links: allLinks } = await getDetailedDependencyData(workspaceRoot, files, outputChannel);
 
-  // Generate all KB files in parallel
+  // Generate all KB files in parallel (V3: 3 files)
   await Promise.all([
-    generateStructureFile(aspectCodeDir, state, workspaceRoot, files, depData, allLinks, outputChannel),
-    generateAwarenessFile(aspectCodeDir, state, workspaceRoot, depData, allLinks, outputChannel),
-    generateCodeFile(aspectCodeDir, state, workspaceRoot, allLinks, outputChannel),
-    generateFlowsFile(aspectCodeDir, state, workspaceRoot, files, allLinks, outputChannel),
-    generateConventionsFile(aspectCodeDir, state, workspaceRoot, files, outputChannel)
+    generateArchitectureFile(aspectCodeDir, state, workspaceRoot, files, depData, allLinks, outputChannel),
+    generateMapFile(aspectCodeDir, state, workspaceRoot, files, depData, allLinks, outputChannel),
+    generateContextFile(aspectCodeDir, state, workspaceRoot, files, allLinks, outputChannel)
   ]);
 
-  outputChannel.appendLine('[KB] Knowledge base generation complete (5 files)');
+  outputChannel.appendLine('[KB] Knowledge base generation complete (3 files)');
 }
 
 // ============================================================================
-// structure.md - Codebase Layout + Dependencies
+// architecture.md - The Guardrail (V3)
 // ============================================================================
 
 /**
- * Generate .aspect/structure.md - merged architecture + dependencies
+ * Generate .aspect/architecture.md - The Guardrail
  * 
- * Purpose: Help agents understand WHERE code lives and HOW it connects.
- * Answers: "Where should I put this new code?" and "What will this change affect?"
+ * Purpose: Defensive guide to project structure and high-risk zones.
+ * Answers: "Where are the load-bearing walls?" and "What should I not break?"
+ * 
+ * Combines:
+ * - V2 structure.md directory layout
+ * - Orgalion hotspot ranking (in-degree + out-degree + finding count)
+ * - Strong defensive language on hubs
  */
-async function generateStructureFile(
+async function generateArchitectureFile(
   aspectCodeDir: vscode.Uri,
   state: AspectCodeState,
   workspaceRoot: vscode.Uri,
@@ -247,8 +245,8 @@ async function generateStructureFile(
   allLinks: DependencyLink[],
   outputChannel: vscode.OutputChannel
 ): Promise<void> {
-  let content = '# Codebase Structure\n\n';
-  content += '_Where code lives and how modules connect. Use this before adding or moving code._\n\n';
+  let content = '# Architecture\n\n';
+  content += '_Read this first. Describes the project layout and "Do Not Break" zones._\n\n';
 
   if (files.length === 0) {
     content += '_No source files found._\n';
@@ -260,72 +258,148 @@ async function generateStructureFile(
     
     content += `**Files:** ${files.length} | **Dependencies:** ${totalEdges} | **Cycles:** ${cycleCount}\n\n`;
 
-    // Entry points (most important for understanding flow)
-    const entryPoints = detectEntryPoints(files, workspaceRoot.fsPath);
-    if (entryPoints.length > 0) {
-      content += '## Entry Points\n\n';
-      for (const entry of entryPoints.slice(0, 5)) {
-        content += `- \`${entry.path}\` — ${entry.reason}\n`;
+    // Filter to app files for architectural views
+    const appFiles = files.filter(f => classifyFile(f, workspaceRoot.fsPath) === 'app');
+    const testFiles = files.filter(f => classifyFile(f, workspaceRoot.fsPath) === 'test');
+    const findings = state.s.findings;
+
+    // Build finding counts per file for Orgalion-style hotspot ranking
+    const findingCounts = new Map<string, { total: number; critical: number }>();
+    for (const finding of findings) {
+      if (classifyFile(finding.file, workspaceRoot.fsPath) !== 'app') continue;
+      if (!findingCounts.has(finding.file)) {
+        findingCounts.set(finding.file, { total: 0, critical: 0 });
       }
-      content += '\n';
+      const counts = findingCounts.get(finding.file)!;
+      counts.total++;
+      if (finding.severity === 'error') counts.critical++;
     }
 
-    // Hub modules - high fan-in/out (most impactful files)
+    // ============================================================
+    // HIGH-RISK ARCHITECTURAL HUBS (Orgalion + V2 merged)
+    // ============================================================
+    // Ranking: (inDegree + outDegree) * 2 + findingCount
     const hubs = Array.from(depData.entries())
-      .map(([file, info]) => ({
-        file,
-        inDegree: info.inDegree,
-        outDegree: info.outDegree,
-        totalDegree: info.inDegree + info.outDegree
-      }))
-      .filter(h => h.totalDegree > 3)
-      .sort((a, b) => b.totalDegree - a.totalDegree)
-      .slice(0, 10);
+      .filter(([file]) => isStructuralAppFile(file, workspaceRoot.fsPath))
+      .map(([file, info]) => {
+        const fc = findingCounts.get(file) || { total: 0, critical: 0 };
+        const depScore = info.inDegree + info.outDegree;
+        const hotspotScore = (depScore * 2) + fc.total;
+        return {
+          file,
+          inDegree: info.inDegree,
+          outDegree: info.outDegree,
+          totalDegree: depScore,
+          findings: fc.total,
+          criticalFindings: fc.critical,
+          hotspotScore
+        };
+      })
+      .filter(h => h.totalDegree > 2 || h.findings > 0)
+      .sort((a, b) => b.hotspotScore - a.hotspotScore)
+      .slice(0, 12);
 
     if (hubs.length > 0) {
-      content += '## Hub Modules (High Impact)\n\n';
-      content += '_Changes to these files affect many dependents. Proceed with caution._\n\n';
+      content += '## ⚠️ High-Risk Architectural Hubs\n\n';
+      content += '> **These files are architectural load-bearing walls.**\n';
+      content += '> Modify with extreme caution. Do not change signatures without checking `map.md`.\n\n';
       
-      content += '| File | Imports | Imported By | Risk |\n';
-      content += '|------|---------|-------------|------|\n';
+      content += '| Rank | File | Imports | Imported By | Issues | Risk |\n';
+      content += '|------|------|---------|-------------|--------|------|\n';
       
-      for (const hub of hubs) {
+      for (let i = 0; i < hubs.length; i++) {
+        const hub = hubs[i];
         const relPath = makeRelativePath(hub.file, workspaceRoot.fsPath);
-        const risk = hub.inDegree > 10 ? 'High' : hub.inDegree > 5 ? 'Medium' : 'Low';
-        content += `| \`${relPath}\` | ${hub.outDegree} | ${hub.inDegree} | ${risk} |\n`;
+        const risk = hub.inDegree > 8 || hub.criticalFindings > 0 ? '🔴 High' : 
+                     hub.inDegree > 4 || hub.findings > 3 ? '🟡 Medium' : '🟢 Low';
+        content += `| ${i + 1} | \`${relPath}\` | ${hub.outDegree} | ${hub.inDegree} | ${hub.findings} | ${risk} |\n`;
       }
       content += '\n';
-    }
 
-    // Circular dependencies (blockers for clean architecture)
-    if (circularLinks.length > 0) {
-      content += '## Circular Dependencies\n\n';
-      content += '_These create tight coupling. Consider refactoring._\n\n';
-      
-      const processedPairs = new Set<string>();
-      let cycleIndex = 0;
-      
-      for (const link of circularLinks) {
-        if (cycleIndex >= 5) break;
+      // Show top 3 hub details (who imports them)
+      content += '### Hub Details\n\n';
+      for (let i = 0; i < Math.min(3, hubs.length); i++) {
+        const hub = hubs[i];
+        const relPath = makeRelativePath(hub.file, workspaceRoot.fsPath);
+        const importers = allLinks
+          .filter(l => l.target === hub.file && l.source !== hub.file)
+          .filter(l => classifyFile(l.source, workspaceRoot.fsPath) === 'app')
+          .slice(0, 5);
         
-        const pairKey = [link.source, link.target].sort().join('::');
-        if (processedPairs.has(pairKey)) continue;
-        processedPairs.add(pairKey);
-        
-        const sourceRel = makeRelativePath(link.source, workspaceRoot.fsPath);
-        const targetRel = makeRelativePath(link.target, workspaceRoot.fsPath);
-        
-        content += `${cycleIndex + 1}. \`${sourceRel}\` ↔ \`${targetRel}\`\n`;
-        cycleIndex++;
+        content += `**${i + 1}. \`${relPath}\`** (${hub.inDegree} importers)\n`;
+        if (importers.length > 0) {
+          content += 'Imported by:\n';
+          for (const imp of importers) {
+            const impRel = makeRelativePath(imp.source, workspaceRoot.fsPath);
+            content += `- \`${impRel}\`\n`;
+          }
+          if (hub.inDegree > 5) {
+            content += `- _...and ${hub.inDegree - 5} more_\n`;
+          }
+        }
+        content += '\n';
       }
-      content += '\n';
     }
 
-    // Directory structure with purposes (condensed)
-    const dirStructure = analyzeDirStructure(files, workspaceRoot.fsPath);
+    // ============================================================
+    // ENTRY POINTS
+    // ============================================================
+    const ruleEntryPoints = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.ENTRY_POINT)
+      .filter(f => classifyFile(f.file, workspaceRoot.fsPath) === 'app');
+    const fileEntryPoints = detectEntryPoints(appFiles, workspaceRoot.fsPath);
+    
+    if (ruleEntryPoints.length > 0 || fileEntryPoints.length > 0) {
+      content += '## Entry Points\n\n';
+      content += '_Where requests enter the system._\n\n';
+      
+      // Group by type
+      const httpHandlers = ruleEntryPoints.filter(f => f.message.includes('HTTP'));
+      const cliCommands = ruleEntryPoints.filter(f => f.message.includes('CLI'));
+      const mainFunctions = ruleEntryPoints.filter(f => f.message.includes('Main'));
+      
+      if (httpHandlers.length > 0) {
+        content += `**API Routes:** ${httpHandlers.length} endpoints\n`;
+        for (const handler of httpHandlers.slice(0, 5)) {
+          const relPath = makeRelativePath(handler.file, workspaceRoot.fsPath);
+          const info = handler.message.replace('HTTP entry point: ', '');
+          content += `- \`${relPath}\`: ${info}\n`;
+        }
+        if (httpHandlers.length > 5) {
+          content += `- _...and ${httpHandlers.length - 5} more_\n`;
+        }
+        content += '\n';
+      }
+      
+      if (cliCommands.length > 0) {
+        content += `**CLI Commands:** ${cliCommands.length}\n`;
+        for (const cmd of cliCommands.slice(0, 3)) {
+          const relPath = makeRelativePath(cmd.file, workspaceRoot.fsPath);
+          content += `- \`${relPath}\`: ${cmd.message}\n`;
+        }
+        content += '\n';
+      }
+      
+      if (mainFunctions.length > 0 || fileEntryPoints.length > 0) {
+        content += '**Application Entry:**\n';
+        for (const entry of [...mainFunctions.slice(0, 2), ...fileEntryPoints.slice(0, 3)].slice(0, 4)) {
+          if ('message' in entry) {
+            const relPath = makeRelativePath(entry.file, workspaceRoot.fsPath);
+            content += `- \`${relPath}\`: ${entry.message}\n`;
+          } else {
+            content += `- \`${entry.path}\`: ${entry.reason}\n`;
+          }
+        }
+        content += '\n';
+      }
+    }
+
+    // ============================================================
+    // DIRECTORY LAYOUT
+    // ============================================================
+    const dirStructure = analyzeDirStructure(appFiles, workspaceRoot.fsPath);
     const topDirs = Array.from(dirStructure.entries())
-      .filter(([_, info]) => info.files.length >= 3)
-      .slice(0, 15);
+      .filter(([_, info]) => info.files.length >= 2)
+      .slice(0, 12);
 
     if (topDirs.length > 0) {
       content += '## Directory Layout\n\n';
@@ -340,255 +414,471 @@ async function generateStructureFile(
       content += '\n';
     }
 
-    // Test organization
-    const testInfo = analyzeTestOrganization(files, workspaceRoot.fsPath);
-    if (testInfo.testFiles.length > 0) {
-      content += '## Tests\n\n';
-      content += `**Test files:** ${testInfo.testFiles.length}\n`;
-      if (testInfo.testDirs.length > 0) {
-        content += `**Test dirs:** ${testInfo.testDirs.slice(0, 3).join(', ')}\n`;
-      }
-      if (testInfo.testPatterns.length > 0) {
-        content += `**Patterns:** ${testInfo.testPatterns.join(', ')}\n`;
+    // ============================================================
+    // CIRCULAR DEPENDENCIES (architectural issue, keep it)
+    // ============================================================
+    const appCircularLinks = circularLinks.filter(l => 
+      isStructuralAppFile(l.source, workspaceRoot.fsPath) &&
+      isStructuralAppFile(l.target, workspaceRoot.fsPath)
+    );
+    if (appCircularLinks.length > 0) {
+      content += '## ⚠️ Circular Dependencies\n\n';
+      content += '_Bidirectional imports that create tight coupling._\n\n';
+      
+      const processedPairs = new Set<string>();
+      let cycleIndex = 0;
+      
+      for (const link of appCircularLinks) {
+        if (cycleIndex >= 5) break;
+        
+        const pairKey = [link.source, link.target].sort().join('::');
+        if (processedPairs.has(pairKey)) continue;
+        processedPairs.add(pairKey);
+        
+        const sourceRel = makeRelativePath(link.source, workspaceRoot.fsPath);
+        const targetRel = makeRelativePath(link.target, workspaceRoot.fsPath);
+        
+        content += `- \`${sourceRel}\` ↔ \`${targetRel}\`\n`;
+        cycleIndex++;
       }
       content += '\n';
+    }
+
+    // ============================================================
+    // TESTS SUMMARY (brief)
+    // ============================================================
+    const testInfo = analyzeTestOrganization(testFiles.length > 0 ? testFiles : files, workspaceRoot.fsPath);
+    if (testInfo.testFiles.length > 0) {
+      content += '## Tests\n\n';
+      content += `**Test files:** ${testInfo.testFiles.length}`;
+      if (testInfo.testDirs.length > 0) {
+        content += ` | **Dirs:** ${testInfo.testDirs.slice(0, 2).join(', ')}`;
+      }
+      content += '\n\n';
     }
   }
 
   content += `\n_Generated: ${new Date().toISOString()}_\n`;
 
-  const structureFile = vscode.Uri.joinPath(aspectCodeDir, 'structure.md');
-  await vscode.workspace.fs.writeFile(structureFile, Buffer.from(content, 'utf-8'));
-  outputChannel.appendLine(`[KB] Generated structure.md`);
+  const architectureFile = vscode.Uri.joinPath(aspectCodeDir, 'architecture.md');
+  await vscode.workspace.fs.writeFile(architectureFile, Buffer.from(content, 'utf-8'));
+  outputChannel.appendLine(`[KB] Generated architecture.md`);
 }
 
 // ============================================================================
-// awareness.md - Contextual Guidance and Risk Zones
+// map.md - The Context (V3)
 // ============================================================================
 
 /**
- * Generate .aspect/awareness.md - contextual guidance on high-impact areas
+ * Generate .aspect/map.md - The Context
  * 
- * Purpose: Provide structural intelligence about where caution is needed.
- * Answers: "What areas need care?" and "What context should I have?"
+ * Purpose: Dense symbol index with signatures for complex edits.
+ * Answers: "What types exist?" and "What's the signature of this function?"
  * 
- * This is supplementary guidance, not a to-do list. Focus on:
- * - Understanding architectural impact zones
- * - Knowing which files are highly coupled
- * - Being aware of patterns that have caused issues
+ * Combines:
+ * - V2 code.md symbol index (enhanced with signatures)
+ * - V2 conventions.md naming patterns and framework idioms
+ * - Data models with field details
  */
-async function generateAwarenessFile(
+async function generateMapFile(
   aspectCodeDir: vscode.Uri,
   state: AspectCodeState,
   workspaceRoot: vscode.Uri,
+  files: string[],
   depData: Map<string, { inDegree: number; outDegree: number }>,
   allLinks: DependencyLink[],
   outputChannel: vscode.OutputChannel
 ): Promise<void> {
-  let content = '# Codebase Awareness\n\n';
-  content += '_Contextual guidance for understanding high-impact areas. This is supplementary context—focus on architecture and code understanding first._\n\n';
+  let content = '# Map\n\n';
+  content += '_Symbol index with signatures and conventions. Use to find types, functions, and coding patterns._\n\n';
 
   const findings = state.s.findings;
-
-  if (findings.length === 0) {
-    content += '_No examination data available. Run examination to generate awareness context._\n';
-  } else {
-    // Summary stats
-    const errorCount = findings.filter(f => f.severity === 'error').length;
-    const warnCount = findings.filter(f => f.severity === 'warn').length;
+  const appFiles = files.filter(f => classifyFile(f, workspaceRoot.fsPath) === 'app');
+  
+  // ============================================================
+  // DATA MODELS (with signatures/fields)
+  // ============================================================
+  const dataModels = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.DATA_MODEL);
+  
+  if (dataModels.length > 0) {
+    content += '## Data Models\n\n';
+    content += '_Core data structures. Check these before modifying data handling._\n\n';
     
-    content += `**Examination context:** ${findings.length} items | ${errorCount} high-priority | ${warnCount} informational\n\n`;
+    // Group by type for organization
+    const ormModels = dataModels.filter(f => 
+      f.message.includes('ORM') || f.message.includes('Entity') || f.message.includes('SQLModel')
+    );
+    const dataClasses = dataModels.filter(f => 
+      f.message.includes('Data Class') || f.message.includes('dataclass') || 
+      f.message.includes('Pydantic') || f.message.includes('BaseModel')
+    );
+    const interfaces = dataModels.filter(f => 
+      f.message.includes('Interface') || f.message.includes('Type Alias') || f.message.includes('type ')
+    );
+    const other = dataModels.filter(f => 
+      !ormModels.includes(f) && !dataClasses.includes(f) && !interfaces.includes(f)
+    );
 
-    // Hotspot files (files with most issues)
-    const fileMap = new Map<string, typeof findings>();
-    for (const finding of findings) {
-      if (!fileMap.has(finding.file)) {
-        fileMap.set(finding.file, []);
-      }
-      fileMap.get(finding.file)!.push(finding);
-    }
-
-    const hotspots = Array.from(fileMap.entries())
-      .map(([file, fileFindings]) => ({
-        file,
-        total: fileFindings.length,
-        critical: fileFindings.filter(f => f.severity === 'error').length,
-        depInfo: depData.get(file)
-      }))
-      .sort((a, b) => b.total - a.total)
-      .slice(0, 10);
-
-    content += '## High-Impact Files\n\n';
-    content += '_Files with high coupling or many observations. Changes here require extra care._\n\n';
-    
-    content += '| File | Issues | Critical | Dependents | Risk |\n';
-    content += '|------|--------|----------|------------|------|\n';
-    
-    for (const hs of hotspots) {
-      const relPath = makeRelativePath(hs.file, workspaceRoot.fsPath);
-      const deps = hs.depInfo?.inDegree || 0;
-      const risk = (hs.critical > 0 && deps > 5) ? 'High' : (hs.total > 3 || deps > 5) ? 'Medium' : 'Low';
-      content += `| \`${relPath}\` | ${hs.total} | ${hs.critical} | ${deps} | ${risk} |\n`;
-    }
-    content += '\n';
-
-    // Top findings with stable IDs
-    // Tier 2 architectural rules
-    const tier2RuleIds = new Set([
-      'analysis.change_impact',
-      'architecture.dependency_cycle_impact', 
-      'architecture.critical_dependency',
-      'deadcode.unused_public'
-    ]);
-    
-    // KB-enriching rules are informational (entry points, data models, integrations)
-    // These should NOT appear in issue sections - they are architectural intelligence, not problems
-    const kbEnrichingRuleIds = new Set(Object.values(KB_ENRICHING_RULES));
-    
-    // Low-priority rules that shouldn't be labeled "critical" even if severity is error
-    const lowPriorityRules = new Set([
-      'imports.unused', 'deadcode.unused_import', 'deadcode.unused_variable',
-      'style.mixed_indentation', 'style.trailing_whitespace', 'style.missing_newline_eof',
-      'naming.inconsistent_case', 'naming.non_conventional'
-    ]);
-    
-    // Rules that may indicate potential past changes, incomplete implementations, or deleted code
-    const potentialArchSignalRules = new Set([
-      'imports.unused', 'deadcode.unused_import', 'deadcode.unused_variable',
-      'deadcode.unused_public', 'deadcode.unreachable_code'
-    ]);
-
-    const tier2Findings = findings.filter(f => tier2RuleIds.has(f.code)).slice(0, 10);
-    // Truly critical: security, bugs - not low-priority style/unused issues
-    const criticalFindings = findings.filter(f => 
-      f.severity === 'error' && 
-      !tier2RuleIds.has(f.code) && 
-      !lowPriorityRules.has(f.code) &&
-      !kbEnrichingRuleIds.has(f.code)
-    ).slice(0, 15);
-    // Code quality issues: includes low-priority errors and all warnings (but not KB-enriching rules)
-    const qualityFindings = findings.filter(f => 
-      !kbEnrichingRuleIds.has(f.code) && (
-        (f.severity === 'error' && lowPriorityRules.has(f.code)) ||
-        (f.severity === 'warn' && !tier2RuleIds.has(f.code))
-      )
-    ).slice(0, 15);
-
-    let findingId = 1;
-
-    // Structural observations (Tier 2)
-    if (tier2Findings.length > 0) {
-      content += '## Structural Observations\n\n';
-      content += '_Cross-file patterns and dependencies to be aware of when making changes._\n\n';
-      
-      for (const finding of tier2Findings) {
-        const fId = `F-${String(findingId++).padStart(3, '0')}`;
-        const relPath = makeRelativePath(finding.file, workspaceRoot.fsPath);
-        const line = finding.span?.start?.line || '';
-        
-        content += `### ${fId}: \`${finding.code}\`\n\n`;
-        content += `**Location:** \`${relPath}${line ? ':' + line : ''}\`\n\n`;
-        content += `${finding.message}\n\n`;
-      }
-    }
-
-    // Security & correctness notes (for context, not a to-do list)
-    if (criticalFindings.length > 0) {
-      content += '## Security & Correctness Notes\n\n';
-      content += '_Areas flagged for review. These are observations to consider, not necessarily problems._\n\n';
-      
-      for (const finding of criticalFindings) {
-        const fId = `F-${String(findingId++).padStart(3, '0')}`;
-        const relPath = makeRelativePath(finding.file, workspaceRoot.fsPath);
-        const line = finding.span?.start?.line || '';
-        const guidanceNote = getPatternGuidanceNote(finding.code);
-        
-        content += `### ${fId}: \`${finding.code}\`\n\n`;
-        content += `**Location:** \`${relPath}${line ? ':' + line : ''}\`\n\n`;
-        content += `${finding.message}\n\n`;
-        if (guidanceNote) {
-          content += `**Context:** ${guidanceNote}\n\n`;
+    // Show models with enhanced signatures
+    if (ormModels.length > 0) {
+      content += '### ORM / Database Models\n\n';
+      for (const model of ormModels.slice(0, 15)) {
+        const relPath = makeRelativePath(model.file, workspaceRoot.fsPath);
+        const modelInfo = model.message.replace('Data model: ', '').replace('ORM model: ', '');
+        // Try to extract signature from file
+        const signature = await extractModelSignature(model.file, modelInfo);
+        if (signature) {
+          content += `**\`${relPath}\`**: \`${signature}\`\n\n`;
+        } else {
+          content += `**\`${relPath}\`**: ${modelInfo}\n\n`;
         }
       }
     }
 
-    // Additional context (code quality observations)
-    if (qualityFindings.length > 0) {
-      content += '## Additional Context\n\n';
-      content += '_Observations about code patterns. May indicate areas worth understanding better._\n\n';
-      content += '_Note: Unused imports/variables sometimes indicate past changes or incomplete implementations._\n\n';
-      
-      for (const finding of qualityFindings) {
-        const fId = `F-${String(findingId++).padStart(3, '0')}`;
-        const relPath = makeRelativePath(finding.file, workspaceRoot.fsPath);
-        const line = finding.span?.start?.line || '';
-        const isPotentialArchSignal = potentialArchSignalRules.has(finding.code);
-        
-        content += `- **${fId}:** \`${finding.code}\` in \`${relPath}${line ? ':' + line : ''}\``;
-        if (isPotentialArchSignal) {
-          content += ' *(review: may indicate incomplete implementation)*';
+    if (dataClasses.length > 0) {
+      content += '### Pydantic / Data Classes\n\n';
+      for (const model of dataClasses.slice(0, 15)) {
+        const relPath = makeRelativePath(model.file, workspaceRoot.fsPath);
+        const modelInfo = model.message.replace('Data model: ', '');
+        const signature = await extractModelSignature(model.file, modelInfo);
+        if (signature) {
+          content += `**\`${relPath}\`**: \`${signature}\`\n\n`;
+        } else {
+          content += `**\`${relPath}\`**: ${modelInfo}\n\n`;
         }
-        content += '\n';
-      }
-      content += '\n';
-    }
-
-    // Common patterns to avoid (derived from findings)
-    // Exclude KB-enriching rules - they are informational, not patterns to avoid
-    const ruleGroups = new Map<string, number>();
-    for (const finding of findings) {
-      if (!kbEnrichingRuleIds.has(finding.code)) {
-        ruleGroups.set(finding.code, (ruleGroups.get(finding.code) || 0) + 1);
       }
     }
-    
-    const topRules = Array.from(ruleGroups.entries())
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 8)
-      .filter(([_, count]) => count >= 2);
 
-    if (topRules.length > 0) {
-      content += '## Patterns to Watch\n\n';
-      content += '_Recurring patterns in this codebase. Be aware of these when making changes._\n\n';
-      
-      for (const [rule, count] of topRules) {
-        const note = getPatternGuidanceNote(rule);
-        content += `- **\`${rule}\`** (${count}x)`;
-        if (note) {
-          content += ` — ${note}`;
+    if (interfaces.length > 0) {
+      content += '### TypeScript Interfaces & Types\n\n';
+      for (const model of interfaces.slice(0, 15)) {
+        const relPath = makeRelativePath(model.file, workspaceRoot.fsPath);
+        const modelInfo = model.message.replace('Data model: ', '');
+        const signature = await extractModelSignature(model.file, modelInfo);
+        if (signature) {
+          content += `**\`${relPath}\`**: \`${signature}\`\n\n`;
+        } else {
+          content += `**\`${relPath}\`**: ${modelInfo}\n\n`;
         }
-        content += '\n';
       }
-      content += '\n';
     }
 
-    // Safe zones (files with no critical issues and low coupling)
-    const allFiles = Array.from(new Set(findings.map(f => f.file)));
-    const safeFiles = allFiles
-      .filter(f => {
-        const fileFindings = fileMap.get(f) || [];
-        const depInfo = depData.get(f);
-        return fileFindings.every(ff => ff.severity !== 'error') && 
-               (depInfo?.inDegree || 0) < 3;
-      })
-      .slice(0, 5);
-
-    if (safeFiles.length > 0) {
-      content += '## Stable Files\n\n';
-      content += '_Files with lower coupling and fewer observations. Good reference examples._\n\n';
-      for (const file of safeFiles) {
-        const relPath = makeRelativePath(file, workspaceRoot.fsPath);
-        content += `- \`${relPath}\`\n`;
+    if (other.length > 0) {
+      content += '### Other Data Structures\n\n';
+      for (const model of other.slice(0, 10)) {
+        const relPath = makeRelativePath(model.file, workspaceRoot.fsPath);
+        content += `- \`${relPath}\`: ${model.message}\n`;
       }
       content += '\n';
     }
   }
 
+  // ============================================================
+  // SYMBOL INDEX (with enhanced signatures)
+  // ============================================================
+  const relevantFiles = new Set<string>();
+  for (const finding of findings) {
+    relevantFiles.add(finding.file);
+  }
+  for (const link of allLinks) {
+    relevantFiles.add(link.source);
+    relevantFiles.add(link.target);
+  }
+
+  if (relevantFiles.size > 0) {
+    content += '## Symbol Index\n\n';
+    content += '_Functions, classes, and exports with call relationships._\n\n';
+
+    // Build set of files with arch.* findings for boosting
+    const archFiles = new Set<string>();
+    for (const model of dataModels) {
+      if (classifyFile(model.file, workspaceRoot.fsPath) === 'app') {
+        archFiles.add(model.file);
+      }
+    }
+    const entryPointFindings = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.ENTRY_POINT);
+    const integrationFindings = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.EXTERNAL_INTEGRATION);
+    for (const f of entryPointFindings) {
+      if (classifyFile(f.file, workspaceRoot.fsPath) === 'app') archFiles.add(f.file);
+    }
+    for (const f of integrationFindings) {
+      if (classifyFile(f.file, workspaceRoot.fsPath) === 'app') archFiles.add(f.file);
+    }
+
+    // Score files by importance
+    const fileScores = new Map<string, number>();
+    for (const file of relevantFiles) {
+      const kind = classifyFile(file, workspaceRoot.fsPath);
+      if (kind === 'third_party') continue;
+
+      const base = kind === 'test' ? -10 : 0;
+      const archBoost = archFiles.has(file) ? 25 : 0;
+      const kbEnrichingRuleIds = new Set(Object.values(KB_ENRICHING_RULES));
+      const findingCount = findings.filter(f => f.file === file && !kbEnrichingRuleIds.has(f.code)).length;
+      const outLinks = allLinks.filter(l => l.source === file).length;
+      const inLinks = allLinks.filter(l => l.target === file).length;
+
+      const score = base + archBoost + (findingCount * 2) + (inLinks * 2) + outLinks;
+      fileScores.set(file, score);
+    }
+
+    const sortedFiles = Array.from(fileScores.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 40)
+      .map(([file]) => file);
+
+    for (const file of sortedFiles) {
+      const relPath = makeRelativePath(file, workspaceRoot.fsPath);
+      const symbols = await extractFileSymbolsWithSignatures(file, allLinks, workspaceRoot.fsPath);
+
+      if (symbols.length === 0) continue;
+
+      content += `### \`${relPath}\`\n\n`;
+      content += '| Symbol | Kind | Signature | Called By |\n';
+      content += '|--------|------|-----------|----------|\n';
+
+      for (const symbol of symbols.slice(0, 12)) {
+        const sig = symbol.signature ? `\`${symbol.signature}\`` : '—';
+        const calledBy = symbol.calledBy.slice(0, 2).map(c => `\`${c}\``).join(', ') || '—';
+        content += `| \`${symbol.name}\` | ${symbol.kind} | ${sig} | ${calledBy} |\n`;
+      }
+
+      if (symbols.length > 12) {
+        content += `\n_+${symbols.length - 12} more symbols_\n`;
+      }
+      content += '\n';
+    }
+  }
+
+  // ============================================================
+  // CONVENTIONS (from old conventions.md)
+  // ============================================================
+  if (appFiles.length > 0) {
+    content += '---\n\n';
+    content += '## Conventions\n\n';
+    content += '_Naming patterns and styles. Follow these for consistency._\n\n';
+
+    // File naming
+    const fileNaming = analyzeFileNaming(appFiles, workspaceRoot.fsPath);
+    if (fileNaming.patterns.length > 0) {
+      content += '### File Naming\n\n';
+      content += '| Pattern | Example | Count |\n';
+      content += '|---------|---------|-------|\n';
+      for (const pattern of fileNaming.patterns.slice(0, 4)) {
+        content += `| ${pattern.style} | \`${pattern.example}\` | ${pattern.count} |\n`;
+      }
+      content += '\n';
+      if (fileNaming.dominant) {
+        content += `**Use:** ${fileNaming.dominant} for new files.\n\n`;
+      }
+    }
+
+    // Function naming patterns
+    const funcNaming = await analyzeFunctionNaming(appFiles);
+    if (funcNaming.patterns.length > 0) {
+      content += '### Function Naming\n\n';
+      for (const pattern of funcNaming.patterns.slice(0, 5)) {
+        content += `- \`${pattern.pattern}\` → \`${pattern.example}\` (${pattern.usage})\n`;
+      }
+      content += '\n';
+    }
+
+    // Framework patterns
+    const frameworkPatterns = detectFrameworkPatterns(appFiles, workspaceRoot.fsPath);
+    if (frameworkPatterns.length > 0) {
+      content += '### Framework Patterns\n\n';
+      for (const fw of frameworkPatterns) {
+        content += `**${fw.name}:**\n`;
+        for (const pattern of fw.patterns.slice(0, 3)) {
+          content += `- ${pattern}\n`;
+        }
+        content += '\n';
+      }
+    }
+  }
+
   content += `\n_Generated: ${new Date().toISOString()}_\n`;
 
-  const awarenessFile = vscode.Uri.joinPath(aspectCodeDir, 'awareness.md');
-  await vscode.workspace.fs.writeFile(awarenessFile, Buffer.from(content, 'utf-8'));
-  outputChannel.appendLine(`[KB] Generated awareness.md`);
+  const mapFile = vscode.Uri.joinPath(aspectCodeDir, 'map.md');
+  await vscode.workspace.fs.writeFile(mapFile, Buffer.from(content, 'utf-8'));
+  outputChannel.appendLine(`[KB] Generated map.md`);
+}
+
+/**
+ * Extract model signature (first line/fields) from a file
+ */
+async function extractModelSignature(filePath: string, modelName: string): Promise<string | null> {
+  try {
+    const uri = vscode.Uri.file(filePath);
+    const content = await vscode.workspace.fs.readFile(uri);
+    const text = Buffer.from(content).toString('utf-8');
+    const lines = text.split('\n');
+    const ext = path.extname(filePath).toLowerCase();
+    
+    // Extract just the class/model name without extra details
+    const cleanName = modelName.split(':')[0].split('(')[0].trim();
+    
+    if (ext === '.py') {
+      // Find class definition and capture signature
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (line.match(new RegExp(`^class\\s+${cleanName}\\s*[:(]`))) {
+          // Get the first line as signature
+          const classLine = line.trim();
+          // Try to get a few field hints
+          const fields: string[] = [];
+          for (let j = i + 1; j < Math.min(i + 8, lines.length); j++) {
+            const fieldMatch = lines[j].match(/^\s+(\w+):\s*([^\s=]+)/);
+            if (fieldMatch && !fieldMatch[1].startsWith('_')) {
+              fields.push(`${fieldMatch[1]}: ${fieldMatch[2]}`);
+              if (fields.length >= 3) break;
+            }
+          }
+          if (fields.length > 0) {
+            return `${classLine} { ${fields.join(', ')}${fields.length >= 3 ? ', ...' : ''} }`;
+          }
+          return classLine;
+        }
+      }
+    } else if (['.ts', '.tsx'].includes(ext)) {
+      // Find interface/type/class
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (line.match(new RegExp(`(interface|type|class)\\s+${cleanName}\\s*[{<]`))) {
+          // Get opening line and try to capture some fields
+          const typeLine = line.trim();
+          const fields: string[] = [];
+          for (let j = i + 1; j < Math.min(i + 8, lines.length); j++) {
+            const fieldMatch = lines[j].match(/^\s+(\w+)(\?)?\s*:\s*([^;]+)/);
+            if (fieldMatch) {
+              fields.push(`${fieldMatch[1]}${fieldMatch[2] || ''}: ${fieldMatch[3].trim()}`);
+              if (fields.length >= 3) break;
+            }
+            if (lines[j].includes('}')) break;
+          }
+          if (fields.length > 0) {
+            return `${typeLine.replace('{', '').trim()} { ${fields.join('; ')}${fields.length >= 3 ? '; ...' : ''} }`;
+          }
+          return typeLine;
+        }
+      }
+    }
+  } catch {
+    // Ignore errors
+  }
+  return null;
+}
+
+/**
+ * Extract file symbols with enhanced signature information
+ */
+async function extractFileSymbolsWithSignatures(
+  filePath: string,
+  allLinks: DependencyLink[],
+  workspaceRoot: string
+): Promise<Array<{ name: string; kind: string; signature: string | null; calledBy: string[] }>> {
+  const symbols: Array<{ name: string; kind: string; signature: string | null; calledBy: string[] }> = [];
+  
+  try {
+    const uri = vscode.Uri.file(filePath);
+    const content = await vscode.workspace.fs.readFile(uri);
+    const text = Buffer.from(content).toString('utf-8');
+    const lines = text.split('\n');
+    const ext = path.extname(filePath).toLowerCase();
+    
+    if (ext === '.py') {
+      for (const line of lines) {
+        // Functions with signature
+        const funcMatch = line.match(/^def\s+(\w+)\s*\(([^)]*)\)/);
+        if (funcMatch && !funcMatch[1].startsWith('_')) {
+          const params = funcMatch[2].split(',').slice(0, 3).map(p => p.trim().split(':')[0].split('=')[0].trim()).filter(p => p && p !== 'self');
+          const sig = params.length > 0 ? `(${params.join(', ')})` : '()';
+          symbols.push({
+            name: funcMatch[1],
+            kind: 'function',
+            signature: `def ${funcMatch[1]}${sig}`,
+            calledBy: getSymbolCallers(funcMatch[1], filePath, allLinks, workspaceRoot)
+          });
+        }
+        
+        // Classes
+        const classMatch = line.match(/^class\s+(\w+)(?:\(([^)]*)\))?/);
+        if (classMatch) {
+          const bases = classMatch[2] ? classMatch[2].split(',')[0].trim() : '';
+          symbols.push({
+            name: classMatch[1],
+            kind: 'class',
+            signature: bases ? `class ${classMatch[1]}(${bases})` : `class ${classMatch[1]}`,
+            calledBy: getSymbolCallers(classMatch[1], filePath, allLinks, workspaceRoot)
+          });
+        }
+      }
+    } else if (['.ts', '.tsx', '.js', '.jsx'].includes(ext)) {
+      for (const line of lines) {
+        // Functions
+        const funcMatch = line.match(/export\s+(?:async\s+)?function\s+(\w+)\s*(?:<[^>]*>)?\s*\(([^)]*)\)/);
+        if (funcMatch) {
+          const params = funcMatch[2].split(',').slice(0, 3).map(p => p.trim().split(':')[0].split('=')[0].trim()).filter(p => p);
+          const sig = params.length > 0 ? `(${params.join(', ')})` : '()';
+          symbols.push({
+            name: funcMatch[1],
+            kind: 'function',
+            signature: `function ${funcMatch[1]}${sig}`,
+            calledBy: getSymbolCallers(funcMatch[1], filePath, allLinks, workspaceRoot)
+          });
+        }
+        
+        // Classes
+        const classMatch = line.match(/export\s+(?:abstract\s+)?class\s+(\w+)(?:\s+extends\s+(\w+))?/);
+        if (classMatch) {
+          const ext = classMatch[2] ? ` extends ${classMatch[2]}` : '';
+          symbols.push({
+            name: classMatch[1],
+            kind: 'class',
+            signature: `class ${classMatch[1]}${ext}`,
+            calledBy: getSymbolCallers(classMatch[1], filePath, allLinks, workspaceRoot)
+          });
+        }
+        
+        // Interfaces
+        const interfaceMatch = line.match(/export\s+interface\s+(\w+)/);
+        if (interfaceMatch) {
+          symbols.push({
+            name: interfaceMatch[1],
+            kind: 'interface',
+            signature: `interface ${interfaceMatch[1]}`,
+            calledBy: getSymbolCallers(interfaceMatch[1], filePath, allLinks, workspaceRoot)
+          });
+        }
+        
+        // Type aliases
+        const typeMatch = line.match(/export\s+type\s+(\w+)\s*=/);
+        if (typeMatch) {
+          symbols.push({
+            name: typeMatch[1],
+            kind: 'type',
+            signature: `type ${typeMatch[1]}`,
+            calledBy: getSymbolCallers(typeMatch[1], filePath, allLinks, workspaceRoot)
+          });
+        }
+        
+        // Consts
+        const constMatch = line.match(/export\s+const\s+(\w+)\s*[:=]/);
+        if (constMatch) {
+          symbols.push({
+            name: constMatch[1],
+            kind: 'const',
+            signature: null,
+            calledBy: getSymbolCallers(constMatch[1], filePath, allLinks, workspaceRoot)
+          });
+        }
+      }
+    }
+  } catch {
+    // Skip unreadable files
+  }
+  
+  return symbols;
 }
 
 /**
@@ -617,179 +907,22 @@ function getPatternGuidanceNote(rule: string): string | null {
 }
 
 // ============================================================================
-// code.md - Symbol Index with Relationships
+// context.md - The Flow (V3)
 // ============================================================================
 
 /**
- * Generate .aspect/code.md - symbol index (renamed from symbols.md)
+ * Generate .aspect/context.md - The Flow
  * 
- * Purpose: Help agents understand WHAT is defined WHERE and HOW symbols connect.
- * Answers: "Where is this function defined?" and "What calls this?"
+ * Purpose: Show how data/requests flow and which files work together.
+ * Answers: "What files are edited together?" and "How does data flow?"
+ * 
+ * Focus on:
+ * - Module clusters (co-imported files) - critical for co-location
+ * - External integrations
+ * - Flow patterns
+ * NO LINTING: No patterns to watch, no finding lists
  */
-async function generateCodeFile(
-  aspectCodeDir: vscode.Uri,
-  state: AspectCodeState,
-  workspaceRoot: vscode.Uri,
-  allLinks: DependencyLink[],
-  outputChannel: vscode.OutputChannel
-): Promise<void> {
-  let content = '# Code Index\n\n';
-  content += '_Functions, classes, and their relationships. Use before modifying symbols._\n\n';
-
-  const findings = state.s.findings;
-  
-  // KB-Enriching: Data Models section
-  const dataModels = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.DATA_MODEL);
-  
-  if (dataModels.length > 0) {
-    content += '## Data Models\n\n';
-    content += '_Core data structures and schemas. Understand these before modifying data handling._\n\n';
-    
-    // Group by model type
-    const ormModels = dataModels.filter(f => 
-      f.message.includes('ORM') || f.message.includes('Entity')
-    );
-    const dataClasses = dataModels.filter(f => 
-      f.message.includes('Data Class') || f.message.includes('dataclass') || 
-      f.message.includes('Pydantic') || f.message.includes('BaseModel')
-    );
-    const interfaces = dataModels.filter(f => 
-      f.message.includes('Interface') || f.message.includes('Type Alias')
-    );
-    const schemas = dataModels.filter(f => 
-      f.message.includes('Schema') || f.message.includes('Validator')
-    );
-    const other = dataModels.filter(f => 
-      !ormModels.includes(f) && !dataClasses.includes(f) && 
-      !interfaces.includes(f) && !schemas.includes(f)
-    );
-
-    if (ormModels.length > 0) {
-      content += '### ORM Models\n\n';
-      content += '| File | Model |\n';
-      content += '|------|-------|\n';
-      for (const model of ormModels.slice(0, 20)) {
-        const relPath = makeRelativePath(model.file, workspaceRoot.fsPath);
-        content += `| \`${relPath}\` | ${model.message.replace('Data model: ', '')} |\n`;
-      }
-      content += '\n';
-    }
-
-    if (dataClasses.length > 0) {
-      content += '### Data Classes\n\n';
-      content += '| File | Model |\n';
-      content += '|------|-------|\n';
-      for (const model of dataClasses.slice(0, 20)) {
-        const relPath = makeRelativePath(model.file, workspaceRoot.fsPath);
-        content += `| \`${relPath}\` | ${model.message.replace('Data model: ', '')} |\n`;
-      }
-      content += '\n';
-    }
-
-    if (interfaces.length > 0) {
-      content += '### TypeScript Interfaces & Types\n\n';
-      content += '| File | Type |\n';
-      content += '|------|------|\n';
-      for (const model of interfaces.slice(0, 20)) {
-        const relPath = makeRelativePath(model.file, workspaceRoot.fsPath);
-        content += `| \`${relPath}\` | ${model.message.replace('Data model: ', '')} |\n`;
-      }
-      content += '\n';
-    }
-
-    if (schemas.length > 0) {
-      content += '### Validation Schemas\n\n';
-      for (const model of schemas.slice(0, 15)) {
-        const relPath = makeRelativePath(model.file, workspaceRoot.fsPath);
-        content += `- \`${relPath}\`: ${model.message}\n`;
-      }
-      content += '\n';
-    }
-
-    if (other.length > 0) {
-      content += '### Other Data Structures\n\n';
-      for (const model of other.slice(0, 15)) {
-        const relPath = makeRelativePath(model.file, workspaceRoot.fsPath);
-        content += `- \`${relPath}\`: ${model.message}\n`;
-      }
-      content += '\n';
-    }
-  }
-
-  // Get relevant files (with findings or in dependency graph)
-  const relevantFiles = new Set<string>();
-  for (const finding of findings) {
-    relevantFiles.add(finding.file);
-  }
-  for (const link of allLinks) {
-    relevantFiles.add(link.source);
-    relevantFiles.add(link.target);
-  }
-
-  if (relevantFiles.size === 0) {
-    content += '_No files indexed. Run examination first._\n';
-  } else {
-    // Score files by importance
-    const fileScores = new Map<string, number>();
-    for (const file of relevantFiles) {
-      const findingCount = findings.filter(f => f.file === file).length;
-      const outLinks = allLinks.filter(l => l.source === file).length;
-      const inLinks = allLinks.filter(l => l.target === file).length;
-      fileScores.set(file, findingCount * 10 + outLinks + inLinks);
-    }
-
-    const sortedFiles = Array.from(relevantFiles)
-      .sort((a, b) => (fileScores.get(b) || 0) - (fileScores.get(a) || 0))
-      .slice(0, 50); // Top 50 files
-
-    content += `**Files indexed:** ${sortedFiles.length}\n\n`;
-
-    for (const file of sortedFiles) {
-      const relPath = makeRelativePath(file, workspaceRoot.fsPath);
-      const symbols = await extractFileSymbols(file, allLinks);
-
-      if (symbols.length === 0) continue;
-
-      content += `## \`${relPath}\`\n\n`;
-      content += '| Symbol | Kind | Calls | Called By |\n';
-      content += '|--------|------|-------|----------|\n';
-
-      for (const symbol of symbols.slice(0, 15)) {
-        const calls = symbol.callsInto.slice(0, 3).map(c => `\`${c}\``).join(', ') || '—';
-        const calledBy = symbol.calledBy.slice(0, 3).map(c => `\`${c}\``).join(', ') || '—';
-        content += `| \`${symbol.name}\` | ${symbol.kind} | ${calls} | ${calledBy} |\n`;
-      }
-
-      if (symbols.length > 15) {
-        content += `\n_+${symbols.length - 15} more symbols_\n`;
-      }
-      content += '\n';
-    }
-  }
-
-  content += `\n_Generated: ${new Date().toISOString()}_\n`;
-
-  const codeFile = vscode.Uri.joinPath(aspectCodeDir, 'code.md');
-  await vscode.workspace.fs.writeFile(codeFile, Buffer.from(content, 'utf-8'));
-  outputChannel.appendLine(`[KB] Generated code.md (${relevantFiles.size} files)`);
-}
-
-// ============================================================================
-// flows.md - Data Flows and Request Paths
-// ============================================================================
-
-/**
- * Generate .aspect/flows.md - data flows through the codebase
- * 
- * Purpose: Show agents HOW data/requests flow through the architecture.
- * Answers: "What happens when a request comes in?" and "Where should new code go?"
- * 
- * Design principles:
- * - Top N prioritization (most central, most risky)
- * - Group by module/feature, not flat lists
- * - Actionable: "Where should a new login route go?"
- */
-async function generateFlowsFile(
+async function generateContextFile(
   aspectCodeDir: vscode.Uri,
   state: AspectCodeState,
   workspaceRoot: vscode.Uri,
@@ -797,197 +930,85 @@ async function generateFlowsFile(
   allLinks: DependencyLink[],
   outputChannel: vscode.OutputChannel
 ): Promise<void> {
-  let content = '# Data Flows\n\n';
-  content += '_How data moves through the codebase. Use this to understand change impact and find the right place for new code._\n\n';
+  let content = '# Context\n\n';
+  content += '_Data flow and co-location context. Use to understand which files work together._\n\n';
 
-  if (allLinks.length === 0) {
+  // Filter links to only include app-to-app dependencies
+  const appLinks = allLinks.filter(l => 
+    classifyFile(l.source, workspaceRoot.fsPath) === 'app' &&
+    classifyFile(l.target, workspaceRoot.fsPath) === 'app'
+  );
+  const appFiles = files.filter(f => classifyFile(f, workspaceRoot.fsPath) === 'app');
+
+  if (appLinks.length === 0) {
     content += '_No dependency data available. Run examination first._\n';
   } else {
-    // Calculate centrality scores for all files
-    const centralityScores = calculateCentralityScores(allLinks);
-    
-    // 1. TOP CRITICAL FLOWS - Prioritized view
-    content += '## Critical Flows (Top 10)\n\n';
-    content += '_Most central modules ranked by connectivity and risk. Changes here affect many files._\n\n';
-    
+    // ============================================================
+    // MODULE CLUSTERS (critical for co-location context)
+    // ============================================================
+    const clusters = findModuleClusters(appLinks, workspaceRoot.fsPath);
+    if (clusters.length > 0) {
+      content += '## Module Clusters\n\n';
+      content += '_Files commonly edited/imported together. Use for feature co-location._\n\n';
+      
+      for (const cluster of clusters.slice(0, 8)) {
+        content += `### ${cluster.name}\n\n`;
+        for (const file of cluster.files.slice(0, 6)) {
+          content += `- \`${file}\`\n`;
+        }
+        if (cluster.files.length > 6) {
+          content += `- _...and ${cluster.files.length - 6} more_\n`;
+        }
+        content += '\n';
+      }
+    }
+
+    // ============================================================
+    // CRITICAL FLOWS (top central modules)
+    // ============================================================
+    const centralityScores = calculateCentralityScores(appLinks);
     const topModules = Array.from(centralityScores.entries())
+      .filter(([file]) => isStructuralAppFile(file, workspaceRoot.fsPath))
       .sort((a, b) => b[1].score - a[1].score)
-      .slice(0, 10);
+      .slice(0, 8);
     
     if (topModules.length > 0) {
-      content += '| Rank | Module | Callers | Dependencies | Risk |\n';
-      content += '|------|--------|---------|--------------|------|\n';
-      for (let i = 0; i < topModules.length; i++) {
-        const [file, stats] = topModules[i];
+      content += '## Critical Flows\n\n';
+      content += '_Most central modules by connectivity. Changes here propagate widely._\n\n';
+      
+      content += '| Module | Callers | Dependencies |\n';
+      content += '|--------|---------|--------------|n';
+      for (const [file, stats] of topModules) {
         const relPath = makeRelativePath(file, workspaceRoot.fsPath);
-        const riskLevel = stats.score > 20 ? '🔴 High' : stats.score > 10 ? '🟡 Medium' : '🟢 Low';
-        content += `| ${i + 1} | \`${relPath}\` | ${stats.inDegree} | ${stats.outDegree} | ${riskLevel} |\n`;
+        content += `| \`${relPath}\` | ${stats.inDegree} | ${stats.outDegree} |\n`;
       }
       content += '\n';
-      
-      // Show detailed info for top 3 modules
-      content += '### Hub Details\n\n';
-      for (let i = 0; i < Math.min(3, topModules.length); i++) {
-        const [topFile, topStats] = topModules[i];
-        const topRelPath = makeRelativePath(topFile, workspaceRoot.fsPath);
-        const topCallers = allLinks.filter(l => l.target === topFile && l.source !== topFile);
-        const topDeps = allLinks.filter(l => l.source === topFile && l.target !== topFile);
-        
-        content += `**${i + 1}. \`${topRelPath}\`** (${topStats.inDegree} callers, ${topStats.outDegree} deps)\n\n`;
-        
-        if (topCallers.length > 0) {
-          content += 'Called by:\n';
-          for (const caller of topCallers.slice(0, 5)) {
-            const callerRel = makeRelativePath(caller.source, workspaceRoot.fsPath);
-            content += `- \`${callerRel}\`\n`;
-          }
-          if (topCallers.length > 5) {
-            content += `- _...and ${topCallers.length - 5} more_\n`;
-          }
-          content += '\n';
-        }
-        
-        if (topDeps.length > 0) {
-          content += 'Depends on:\n';
-          for (const dep of topDeps.slice(0, 5)) {
-            const depRel = makeRelativePath(dep.target, workspaceRoot.fsPath);
-            content += `- \`${depRel}\`\n`;
-          }
-          if (topDeps.length > 5) {
-            content += `- _...and ${topDeps.length - 5} more_\n`;
-          }
-          content += '\n';
-        }
-      }
-    } else {
-      content += '_No high-connectivity modules detected._\n\n';
     }
 
-    // 2. DEPENDENCY CHAINS - Show multi-hop flows
-    content += '## Dependency Chains\n\n';
-    content += '_How modules chain together. Useful for understanding transitive impact._\n\n';
-    
-    const chains = findDependencyChains(allLinks, workspaceRoot.fsPath, 3);
+    // ============================================================
+    // DEPENDENCY CHAINS
+    // ============================================================
+    const chains = findDependencyChains(appLinks, workspaceRoot.fsPath, 3);
     if (chains.length > 0) {
-      for (const chain of chains.slice(0, 5)) {
+      content += '## Dependency Chains\n\n';
+      content += '_How modules chain together. Useful for tracing data flow._\n\n';
+      
+      for (const chain of chains.slice(0, 4)) {
         content += `\`\`\`\n${chain}\n\`\`\`\n\n`;
       }
-    } else {
-      content += '_No significant dependency chains detected._\n\n';
     }
 
-    // 3. ENTRY POINTS - Grouped by module/prefix
-    const ruleEntryPoints = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.ENTRY_POINT);
-    const entryPoints = detectEntryPoints(files, workspaceRoot.fsPath);
-    
-    if (ruleEntryPoints.length > 0 || entryPoints.length > 0) {
-      content += '## Entry Points\n\n';
-      content += '_Where requests enter the system. Group new endpoints with related ones._\n\n';
-      
-      // Group HTTP handlers by route prefix/module
-      const httpHandlers = ruleEntryPoints.filter(f => f.message.includes('HTTP'));
-      
-      if (httpHandlers.length > 0) {
-        const groupedRoutes = groupEndpointsByModule(httpHandlers, workspaceRoot.fsPath);
-        
-        content += '### API Routes\n\n';
-        for (const [moduleName, endpoints] of Object.entries(groupedRoutes).slice(0, 10)) {
-          const methods = endpoints.map(e => {
-            const match = e.message.match(/(GET|POST|PUT|DELETE|PATCH)/);
-            return match ? match[1] : '?';
-          });
-          const methodSummary = [...new Set(methods)].join('/');
-          
-          content += `**${moduleName}** (${endpoints.length} endpoints, ${methodSummary})\n`;
-          
-          // Show first 5 endpoints as examples
-          for (const ep of endpoints.slice(0, 5)) {
-            const handler = ep.message.replace('HTTP entry point: ', '').replace(/^(GET|POST|PUT|DELETE|PATCH)\s+/, '');
-            content += `- ${handler}\n`;
-          }
-          if (endpoints.length > 5) {
-            content += `- _...and ${endpoints.length - 5} more_\n`;
-          }
-          content += '\n';
-        }
-        
-        // Quick reference for adding new routes
-        if (Object.keys(groupedRoutes).length > 0) {
-          content += '> **Adding a new route?** Find the module above that matches your feature.\n\n';
-        }
-      }
-      
-      // Other entry points (CLI, events, main)
-      const cliCommands = ruleEntryPoints.filter(f => f.message.includes('CLI'));
-      const eventListeners = ruleEntryPoints.filter(f => f.message.includes('Event') || f.message.includes('listener'));
-      const mainFunctions = ruleEntryPoints.filter(f => f.message.includes('Main'));
-      
-      if (cliCommands.length > 0) {
-        content += '### CLI Commands\n\n';
-        for (const entry of cliCommands.slice(0, 8)) {
-          const relPath = makeRelativePath(entry.file, workspaceRoot.fsPath);
-          content += `- \`${relPath}\`: ${entry.message}\n`;
-        }
-        content += '\n';
-      }
-      
-      if (eventListeners.length > 0) {
-        content += '### Event Handlers\n\n';
-        for (const entry of eventListeners.slice(0, 8)) {
-          const relPath = makeRelativePath(entry.file, workspaceRoot.fsPath);
-          content += `- \`${relPath}\`: ${entry.message}\n`;
-        }
-        content += '\n';
-      }
-      
-      if (mainFunctions.length > 0) {
-        content += '### Application Entry\n\n';
-        for (const entry of mainFunctions.slice(0, 5)) {
-          const relPath = makeRelativePath(entry.file, workspaceRoot.fsPath);
-          content += `- \`${relPath}\`: ${entry.message}\n`;
-        }
-        content += '\n';
-      }
-    }
-
-    // 4. DATA MODELS
-    const dataModels = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.DATA_MODEL);
-    if (dataModels.length > 0) {
-      content += '## Data Models\n\n';
-      content += '_Core data structures. Check these when adding new fields or relationships._\n\n';
-      
-      // Group by file
-      const modelsByFile = new Map<string, typeof dataModels>();
-      for (const model of dataModels) {
-        const relPath = makeRelativePath(model.file, workspaceRoot.fsPath);
-        if (!modelsByFile.has(relPath)) {
-          modelsByFile.set(relPath, []);
-        }
-        modelsByFile.get(relPath)!.push(model);
-      }
-      
-      for (const [filePath, models] of Array.from(modelsByFile.entries()).slice(0, 8)) {
-        content += `**\`${filePath}\`**\n`;
-        for (const model of models.slice(0, 5)) {
-          // Extract model name from message
-          const modelInfo = model.message.replace('Data model: ', '').replace('ORM model: ', '');
-          content += `- ${modelInfo}\n`;
-        }
-        if (models.length > 5) {
-          content += `- _...and ${models.length - 5} more_\n`;
-        }
-        content += '\n';
-      }
-    }
-
-    // 5. EXTERNAL INTEGRATIONS - Grouped by type
-    const externalIntegrations = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.EXTERNAL_INTEGRATION);
+    // ============================================================
+    // EXTERNAL INTEGRATIONS
+    // ============================================================
+    const externalIntegrations = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.EXTERNAL_INTEGRATION)
+      .filter(f => classifyFile(f.file, workspaceRoot.fsPath) === 'app');
     
     if (externalIntegrations.length > 0) {
       content += '## External Integrations\n\n';
-      content += '_Connections to external services. Check these when debugging connectivity issues._\n\n';
+      content += '_Connections to external services._\n\n';
       
-      // Group by type with counts
+      // Group by type
       const databases = externalIntegrations.filter(f => 
         f.message.includes('Database') || f.message.includes('DB') || f.message.includes('SQL')
       );
@@ -1001,31 +1022,9 @@ async function generateFlowsFile(
         !databases.includes(f) && !httpClients.includes(f) && !queues.includes(f)
       );
 
-      // Summary table
-      content += '| Type | Count | Primary Location |\n';
-      content += '|------|-------|------------------|\n';
       if (databases.length > 0) {
-        const dbLoc = databases[0] ? makeRelativePath(databases[0].file, workspaceRoot.fsPath) : '-';
-        content += `| Database | ${databases.length} | \`${dbLoc}\` |\n`;
-      }
-      if (httpClients.length > 0) {
-        const httpLoc = httpClients[0] ? makeRelativePath(httpClients[0].file, workspaceRoot.fsPath) : '-';
-        content += `| HTTP/API | ${httpClients.length} | \`${httpLoc}\` |\n`;
-      }
-      if (queues.length > 0) {
-        const qLoc = queues[0] ? makeRelativePath(queues[0].file, workspaceRoot.fsPath) : '-';
-        content += `| Message Queue | ${queues.length} | \`${qLoc}\` |\n`;
-      }
-      if (other.length > 0) {
-        const otherLoc = other[0] ? makeRelativePath(other[0].file, workspaceRoot.fsPath) : '-';
-        content += `| Other | ${other.length} | \`${otherLoc}\` |\n`;
-      }
-      content += '\n';
-      
-      // Show details for each integration type
-      if (databases.length > 0) {
-        content += '### Database Connections\n\n';
-        for (const db of databases.slice(0, 5)) {
+        content += '**Database:**\n';
+        for (const db of databases.slice(0, 3)) {
           const relPath = makeRelativePath(db.file, workspaceRoot.fsPath);
           content += `- \`${relPath}\`: ${db.message}\n`;
         }
@@ -1033,17 +1032,37 @@ async function generateFlowsFile(
       }
       
       if (httpClients.length > 0) {
-        content += '### HTTP/API Clients\n\n';
-        for (const http of httpClients.slice(0, 5)) {
+        content += '**HTTP/API Clients:**\n';
+        for (const http of httpClients.slice(0, 3)) {
           const relPath = makeRelativePath(http.file, workspaceRoot.fsPath);
           content += `- \`${relPath}\`: ${http.message}\n`;
         }
         content += '\n';
       }
+      
+      if (queues.length > 0) {
+        content += '**Message Queues:**\n';
+        for (const q of queues.slice(0, 3)) {
+          const relPath = makeRelativePath(q.file, workspaceRoot.fsPath);
+          content += `- \`${relPath}\`: ${q.message}\n`;
+        }
+        content += '\n';
+      }
+      
+      if (other.length > 0) {
+        content += '**Other:**\n';
+        for (const o of other.slice(0, 3)) {
+          const relPath = makeRelativePath(o.file, workspaceRoot.fsPath);
+          content += `- \`${relPath}\`: ${o.message}\n`;
+        }
+        content += '\n';
+      }
     }
 
-    // 6. ARCHITECTURAL LAYERS
-    const layerFlows = detectLayerFlows(files, allLinks, workspaceRoot.fsPath);
+    // ============================================================
+    // REQUEST FLOW PATTERN
+    // ============================================================
+    const layerFlows = detectLayerFlows(appFiles, appLinks, workspaceRoot.fsPath);
     if (layerFlows.length > 0) {
       content += '## Request Flow Pattern\n\n';
       content += '_How a typical request flows through the architecture._\n\n';
@@ -1054,72 +1073,24 @@ async function generateFlowsFile(
       }
     }
 
-    // 7. CIRCULAR DEPENDENCIES - Only real cycles, not self-refs
-    const circularLinks = allLinks.filter(l => 
-      l.type === 'circular' && l.source !== l.target
-    );
-    
-    if (circularLinks.length > 0) {
-      content += '## ⚠️ Circular Dependencies\n\n';
-      content += '_Bidirectional imports that may cause issues. Consider refactoring._\n\n';
-      
-      const processedPairs = new Set<string>();
-      let cycleCount = 0;
-      
-      for (const link of circularLinks) {
-        if (cycleCount >= 8) break;
-        
-        const pairKey = [link.source, link.target].sort().join('::');
-        if (processedPairs.has(pairKey)) continue;
-        processedPairs.add(pairKey);
-        
-        const sourceRel = makeRelativePath(link.source, workspaceRoot.fsPath);
-        const targetRel = makeRelativePath(link.target, workspaceRoot.fsPath);
-        
-        content += `- \`${sourceRel}\` ↔ \`${targetRel}\`\n`;
-        cycleCount++;
-      }
-      if (circularLinks.length > 8) {
-        content += `\n_...and ${circularLinks.length - 8} more circular dependencies_\n`;
-      }
-      content += '\n';
-    }
-
-    // 8. MODULE CLUSTERS - Files that are often imported together
-    const clusters = findModuleClusters(allLinks, workspaceRoot.fsPath);
-    if (clusters.length > 0) {
-      content += '## Module Clusters\n\n';
-      content += '_Files that are commonly used together. Useful for understanding feature boundaries._\n\n';
-      
-      for (const cluster of clusters.slice(0, 5)) {
-        content += `**${cluster.name}** (${cluster.files.length} files)\n`;
-        for (const file of cluster.files.slice(0, 4)) {
-          content += `- \`${file}\`\n`;
-        }
-        if (cluster.files.length > 4) {
-          content += `- _...and ${cluster.files.length - 4} more_\n`;
-        }
-        content += '\n';
-      }
-    }
-
-    // 9. QUICK REFERENCE - Actionable guidance
+    // ============================================================
+    // QUICK REFERENCE
+    // ============================================================
+    content += '---\n\n';
     content += '## Quick Reference\n\n';
-    content += '**"Where should a new API route go?"**\n';
-    content += '→ Check Entry Points > API Routes above. Add to the matching module.\n\n';
-    content += '**"What happens when X endpoint is called?"**\n';
-    content += '→ Find it in Entry Points, then trace through Critical Flows to see dependencies.\n\n';
-    content += '**"Is it safe to change this file?"**\n';
-    content += '→ Check if it appears in Critical Flows. High-rank modules need extra care.\n\n';
     content += '**"What files work together for feature X?"**\n';
-    content += '→ Check Module Clusters to see commonly co-imported files.\n';
+    content += '→ Check Module Clusters above.\n\n';
+    content += '**"Where does data flow from this endpoint?"**\n';
+    content += '→ Check Critical Flows and Dependency Chains.\n\n';
+    content += '**"Where are external connections?"**\n';
+    content += '→ Check External Integrations.\n';
   }
 
-  content += `\n---\n_Generated: ${new Date().toISOString()}_\n`;
+  content += `\n\n_Generated: ${new Date().toISOString()}_\n`;
 
-  const flowsFile = vscode.Uri.joinPath(aspectCodeDir, 'flows.md');
-  await vscode.workspace.fs.writeFile(flowsFile, Buffer.from(content, 'utf-8'));
-  outputChannel.appendLine(`[KB] Generated flows.md`);
+  const contextFile = vscode.Uri.joinPath(aspectCodeDir, 'context.md');
+  await vscode.workspace.fs.writeFile(contextFile, Buffer.from(content, 'utf-8'));
+  outputChannel.appendLine(`[KB] Generated context.md`);
 }
 
 /**
@@ -1403,140 +1374,6 @@ function findModuleClusters(
   }
   
   return clusters;
-}
-
-// ============================================================================
-// conventions.md - Naming Patterns and Styles
-// ============================================================================
-
-/**
- * Generate .aspect/conventions.md - auto-detected patterns
- * 
- * Purpose: Show agents HOW code is written in this project.
- * Answers: "What naming style should I use?" and "How are imports organized?"
- */
-async function generateConventionsFile(
-  aspectCodeDir: vscode.Uri,
-  state: AspectCodeState,
-  workspaceRoot: vscode.Uri,
-  files: string[],
-  outputChannel: vscode.OutputChannel
-): Promise<void> {
-  let content = '# Conventions\n\n';
-  content += '_Naming patterns and styles detected in this codebase. Follow these for consistency._\n\n';
-
-  if (files.length === 0) {
-    content += '_No source files found._\n';
-  } else {
-    // Detect file naming conventions
-    const fileNaming = analyzeFileNaming(files, workspaceRoot.fsPath);
-    
-    content += '## File Naming\n\n';
-    if (fileNaming.patterns.length > 0) {
-      content += '| Pattern | Example | Count |\n';
-      content += '|---------|---------|-------|\n';
-      for (const pattern of fileNaming.patterns.slice(0, 8)) {
-        content += `| ${pattern.style} | \`${pattern.example}\` | ${pattern.count} |\n`;
-      }
-      content += '\n';
-      
-      if (fileNaming.dominant) {
-        content += `**Use:** ${fileNaming.dominant} for new files.\n\n`;
-      }
-    } else {
-      content += '_No clear pattern detected._\n\n';
-    }
-
-    // Detect import patterns
-    const importPatterns = await analyzeImportPatterns(files);
-    
-    if (importPatterns.length > 0) {
-      content += '## Import Conventions\n\n';
-      content += '_How imports are typically organized._\n\n';
-      
-      for (const pattern of importPatterns) {
-        content += `**${pattern.language}:**\n`;
-        content += '```' + pattern.language.toLowerCase() + '\n';
-        content += pattern.example;
-        content += '\n```\n\n';
-      }
-    }
-
-    // Detect function naming patterns
-    const funcNaming = await analyzeFunctionNaming(files);
-    
-    if (funcNaming.patterns.length > 0) {
-      content += '## Function Naming\n\n';
-      content += '| Pattern | Example | Usage |\n';
-      content += '|---------|---------|-------|\n';
-      for (const pattern of funcNaming.patterns.slice(0, 10)) {
-        content += `| ${pattern.pattern} | \`${pattern.example}\` | ${pattern.usage} |\n`;
-      }
-      content += '\n';
-    }
-
-    // Detect class naming patterns
-    const classNaming = await analyzeClassNaming(files);
-    
-    if (classNaming.patterns.length > 0) {
-      content += '## Class Naming\n\n';
-      content += '| Pattern | Example | Usage |\n';
-      content += '|---------|---------|-------|\n';
-      for (const pattern of classNaming.patterns.slice(0, 8)) {
-        content += `| ${pattern.pattern} | \`${pattern.example}\` | ${pattern.usage} |\n`;
-      }
-      content += '\n';
-    }
-
-    // Detect framework patterns
-    const frameworkPatterns = detectFrameworkPatterns(files, workspaceRoot.fsPath);
-    
-    if (frameworkPatterns.length > 0) {
-      content += '## Framework Patterns\n\n';
-      content += '_Detected frameworks and their common patterns._\n\n';
-      
-      for (const fw of frameworkPatterns) {
-        content += `### ${fw.name}\n\n`;
-        for (const pattern of fw.patterns) {
-          content += `- ${pattern}\n`;
-        }
-        content += '\n';
-      }
-    }
-
-    // Test naming conventions
-    const testNaming = analyzeTestNaming(files, workspaceRoot.fsPath);
-    
-    if (testNaming.patterns.length > 0) {
-      content += '## Test Conventions\n\n';
-      content += '| Pattern | Example |\n';
-      content += '|---------|--------|\n';
-      for (const pattern of testNaming.patterns) {
-        content += `| ${pattern.pattern} | \`${pattern.example}\` |\n`;
-      }
-      content += '\n';
-    }
-
-    // Summary guidelines
-    content += '## Quick Reference\n\n';
-    content += '**When adding new code:**\n';
-    if (fileNaming.dominant) {
-      content += `- Name files using ${fileNaming.dominant}\n`;
-    }
-    if (funcNaming.patterns.length > 0) {
-      content += `- Name functions like \`${funcNaming.patterns[0].example}\`\n`;
-    }
-    if (classNaming.patterns.length > 0) {
-      content += `- Name classes like \`${classNaming.patterns[0].example}\`\n`;
-    }
-    content += '- Follow existing import organization\n';
-  }
-
-  content += `\n_Generated: ${new Date().toISOString()}_\n`;
-
-  const conventionsFile = vscode.Uri.joinPath(aspectCodeDir, 'conventions.md');
-  await vscode.workspace.fs.writeFile(conventionsFile, Buffer.from(content, 'utf-8'));
-  outputChannel.appendLine(`[KB] Generated conventions.md`);
 }
 
 /**
@@ -1852,8 +1689,20 @@ function detectFrameworkPatterns(files: string[], workspaceRoot: string): Array<
     });
   }
   
-  // Django detection
-  if (fileNames.some(f => f === 'models.py' || f === 'views.py' || f === 'urls.py')) {
+  // Django detection (conservative - require multiple Django-specific signals)
+  const baseNames = new Set(fileNames);
+  const hasModelsPy = baseNames.has('models.py');
+  const hasViewsPy = baseNames.has('views.py');
+  const hasUrlsPy = baseNames.has('urls.py');
+  const hasSettingsPy = baseNames.has('settings.py');
+  const hasManagePy = baseNames.has('manage.py');
+
+  // Strong project signal: manage.py + (settings.py OR urls.py)
+  const strongProjectSignal = hasManagePy && (hasSettingsPy || hasUrlsPy);
+  // Strong app signal: models.py + (views.py OR urls.py)
+  const strongAppSignal = hasModelsPy && (hasViewsPy || hasUrlsPy);
+
+  if (strongProjectSignal || strongAppSignal) {
     frameworks.push({
       name: 'Django',
       patterns: [
@@ -1930,9 +1779,106 @@ function getFixTemplate(rule: string): string | null {
 // Helper Functions
 // ============================================================================
 
+// File classification for project-centric KB generation
+type FileKind = 'app' | 'test' | 'third_party';
+
+/**
+ * Classify a file as app code, test code, or third-party/environment.
+ * Used to focus KB on project code and avoid polluting architectural views
+ * with virtualenv, node_modules, build artifacts, or test files.
+ */
+function classifyFile(absPathOrRel: string, workspaceRoot: string): FileKind {
+  const rel = makeRelativePath(absPathOrRel, workspaceRoot).toLowerCase().replace(/\\/g, '/');
+
+  // Third-party / environment / build directories
+  const thirdPartyPatterns = [
+    '/.venv/', '/venv/', '/env/', '/.tox/', '/site-packages/',
+    '/node_modules/', '/__pycache__/', '/.pytest_cache/', '/.mypy_cache/',
+    '/dist/', '/build/', '/.next/', '/.turbo/', '/coverage/', '/.cache/',
+    '/dist-packages/', '/.git/', '/.hg/',
+  ];
+  // Also check if path starts with these (for top-level matches)
+  const thirdPartyPrefixes = [
+    '.venv/', 'venv/', 'env/', '.tox/', 'site-packages/',
+    'node_modules/', '__pycache__/', '.pytest_cache/', '.mypy_cache/',
+    'dist/', 'build/', '.next/', '.turbo/', 'coverage/', '.cache/',
+    'dist-packages/', '.git/', '.hg/',
+  ];
+  
+  if (thirdPartyPatterns.some(p => rel.includes(p)) ||
+      thirdPartyPrefixes.some(p => rel.startsWith(p))) {
+    return 'third_party';
+  }
+
+  // Test files - by directory or filename
+  const parts = rel.split('/');
+  const filename = parts[parts.length - 1] || '';
+  if (
+    parts.some(p => p === 'test' || p === 'tests' || p === 'spec' || p === '__tests__') ||
+    filename.startsWith('test_') ||
+    filename.endsWith('_test.py') ||
+    filename.endsWith('.test.ts') ||
+    filename.endsWith('.test.tsx') ||
+    filename.endsWith('.test.js') ||
+    filename.endsWith('.test.jsx') ||
+    filename.endsWith('.spec.ts') ||
+    filename.endsWith('.spec.tsx') ||
+    filename.endsWith('.spec.js') ||
+    filename.endsWith('.spec.jsx') ||
+    filename.includes('.spec.') ||
+    filename.includes('.test.')
+  ) {
+    return 'test';
+  }
+
+  return 'app';
+}
+
+/**
+ * Check if a file is "structural app code" - runtime/domain modules,
+ * not migrations, hooks, or generated tooling.
+ */
+function isStructuralAppFile(file: string, workspaceRoot: string): boolean {
+  if (classifyFile(file, workspaceRoot) !== 'app') return false;
+
+  const rel = makeRelativePath(file, workspaceRoot).toLowerCase().replace(/\\/g, '/');
+
+  // Exclude migrations / Alembic
+  if (rel.includes('/alembic/') || rel.includes('/migrations/')) {
+    return false;
+  }
+
+  // Exclude project generation hooks / scaffolding scripts
+  if (rel.includes('/hooks/')) {
+    return false;
+  }
+
+  // Exclude generated client/config tooling
+  const basename = path.basename(rel);
+  if (
+    basename === 'playwright.config.ts' ||
+    basename === 'openapi-ts.config.ts' ||
+    basename === 'vite.config.ts' ||
+    basename === 'vitest.config.ts' ||
+    basename === 'jest.config.ts' ||
+    basename === 'jest.config.js' ||
+    basename.endsWith('.gen.ts') ||
+    basename.endsWith('.gen.js') ||
+    basename.endsWith('.gen.tsx') ||
+    basename.endsWith('.gen.jsx') ||
+    basename.endsWith('sdk.gen.ts') ||
+    basename.endsWith('types.gen.ts')
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
 async function extractFileSymbols(
   filePath: string,
-  allLinks: DependencyLink[]
+  allLinks: DependencyLink[],
+  workspaceRoot?: string
 ): Promise<Array<{ name: string; kind: string; callsInto: string[]; calledBy: string[] }>> {
   const symbols: Array<{ name: string; kind: string; callsInto: string[]; calledBy: string[] }> = [];
   
@@ -1950,8 +1896,8 @@ async function extractFileSymbols(
           symbols.push({
             name: funcMatch[1],
             kind: 'function',
-            callsInto: getSymbolDependencies(filePath, allLinks),
-            calledBy: getSymbolCallers(funcMatch[1], filePath, allLinks)
+            callsInto: getSymbolDependencies(filePath, allLinks, workspaceRoot),
+            calledBy: getSymbolCallers(funcMatch[1], filePath, allLinks, workspaceRoot)
           });
         }
         
@@ -1960,8 +1906,8 @@ async function extractFileSymbols(
           symbols.push({
             name: classMatch[1],
             kind: 'class',
-            callsInto: getSymbolDependencies(filePath, allLinks),
-            calledBy: getSymbolCallers(classMatch[1], filePath, allLinks)
+            callsInto: getSymbolDependencies(filePath, allLinks, workspaceRoot),
+            calledBy: getSymbolCallers(classMatch[1], filePath, allLinks, workspaceRoot)
           });
         }
       }
@@ -1972,8 +1918,8 @@ async function extractFileSymbols(
           symbols.push({
             name: funcMatch[1],
             kind: 'function',
-            callsInto: getSymbolDependencies(filePath, allLinks),
-            calledBy: getSymbolCallers(funcMatch[1], filePath, allLinks)
+            callsInto: getSymbolDependencies(filePath, allLinks, workspaceRoot),
+            calledBy: getSymbolCallers(funcMatch[1], filePath, allLinks, workspaceRoot)
           });
         }
         
@@ -1982,8 +1928,8 @@ async function extractFileSymbols(
           symbols.push({
             name: classMatch[1],
             kind: 'class',
-            callsInto: getSymbolDependencies(filePath, allLinks),
-            calledBy: getSymbolCallers(classMatch[1], filePath, allLinks)
+            callsInto: getSymbolDependencies(filePath, allLinks, workspaceRoot),
+            calledBy: getSymbolCallers(classMatch[1], filePath, allLinks, workspaceRoot)
           });
         }
         
@@ -1992,8 +1938,8 @@ async function extractFileSymbols(
           symbols.push({
             name: constMatch[1],
             kind: 'const',
-            callsInto: getSymbolDependencies(filePath, allLinks),
-            calledBy: getSymbolCallers(constMatch[1], filePath, allLinks)
+            callsInto: getSymbolDependencies(filePath, allLinks, workspaceRoot),
+            calledBy: getSymbolCallers(constMatch[1], filePath, allLinks, workspaceRoot)
           });
         }
       }
@@ -2005,9 +1951,11 @@ async function extractFileSymbols(
   return symbols;
 }
 
-function getSymbolDependencies(filePath: string, allLinks: DependencyLink[]): string[] {
+function getSymbolDependencies(filePath: string, allLinks: DependencyLink[], workspaceRoot?: string): string[] {
   const deps = new Set<string>();
   for (const link of allLinks.filter(l => l.source === filePath)) {
+    // Filter out third-party and test files from dependencies
+    if (workspaceRoot && classifyFile(link.target, workspaceRoot) !== 'app') continue;
     for (const symbol of link.symbols) {
       deps.add(symbol);
     }
@@ -2015,9 +1963,14 @@ function getSymbolDependencies(filePath: string, allLinks: DependencyLink[]): st
   return Array.from(deps);
 }
 
-function getSymbolCallers(symbolName: string, filePath: string, allLinks: DependencyLink[]): string[] {
+function getSymbolCallers(symbolName: string, filePath: string, allLinks: DependencyLink[], workspaceRoot?: string): string[] {
   return allLinks
-    .filter(l => l.target === filePath && l.symbols.includes(symbolName))
+    .filter(l => {
+      if (l.target !== filePath || !l.symbols.includes(symbolName)) return false;
+      // Filter out third-party and test files from callers
+      if (workspaceRoot && classifyFile(l.source, workspaceRoot) !== 'app') return false;
+      return true;
+    })
     .slice(0, 5)
     .map(l => path.basename(l.source, path.extname(l.source)));
 }
@@ -2159,11 +2112,13 @@ async function getDetailedDependencyData(
 
 async function discoverWorkspaceFiles(workspaceRoot: vscode.Uri): Promise<string[]> {
   const files: string[] = [];
-  const extensions = ['.py', '.ts', '.tsx', '.js', '.jsx', '.java', '.cs', '.cpp', '.c'];
+  const extensions = ['.py', '.ts', '.tsx', '.js', '.jsx', '.java', '.cs', '.cpp', '.c', '.go', '.rs'];
 
   try {
     const pattern = new vscode.RelativePattern(workspaceRoot, '**/*');
-    const uris = await vscode.workspace.findFiles(pattern, '**/node_modules/**', 500);
+    // Exclude common environment, dependency, and build directories
+    const exclude = '{**/node_modules/**,**/.venv/**,**/venv/**,**/env/**,**/site-packages/**,**/__pycache__/**,**/.tox/**,**/.pytest_cache/**,**/.mypy_cache/**,**/dist/**,**/build/**,**/.next/**,**/.turbo/**,**/coverage/**,**/.cache/**,**/dist-packages/**,**/.git/**,**/.hg/**}';
+    const uris = await vscode.workspace.findFiles(pattern, exclude, 1000);
 
     for (const uri of uris) {
       const ext = path.extname(uri.fsPath).toLowerCase();
@@ -2185,6 +2140,8 @@ function makeRelativePath(absPath: string, workspaceRoot: string): string {
   return path.basename(absPath);
 }
 
+// ============================================================================
+// File Classification - Project vs Test vs Third-Party
 // ============================================================================
 // ALIGNMENTS.json - Issue Tracking & Resolution Log (in workspace root)
 // ============================================================================

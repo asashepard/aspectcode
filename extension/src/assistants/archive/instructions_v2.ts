@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { AspectCodeState } from '../state';
 import { ScoreResult } from '../scoring/scoreEngine';
-import { generateKnowledgeBase } from './kb';
+import { generateKnowledgeBase } from './kb_v2';
 
 const ASPECT_CODE_START = '<!-- ASPECT_CODE_START -->';
 const ASPECT_CODE_END = '<!-- ASPECT_CODE_END -->';
@@ -15,15 +15,16 @@ const INTRO_BLOCK = `
 
 | File | Purpose |
 |------|---------|  
-| \`architecture.md\` | **Read first.** High-risk hubs, directory layout, entry points—the "Do Not Break" zones |
-| \`map.md\` | Data models with signatures, symbol index, naming conventions |
-| \`context.md\` | Module clusters (co-edited files), external integrations, data flow paths |
+| \`structure.md\` | Directory layout, hub modules, circular dependencies |
+| \`awareness.md\` | Supplementary context on high-impact files and patterns to watch |
+| \`code.md\` | Data models + function/class index with call relationships |
+| \`flows.md\` | Entry points, external integrations, and data flow paths |
+| \`conventions.md\` | Naming patterns, import styles, framework idioms |
 
 **Key architectural intelligence:**
-- **High-Risk Hubs** in \`architecture.md\`: Files with many dependents—changes here ripple widely
-- **Entry Points** in \`architecture.md\`: HTTP handlers, CLI commands, event listeners
-- **External Integrations** in \`context.md\`: API clients, database connections, message queues
-- **Data Models** in \`map.md\`: ORM models, dataclasses, TypeScript interfaces with signatures
+- **Entry Points** in \`flows.md\`: HTTP handlers, CLI commands, event listeners
+- **External Integrations** in \`flows.md\`: API clients, database connections, message queues
+- **Data Models** in \`code.md\`: ORM models, dataclasses, TypeScript interfaces
 
 Read the relevant KB files **before** making multi-file changes.
 `.trim();
@@ -33,14 +34,14 @@ const GOLDEN_RULES = `
 
 1. **Read the KB as a map, not a checklist.** Use \`.aspect/*.md\` files to understand architecture, not as a to-do list.
 2. **Read before you write.** Open the relevant KB files before multi-file edits.
-3. **Check architecture first.** Review \`architecture.md\` to understand high-risk zones before coding.
+3. **Check structure first.** Understand the codebase architecture before coding.
 4. **Think step-by-step.** Break complex tasks into smaller steps; reason through each before coding.
 5. **Prefer minimal, local changes.** Small patches are safer than large refactors, especially in hub files.
 6. **Never truncate code.** Don't use placeholders like \`// ...rest\` or \`# existing code...\`. Provide complete implementations.
 7. **Don't touch tests, migrations, or third-party code** unless the user explicitly asks you to.
-8. **Never remove referenced logic.** If a symbol appears in \`map.md\`, check all callers before deleting.
-9. **Understand blast radius.** Use \`context.md\` and \`map.md\` to trace relationships before refactors.
-10. **Follow naming patterns in map.md.** Match the project's existing naming patterns and import styles.
+8. **Never remove referenced logic.** If a symbol appears in \`code.md\` or \`flows.md\`, check all callers before deleting.
+9. **Understand blast radius.** Use \`flows.md\` and \`code.md\` to trace call chains before refactors.
+10. **Follow conventions.md.** Match the project's existing naming patterns and import styles.
 11. **When unsure, go small.** Propose a minimal, reversible change instead of a sweeping refactor.
 `.trim();
 
@@ -48,12 +49,13 @@ const WORKFLOW_STEPS = `
 ## Recommended Workflow
 
 1. **Understand the task.** Parse requirements; note which files or endpoints are involved.
-2. **Check architecture.** Open \`architecture.md\` → identify high-risk hubs and entry points.
-3. **Find relevant code.** Open \`map.md\` → locate data models, symbols, and naming conventions.
-4. **Understand relationships.** Open \`context.md\` → see module clusters (co-edited files) and integrations.
-5. **Trace impact.** Review "Called by" in \`map.md\` to gauge the blast radius of changes.
-6. **Gather evidence.** If behavior is unclear, add targeted logging or traces to confirm assumptions.
-7. **Make minimal edits.** Implement the smallest change that solves the task; run tests.
+2. **Check structure.** Open \`structure.md\` → locate the correct module/layer and check hub modules.
+3. **Follow conventions.** Open \`conventions.md\` → match naming patterns and import styles.
+4. **Trace symbols.** Open \`code.md\` → find the function/class; review "Called by" to gauge impact.
+5. **Trace flows.** Open \`flows.md\` → see if the symbol is on a critical path.
+6. **Review awareness.** Open \`awareness.md\` → note high-impact areas and patterns to watch.
+7. **Gather evidence.** If behavior is unclear, add targeted logging or traces to confirm assumptions.
+8. **Make minimal edits.** Implement the smallest change that solves the task; run tests.
 `.trim();
 
 const CHANGE_RULES = `
@@ -61,13 +63,14 @@ const CHANGE_RULES = `
 
 - **Read the COMPLETE file** before modifying it. Preserve all existing exports/functions.
 - **Add, don't reorganize.** Unless the task says "refactor", avoid moving code around.
-- **Check high-risk hubs** (\`architecture.md\`) before editing widely-imported files.
-- **Avoid renaming** widely-used symbols listed in \`map.md\` without updating all callers.
-- **No new cycles.** Before adding an import, verify it won't create a circular dependency (\`architecture.md\`).
-- **Match conventions.** Follow naming patterns shown in \`map.md\` (naming, imports, frameworks).
-- **Check module clusters** (\`context.md\`) to understand which files are commonly edited together.
+- **Check hub modules** (\`structure.md\`) before editing widely-imported files.
+- **Avoid renaming** widely-used symbols listed in \`code.md\` without updating all callers.
+- **No new cycles.** Before adding an import, verify it won't create a circular dependency (\`structure.md\`).
+- **Match conventions.** Follow patterns in \`conventions.md\` (naming, imports, frameworks).
+- **Watch high-impact areas.** Note patterns flagged in \`awareness.md\` when editing related code.
+- **Do NOT "fix" findings in \`awareness.md\`** unless they are clearly part of the user's request.
 - **Prefer small, localized changes** in the most relevant app module identified by the KB.
-- **Use \`architecture.md\`, \`map.md\`, and \`context.md\`** to locate the smallest, safest place to make a change.
+- **Use \`structure.md\`, \`flows.md\`, and \`code.md\`** to locate the smallest, safest place to make a change.
 `.trim();
 
 const KB_USAGE = `
@@ -75,18 +78,20 @@ const KB_USAGE = `
 
 | File | When to Open | What to Look For |
 |------|--------------|------------------|
-| \`architecture.md\` | **First, always** | High-risk hubs, directory layout, entry points, circular dependencies |
-| \`map.md\` | Before modifying a function | Data models with signatures, symbol index, naming conventions |
-| \`context.md\` | Before architectural changes | Module clusters, external integrations, data flow patterns |
+| \`structure.md\` | **First, always** | Directory layout, hub modules, circular dependencies |
+| \`code.md\` | Before modifying a function | "Called by" examples, data models, impact radius |
+| \`flows.md\` | Before architectural changes | Entry points, external integrations, data flow paths |
+| \`conventions.md\` | When writing new code | Naming patterns, import styles, framework idioms |
+| \`awareness.md\` | For supplementary context | High-impact files, security notes, patterns to watch |
 
 ### Quick Reference
 
-- **High-risk hubs** → Files with 3+ dependents listed in \`architecture.md\`—changes ripple widely
-- **Entry points** → HTTP handlers, CLI commands, event listeners in \`architecture.md\`
-- **External integrations** → HTTP clients, DB connections, message queues in \`context.md\`
-- **Data models** → ORM models, dataclasses, interfaces with signatures in \`map.md\`
-- **Module clusters** → Files commonly edited together in \`context.md\`
-- **High-impact symbol** → 5+ callers in \`map.md\` "Called by" column
+- **Entry points** → HTTP handlers, CLI commands, event listeners in \`flows.md\`
+- **External integrations** → HTTP clients, DB connections, message queues in \`flows.md\`
+- **Data models** → ORM models, dataclasses, interfaces in \`code.md\`
+- **Hub module** → listed in \`structure.md\` or \`flows.md\` with high traffic
+- **High-impact symbol** → 5+ callers in \`code.md\` "Called by" column
+- **High-impact file** → listed in \`awareness.md\` with notes on what to watch
 `.trim();
 
 const TROUBLESHOOTING = `
@@ -97,9 +102,9 @@ If you encounter repeated errors or unexpected behavior:
 1. **Use git** to see what changed: \`git diff\`, \`git status\`
 2. **Restore lost code** with \`git checkout -- <file>\` if needed
 3. **Re-read the complete file** before making more changes
-4. **Trace data flows** using \`context.md\` to understand execution paths
+4. **Trace data flows** using \`flows.md\` to understand execution paths
 5. **Run actual tests** to verify behavior before assuming something works
-6. **Check module clusters** in \`context.md\` for related files that may need updates
+6. **Check awareness.md** for notes on high-impact areas and patterns to watch
 `.trim();
 
 /**
@@ -199,17 +204,19 @@ ${TROUBLESHOOTING}
 
 ## Copilot-Specific Tips
 
-- **Use @-references.** Type \`@.aspect/architecture.md\` to include KB context in chat.
-- **Check architecture first.** Understand high-risk hubs and entry points before coding.
+- **Use @-references.** Type \`@.aspect/structure.md\` to include KB context in chat.
+- **Check structure first.** Understand codebase architecture before coding.
 - **Ask for small patches.** "Show me only the lines to change" keeps edits minimal.
 - **One file at a time.** When editing, work on a single file before moving on.
-- **Match conventions.** Ask "What naming pattern should I use?" and reference \`map.md\`.
+- **Match conventions.** Ask "What naming pattern should I use?" and reference \`conventions.md\`.
 
 ## Section Headers (Pattern-Matching)
 
-**\`architecture.md\`:** \`## High-Risk Architectural Hubs\`, \`## Directory Layout\`, \`## Entry Points\`, \`## Circular Dependencies\`
-**\`map.md\`:** \`## Data Models\` (with signatures), \`## Symbol Index\` (with Called By), \`## Conventions\`
-**\`context.md\`:** \`## Module Clusters\` (co-edited files), \`## External Integrations\`, \`## Critical Flows\`
+**\`structure.md\`:** \`## Directory Layout\`, \`## Hub Modules\`, \`## Circular Dependencies\`
+**\`awareness.md\`:** \`## High-Impact Files\`, \`## Security & Correctness Notes\`, \`## Patterns to Watch\`
+**\`code.md\`:** \`## Data Models\` (ORM, dataclasses, interfaces), \`## <file path>\` with Symbol | Kind | Calls | Called By
+**\`flows.md\`:** \`## Entry Points\` (HTTP handlers, CLI, events), \`## External Integrations\` (API clients, DB, queues), \`## Hub Module Flows\`
+**\`conventions.md\`:** \`## File Naming\`, \`## Function Naming\`, \`## Framework Patterns\`
 `.trim();
 }
 
@@ -258,17 +265,19 @@ ${TROUBLESHOOTING}
 
 ## Cursor-Specific Tips
 
-- **Check architecture first.** Know the high-risk hubs and entry points before writing code.
+- **Check structure first.** Know the codebase layout and hub files before writing code.
 - **Plan before multi-file edits.** Even with Cursor's agent mode, read KB files first.
-- **Follow map.md conventions.** Match naming patterns and import styles consistently.
-- **Check callers before renaming.** Use \`map.md\` to find all usages.
+- **Follow conventions.md.** Match naming patterns and import styles consistently.
+- **Check callers before renaming.** Use \`code.md\` to find all usages.
 - **Avoid wide-scope refactors** unless the task explicitly calls for them.
 
 ## Section Headers (Pattern-Matching)
 
-**\`architecture.md\`:** \`## High-Risk Architectural Hubs\`, \`## Directory Layout\`, \`## Entry Points\`, \`## Circular Dependencies\`
-**\`map.md\`:** \`## Data Models\` (with signatures), \`## Symbol Index\` (with Called By), \`## Conventions\`
-**\`context.md\`:** \`## Module Clusters\` (co-edited files), \`## External Integrations\`, \`## Critical Flows\`
+**\`structure.md\`:** \`## Directory Layout\`, \`## Hub Modules\`, \`## Circular Dependencies\`
+**\`awareness.md\`:** \`## High-Impact Files\`, \`## Security & Correctness Notes\`, \`## Patterns to Watch\`
+**\`code.md\`:** \`## Data Models\` (ORM, dataclasses, interfaces), \`## <file path>\` with Symbol | Kind | Calls | Called By
+**\`flows.md\`:** \`## Entry Points\` (HTTP handlers, CLI, events), \`## External Integrations\` (API clients, DB, queues), \`## Hub Module Flows\`
+**\`conventions.md\`:** \`## File Naming\`, \`## Function Naming\`, \`## Framework Patterns\`
 `.trim();
 }
 
@@ -320,11 +329,11 @@ ${TROUBLESHOOTING}
 
 ## Claude-Specific Tips
 
-- **Check architecture first.** Understand high-risk hubs and entry points before proposing solutions.
+- **Check structure first.** Understand codebase layout and hub files before proposing solutions.
 - **OBSERVATIONS → REASONING → PLAN.** State what you observed, why it's the issue, then your approach.
 - **Summarize KB findings.** Before writing code, state what you learned from each KB file.
 - **Plan, then patch.** Outline your approach (which files, what changes) before providing code.
-- **Follow map.md conventions.** Match naming patterns and styles exactly.
+- **Follow conventions.md.** Match naming patterns and styles exactly.
 - **Cite risk levels.** If touching a hub module or high-impact file, acknowledge it explicitly.
 
 ## Example Workflow
@@ -332,15 +341,17 @@ ${TROUBLESHOOTING}
 1. **"OBSERVATIONS: I see X in the code…"** → Describe what you found.
 2. **"REASONING: This causes Y because…"** → Explain why it's the issue.
 3. **"PLAN: I'll fix by changing Z in file A…"** → State your approach.
-4. **"Based on \`architecture.md\`, \`models.py\` is a high-risk hub (8 dependents)…"** → Acknowledge risk.
-5. **"Module clusters in context.md show these files are edited together…"** → Note co-location.
+4. **"Based on \`structure.md\`, \`models.py\` is a hub (8 importers)…"** → Acknowledge risk.
+5. **"Awareness.md notes this area needs care…"** → Note contextual considerations.
 6. **"Here's the patch:"** → Provide minimal, complete code changes.
 
 ## Section Headers (Pattern-Matching)
 
-**\`architecture.md\`:** \`## High-Risk Architectural Hubs\`, \`## Directory Layout\`, \`## Entry Points\`, \`## Circular Dependencies\`
-**\`map.md\`:** \`## Data Models\` (with signatures), \`## Symbol Index\` (with Called By), \`## Conventions\`
-**\`context.md\`:** \`## Module Clusters\` (co-edited files), \`## External Integrations\`, \`## Critical Flows\`
+**\`structure.md\`:** \`## Directory Layout\`, \`## Hub Modules\`, \`## Circular Dependencies\`
+**\`awareness.md\`:** \`## High-Impact Files\`, \`## Security & Correctness Notes\`, \`## Patterns to Watch\`
+**\`code.md\`:** \`## Data Models\` (ORM, dataclasses, interfaces), \`## <file path>\` with Symbol | Kind | Calls | Called By
+**\`flows.md\`:** \`## Entry Points\` (HTTP handlers, CLI, events), \`## External Integrations\` (API clients, DB, queues), \`## Hub Module Flows\`
+**\`conventions.md\`:** \`## File Naming\`, \`## Function Naming\`, \`## Framework Patterns\`
 `.trim();
 }
 
@@ -393,9 +404,9 @@ ${TROUBLESHOOTING}
 ## General Guidelines
 
 - **Read KB files first.** Before making changes, consult the relevant knowledge base files.
-- **Start with architecture.md.** Understand high-risk hubs and entry points.
+- **Start with structure.md.** Understand the codebase layout and architecture.
 - **Check hub modules.** Know which files have many dependents before editing.
-- **Follow map.md conventions.** Match existing naming patterns and coding styles exactly.
+- **Follow conventions.md.** Match existing naming patterns and coding styles exactly.
 - **Minimal changes.** Make the smallest change that solves the problem correctly.
 - **Acknowledge risk.** If editing a hub module or high-impact file, note the elevated risk.
 
@@ -403,15 +414,19 @@ ${TROUBLESHOOTING}
 
 | File | Purpose |
 |------|---------|
-| \`architecture.md\` | High-risk hubs, project layout, entry points, circular dependencies |
-| \`map.md\` | Data models with signatures, symbol index, naming conventions |
-| \`context.md\` | Module clusters, external integrations, data flow patterns |
+| \`structure.md\` | Project layout, hub modules, dependency info |
+| \`awareness.md\` | Supplementary context on high-impact areas |
+| \`code.md\` | Symbol tables with call relationships, data models |
+| \`flows.md\` | Entry points, external integrations, data flow patterns |
+| \`conventions.md\` | Naming conventions and framework patterns |
 
 ## Section Headers (Pattern-Matching)
 
-**\`architecture.md\`:** \`## High-Risk Architectural Hubs\`, \`## Directory Layout\`, \`## Entry Points\`, \`## Circular Dependencies\`
-**\`map.md\`:** \`## Data Models\` (with signatures), \`## Symbol Index\` (with Called By), \`## Conventions\`
-**\`context.md\`:** \`## Module Clusters\` (co-edited files), \`## External Integrations\`, \`## Critical Flows\`
+**\`structure.md\`:** \`## Directory Layout\`, \`## Hub Modules\`, \`## Circular Dependencies\`
+**\`awareness.md\`:** \`## High-Impact Files\`, \`## Security & Correctness Notes\`, \`## Patterns to Watch\`
+**\`code.md\`:** \`## Data Models\` (ORM, dataclasses, interfaces), \`## <file path>\` with Symbol | Kind | Calls | Called By
+**\`flows.md\`:** \`## Entry Points\` (HTTP handlers, CLI, events), \`## External Integrations\` (API clients, DB, queues), \`## Hub Module Flows\`
+**\`conventions.md\`:** \`## File Naming\`, \`## Function Naming\`, \`## Framework Patterns\`
 `.trim();
 }
 

@@ -7,7 +7,6 @@ import { AspectCodeState } from '../state';
 // import { defaultScoreConfig } from '../scoring/scoreConfig';
 import { DependencyAnalyzer, DependencyLink } from './DependencyAnalyzer';
 import { detectAssistants } from '../assistants/detection';
-import { alignmentsFileExists } from '../assistants/kb';
 
 type Finding = { 
   id?: string;

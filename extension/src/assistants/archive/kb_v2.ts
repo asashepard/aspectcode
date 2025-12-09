@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { AspectCodeState } from '../../state';
-import { ScoreResult } from '../../scoring/scoreEngine';
-import { DependencyAnalyzer, DependencyLink } from '../../panel/DependencyAnalyzer';
+import { AspectCodeState } from '../state';
+import { ScoreResult } from '../scoring/scoreEngine';
+import { DependencyAnalyzer, DependencyLink } from '../panel/DependencyAnalyzer';
 
 /**
  * Ensures .aspect/ and AGENTS.md are added to .gitignore.
@@ -104,7 +104,6 @@ const KB_ENRICHING_RULES = {
 interface KBEnrichingFinding {
   file: string;
   message: string;
-  meta?: Record<string, unknown>;
 }
 
 /**
@@ -120,7 +119,6 @@ function extractKBEnrichingFindings(
     .map(f => ({
       file: f.file,
       message: f.message,
-      meta: f.meta || {},
     }));
 }
 
@@ -145,7 +143,7 @@ export async function autoRegenerateKBFiles(
     let scoreResult: ScoreResult | null = null;
 
     if (findings.length > 0) {
-      const { AsymptoticScoreEngine } = await import('../../scoring/scoreEngine');
+      const { AsymptoticScoreEngine } = await import('../scoring/scoreEngine');
       const scoreEngine = new AsymptoticScoreEngine();
       
       // Convert state findings to scoring format
@@ -260,8 +258,12 @@ async function generateStructureFile(
     
     content += `**Files:** ${files.length} | **Dependencies:** ${totalEdges} | **Cycles:** ${cycleCount}\n\n`;
 
-    // Entry points (most important for understanding flow)
-    const entryPoints = detectEntryPoints(files, workspaceRoot.fsPath);
+    // Filter to app files for architectural views
+    const appFiles = files.filter(f => classifyFile(f, workspaceRoot.fsPath) === 'app');
+    const testFiles = files.filter(f => classifyFile(f, workspaceRoot.fsPath) === 'test');
+
+    // Entry points (most important for understanding flow) - app files only
+    const entryPoints = detectEntryPoints(appFiles, workspaceRoot.fsPath);
     if (entryPoints.length > 0) {
       content += '## Entry Points\n\n';
       for (const entry of entryPoints.slice(0, 5)) {
@@ -270,8 +272,9 @@ async function generateStructureFile(
       content += '\n';
     }
 
-    // Hub modules - high fan-in/out (most impactful files)
+    // Hub modules - high fan-in/out (most impactful files) - structural app files only
     const hubs = Array.from(depData.entries())
+      .filter(([file]) => isStructuralAppFile(file, workspaceRoot.fsPath))
       .map(([file, info]) => ({
         file,
         inDegree: info.inDegree,
@@ -297,15 +300,19 @@ async function generateStructureFile(
       content += '\n';
     }
 
-    // Circular dependencies (blockers for clean architecture)
-    if (circularLinks.length > 0) {
+    // Circular dependencies (blockers for clean architecture) - app files only
+    const appCircularLinks = circularLinks.filter(l => 
+      classifyFile(l.source, workspaceRoot.fsPath) === 'app' &&
+      classifyFile(l.target, workspaceRoot.fsPath) === 'app'
+    );
+    if (appCircularLinks.length > 0) {
       content += '## Circular Dependencies\n\n';
       content += '_These create tight coupling. Consider refactoring._\n\n';
       
       const processedPairs = new Set<string>();
       let cycleIndex = 0;
       
-      for (const link of circularLinks) {
+      for (const link of appCircularLinks) {
         if (cycleIndex >= 5) break;
         
         const pairKey = [link.source, link.target].sort().join('::');
@@ -321,8 +328,8 @@ async function generateStructureFile(
       content += '\n';
     }
 
-    // Directory structure with purposes (condensed)
-    const dirStructure = analyzeDirStructure(files, workspaceRoot.fsPath);
+    // Directory structure with purposes (condensed) - app files for structure
+    const dirStructure = analyzeDirStructure(appFiles, workspaceRoot.fsPath);
     const topDirs = Array.from(dirStructure.entries())
       .filter(([_, info]) => info.files.length >= 3)
       .slice(0, 15);
@@ -340,8 +347,8 @@ async function generateStructureFile(
       content += '\n';
     }
 
-    // Test organization
-    const testInfo = analyzeTestOrganization(files, workspaceRoot.fsPath);
+    // Test organization - use classified test files
+    const testInfo = analyzeTestOrganization(testFiles.length > 0 ? testFiles : files, workspaceRoot.fsPath);
     if (testInfo.testFiles.length > 0) {
       content += '## Tests\n\n';
       content += `**Test files:** ${testInfo.testFiles.length}\n`;
@@ -387,6 +394,9 @@ async function generateAwarenessFile(
 ): Promise<void> {
   let content = '# Codebase Awareness\n\n';
   content += '_Contextual guidance for understanding high-impact areas. This is supplementary context—focus on architecture and code understanding first._\n\n';
+  content += '> **Important:** Do **not** change code just to "clear" these observations.\n';
+  content += '> Only modify code when it is clearly required to satisfy the user\'s request.\n';
+  content += '> Style and unused-code observations are informational—do not "clean them up" unless directly relevant.\n\n';
 
   const findings = state.s.findings;
 
@@ -399,9 +409,11 @@ async function generateAwarenessFile(
     
     content += `**Examination context:** ${findings.length} items | ${errorCount} high-priority | ${warnCount} informational\n\n`;
 
-    // Hotspot files (files with most issues)
+    // Hotspot files (files with most issues) - app files only
     const fileMap = new Map<string, typeof findings>();
     for (const finding of findings) {
+      // Only consider app files for hotspots
+      if (classifyFile(finding.file, workspaceRoot.fsPath) !== 'app') continue;
       if (!fileMap.has(finding.file)) {
         fileMap.set(finding.file, []);
       }
@@ -409,6 +421,7 @@ async function generateAwarenessFile(
     }
 
     const hotspots = Array.from(fileMap.entries())
+      .filter(([file]) => isStructuralAppFile(file, workspaceRoot.fsPath))
       .map(([file, fileFindings]) => ({
         file,
         total: fileFindings.length,
@@ -458,16 +471,19 @@ async function generateAwarenessFile(
       'deadcode.unused_public', 'deadcode.unreachable_code'
     ]);
 
-    const tier2Findings = findings.filter(f => tier2RuleIds.has(f.code)).slice(0, 10);
+    // Filter findings to app files only for all issue sections
+    const appFindings = findings.filter(f => classifyFile(f.file, workspaceRoot.fsPath) === 'app');
+
+    const tier2Findings = appFindings.filter(f => tier2RuleIds.has(f.code) && !kbEnrichingRuleIds.has(f.code)).slice(0, 10);
     // Truly critical: security, bugs - not low-priority style/unused issues
-    const criticalFindings = findings.filter(f => 
+    const criticalFindings = appFindings.filter(f => 
       f.severity === 'error' && 
       !tier2RuleIds.has(f.code) && 
       !lowPriorityRules.has(f.code) &&
       !kbEnrichingRuleIds.has(f.code)
     ).slice(0, 15);
     // Code quality issues: includes low-priority errors and all warnings (but not KB-enriching rules)
-    const qualityFindings = findings.filter(f => 
+    const qualityFindings = appFindings.filter(f => 
       !kbEnrichingRuleIds.has(f.code) && (
         (f.severity === 'error' && lowPriorityRules.has(f.code)) ||
         (f.severity === 'warn' && !tier2RuleIds.has(f.code))
@@ -516,27 +532,32 @@ async function generateAwarenessFile(
     if (qualityFindings.length > 0) {
       content += '## Additional Context\n\n';
       content += '_Observations about code patterns. May indicate areas worth understanding better._\n\n';
-      content += '_Note: Unused imports/variables sometimes indicate past changes or incomplete implementations._\n\n';
+      content += '_Note: Style and unused-code items below are informational—ignore unless directly relevant to your task._\n\n';
       
       for (const finding of qualityFindings) {
         const fId = `F-${String(findingId++).padStart(3, '0')}`;
         const relPath = makeRelativePath(finding.file, workspaceRoot.fsPath);
         const line = finding.span?.start?.line || '';
         const isPotentialArchSignal = potentialArchSignalRules.has(finding.code);
+        const isStyleNoise = lowPriorityRules.has(finding.code);
         
-        content += `- **${fId}:** \`${finding.code}\` in \`${relPath}${line ? ':' + line : ''}\``;
+        content += `- `;
+        if (isStyleNoise) {
+          content += `**[style/noise]** `;
+        }
+        content += `**${fId}:** \`${finding.code}\` in \`${relPath}${line ? ':' + line : ''}\``;
         if (isPotentialArchSignal) {
-          content += ' *(review: may indicate incomplete implementation)*';
+          content += ' *(may indicate incomplete implementation)*';
         }
         content += '\n';
       }
       content += '\n';
     }
 
-    // Common patterns to avoid (derived from findings)
+    // Common patterns to watch (derived from findings) - app files only
     // Exclude KB-enriching rules - they are informational, not patterns to avoid
     const ruleGroups = new Map<string, number>();
-    for (const finding of findings) {
+    for (const finding of appFindings) {
       if (!kbEnrichingRuleIds.has(finding.code)) {
         ruleGroups.set(finding.code, (ruleGroups.get(finding.code) || 0) + 1);
       }
@@ -545,7 +566,7 @@ async function generateAwarenessFile(
     const topRules = Array.from(ruleGroups.entries())
       .sort((a, b) => b[1] - a[1])
       .slice(0, 8)
-      .filter(([_, count]) => count >= 2);
+      .filter(([_, count]) => count >= 3); // Increased threshold to reduce noise
 
     if (topRules.length > 0) {
       content += '## Patterns to Watch\n\n';
@@ -562,9 +583,10 @@ async function generateAwarenessFile(
       content += '\n';
     }
 
-    // Safe zones (files with no critical issues and low coupling)
-    const allFiles = Array.from(new Set(findings.map(f => f.file)));
-    const safeFiles = allFiles
+    // Safe zones (files with no critical issues and low coupling) - structural app files only
+    const allAppFiles = Array.from(new Set(findings.map(f => f.file)))
+      .filter(f => isStructuralAppFile(f, workspaceRoot.fsPath));
+    const safeFiles = allAppFiles
       .filter(f => {
         const fileFindings = fileMap.get(f) || [];
         const depInfo = depData.get(f);
@@ -729,24 +751,58 @@ async function generateCodeFile(
   if (relevantFiles.size === 0) {
     content += '_No files indexed. Run examination first._\n';
   } else {
-    // Score files by importance
-    const fileScores = new Map<string, number>();
-    for (const file of relevantFiles) {
-      const findingCount = findings.filter(f => f.file === file).length;
-      const outLinks = allLinks.filter(l => l.source === file).length;
-      const inLinks = allLinks.filter(l => l.target === file).length;
-      fileScores.set(file, findingCount * 10 + outLinks + inLinks);
+    // Build set of files with arch.* findings for boosting
+    const archFiles = new Set<string>();
+    for (const model of dataModels) {
+      if (classifyFile(model.file, workspaceRoot.fsPath) === 'app') {
+        archFiles.add(model.file);
+      }
+    }
+    const entryPointFindings = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.ENTRY_POINT);
+    const integrationFindings = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.EXTERNAL_INTEGRATION);
+    for (const f of entryPointFindings) {
+      if (classifyFile(f.file, workspaceRoot.fsPath) === 'app') {
+        archFiles.add(f.file);
+      }
+    }
+    for (const f of integrationFindings) {
+      if (classifyFile(f.file, workspaceRoot.fsPath) === 'app') {
+        archFiles.add(f.file);
+      }
     }
 
-    const sortedFiles = Array.from(relevantFiles)
-      .sort((a, b) => (fileScores.get(b) || 0) - (fileScores.get(a) || 0))
-      .slice(0, 50); // Top 50 files
+    // Score files by importance with classification-aware scoring
+    const fileScores = new Map<string, number>();
+    for (const file of relevantFiles) {
+      const kind = classifyFile(file, workspaceRoot.fsPath);
+      // Skip third-party files entirely
+      if (kind === 'third_party') continue;
+
+      // Base score: test files get penalty, app files get neutral start
+      const base = kind === 'test' ? -10 : 0;
+      // Boost files with arch.* findings significantly
+      const archBoost = archFiles.has(file) ? 25 : 0;
+      // Count non-KB-enriching findings
+      const kbEnrichingRuleIds = new Set(Object.values(KB_ENRICHING_RULES));
+      const findingCount = findings.filter(f => f.file === file && !kbEnrichingRuleIds.has(f.code)).length;
+      // Connectivity scores
+      const outLinks = allLinks.filter(l => l.source === file).length;
+      const inLinks = allLinks.filter(l => l.target === file).length;
+
+      const score = base + archBoost + (findingCount * 2) + (inLinks * 2) + outLinks;
+      fileScores.set(file, score);
+    }
+
+    const sortedFiles = Array.from(fileScores.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 50) // Top 50 files
+      .map(([file]) => file);
 
     content += `**Files indexed:** ${sortedFiles.length}\n\n`;
 
     for (const file of sortedFiles) {
       const relPath = makeRelativePath(file, workspaceRoot.fsPath);
-      const symbols = await extractFileSymbols(file, allLinks);
+      const symbols = await extractFileSymbols(file, allLinks, workspaceRoot.fsPath);
 
       if (symbols.length === 0) continue;
 
@@ -800,17 +856,24 @@ async function generateFlowsFile(
   let content = '# Data Flows\n\n';
   content += '_How data moves through the codebase. Use this to understand change impact and find the right place for new code._\n\n';
 
-  if (allLinks.length === 0) {
+  // Filter links to only include app-to-app dependencies
+  const appLinks = allLinks.filter(l => 
+    classifyFile(l.source, workspaceRoot.fsPath) === 'app' &&
+    classifyFile(l.target, workspaceRoot.fsPath) === 'app'
+  );
+
+  if (appLinks.length === 0) {
     content += '_No dependency data available. Run examination first._\n';
   } else {
-    // Calculate centrality scores for all files
-    const centralityScores = calculateCentralityScores(allLinks);
+    // Calculate centrality scores for app files only
+    const centralityScores = calculateCentralityScores(appLinks);
     
     // 1. TOP CRITICAL FLOWS - Prioritized view
     content += '## Critical Flows (Top 10)\n\n';
     content += '_Most central modules ranked by connectivity and risk. Changes here affect many files._\n\n';
     
     const topModules = Array.from(centralityScores.entries())
+      .filter(([file]) => isStructuralAppFile(file, workspaceRoot.fsPath))
       .sort((a, b) => b[1].score - a[1].score)
       .slice(0, 10);
     
@@ -830,8 +893,8 @@ async function generateFlowsFile(
       for (let i = 0; i < Math.min(3, topModules.length); i++) {
         const [topFile, topStats] = topModules[i];
         const topRelPath = makeRelativePath(topFile, workspaceRoot.fsPath);
-        const topCallers = allLinks.filter(l => l.target === topFile && l.source !== topFile);
-        const topDeps = allLinks.filter(l => l.source === topFile && l.target !== topFile);
+        const topCallers = appLinks.filter(l => l.target === topFile && l.source !== topFile);
+        const topDeps = appLinks.filter(l => l.source === topFile && l.target !== topFile);
         
         content += `**${i + 1}. \`${topRelPath}\`** (${topStats.inDegree} callers, ${topStats.outDegree} deps)\n\n`;
         
@@ -863,11 +926,11 @@ async function generateFlowsFile(
       content += '_No high-connectivity modules detected._\n\n';
     }
 
-    // 2. DEPENDENCY CHAINS - Show multi-hop flows
+    // 2. DEPENDENCY CHAINS - Show multi-hop flows (app files only)
     content += '## Dependency Chains\n\n';
     content += '_How modules chain together. Useful for understanding transitive impact._\n\n';
     
-    const chains = findDependencyChains(allLinks, workspaceRoot.fsPath, 3);
+    const chains = findDependencyChains(appLinks, workspaceRoot.fsPath, 3);
     if (chains.length > 0) {
       for (const chain of chains.slice(0, 5)) {
         content += `\`\`\`\n${chain}\n\`\`\`\n\n`;
@@ -876,9 +939,11 @@ async function generateFlowsFile(
       content += '_No significant dependency chains detected._\n\n';
     }
 
-    // 3. ENTRY POINTS - Grouped by module/prefix
-    const ruleEntryPoints = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.ENTRY_POINT);
-    const entryPoints = detectEntryPoints(files, workspaceRoot.fsPath);
+    // 3. ENTRY POINTS - Grouped by module/prefix (app files only)
+    const appFiles = files.filter(f => classifyFile(f, workspaceRoot.fsPath) === 'app');
+    const ruleEntryPoints = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.ENTRY_POINT)
+      .filter(f => classifyFile(f.file, workspaceRoot.fsPath) === 'app');
+    const entryPoints = detectEntryPoints(appFiles, workspaceRoot.fsPath);
     
     if (ruleEntryPoints.length > 0 || entryPoints.length > 0) {
       content += '## Entry Points\n\n';
@@ -950,8 +1015,9 @@ async function generateFlowsFile(
       }
     }
 
-    // 4. DATA MODELS
-    const dataModels = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.DATA_MODEL);
+    // 4. DATA MODELS (app files only)
+    const dataModels = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.DATA_MODEL)
+      .filter(f => classifyFile(f.file, workspaceRoot.fsPath) === 'app');
     if (dataModels.length > 0) {
       content += '## Data Models\n\n';
       content += '_Core data structures. Check these when adding new fields or relationships._\n\n';
@@ -980,8 +1046,9 @@ async function generateFlowsFile(
       }
     }
 
-    // 5. EXTERNAL INTEGRATIONS - Grouped by type
-    const externalIntegrations = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.EXTERNAL_INTEGRATION);
+    // 5. EXTERNAL INTEGRATIONS - Grouped by type (app files only)
+    const externalIntegrations = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.EXTERNAL_INTEGRATION)
+      .filter(f => classifyFile(f.file, workspaceRoot.fsPath) === 'app');
     
     if (externalIntegrations.length > 0) {
       content += '## External Integrations\n\n';
@@ -1042,8 +1109,8 @@ async function generateFlowsFile(
       }
     }
 
-    // 6. ARCHITECTURAL LAYERS
-    const layerFlows = detectLayerFlows(files, allLinks, workspaceRoot.fsPath);
+    // 6. ARCHITECTURAL LAYERS (use app files and app links)
+    const layerFlows = detectLayerFlows(appFiles, appLinks, workspaceRoot.fsPath);
     if (layerFlows.length > 0) {
       content += '## Request Flow Pattern\n\n';
       content += '_How a typical request flows through the architecture._\n\n';
@@ -1054,9 +1121,12 @@ async function generateFlowsFile(
       }
     }
 
-    // 7. CIRCULAR DEPENDENCIES - Only real cycles, not self-refs
-    const circularLinks = allLinks.filter(l => 
-      l.type === 'circular' && l.source !== l.target
+    // 7. CIRCULAR DEPENDENCIES - Only structural app-to-structural app cycles
+    const circularLinks = appLinks.filter(l => 
+      l.type === 'circular' &&
+      l.source !== l.target &&
+      isStructuralAppFile(l.source, workspaceRoot.fsPath) &&
+      isStructuralAppFile(l.target, workspaceRoot.fsPath)
     );
     
     if (circularLinks.length > 0) {
@@ -1085,8 +1155,8 @@ async function generateFlowsFile(
       content += '\n';
     }
 
-    // 8. MODULE CLUSTERS - Files that are often imported together
-    const clusters = findModuleClusters(allLinks, workspaceRoot.fsPath);
+    // 8. MODULE CLUSTERS - Files that are often imported together (app links only)
+    const clusters = findModuleClusters(appLinks, workspaceRoot.fsPath);
     if (clusters.length > 0) {
       content += '## Module Clusters\n\n';
       content += '_Files that are commonly used together. Useful for understanding feature boundaries._\n\n';
@@ -1425,11 +1495,15 @@ async function generateConventionsFile(
   let content = '# Conventions\n\n';
   content += '_Naming patterns and styles detected in this codebase. Follow these for consistency._\n\n';
 
-  if (files.length === 0) {
+  // Separate app files from test files for different convention analysis
+  const appFiles = files.filter(f => classifyFile(f, workspaceRoot.fsPath) === 'app');
+  const testFiles = files.filter(f => classifyFile(f, workspaceRoot.fsPath) === 'test');
+
+  if (appFiles.length === 0) {
     content += '_No source files found._\n';
   } else {
-    // Detect file naming conventions
-    const fileNaming = analyzeFileNaming(files, workspaceRoot.fsPath);
+    // Detect file naming conventions (app files only)
+    const fileNaming = analyzeFileNaming(appFiles, workspaceRoot.fsPath);
     
     content += '## File Naming\n\n';
     if (fileNaming.patterns.length > 0) {
@@ -1447,8 +1521,8 @@ async function generateConventionsFile(
       content += '_No clear pattern detected._\n\n';
     }
 
-    // Detect import patterns
-    const importPatterns = await analyzeImportPatterns(files);
+    // Detect import patterns (app files only)
+    const importPatterns = await analyzeImportPatterns(appFiles);
     
     if (importPatterns.length > 0) {
       content += '## Import Conventions\n\n';
@@ -1462,8 +1536,8 @@ async function generateConventionsFile(
       }
     }
 
-    // Detect function naming patterns
-    const funcNaming = await analyzeFunctionNaming(files);
+    // Detect function naming patterns (app files only)
+    const funcNaming = await analyzeFunctionNaming(appFiles);
     
     if (funcNaming.patterns.length > 0) {
       content += '## Function Naming\n\n';
@@ -1475,8 +1549,8 @@ async function generateConventionsFile(
       content += '\n';
     }
 
-    // Detect class naming patterns
-    const classNaming = await analyzeClassNaming(files);
+    // Detect class naming patterns (app files only)
+    const classNaming = await analyzeClassNaming(appFiles);
     
     if (classNaming.patterns.length > 0) {
       content += '## Class Naming\n\n';
@@ -1488,8 +1562,8 @@ async function generateConventionsFile(
       content += '\n';
     }
 
-    // Detect framework patterns
-    const frameworkPatterns = detectFrameworkPatterns(files, workspaceRoot.fsPath);
+    // Detect framework patterns (app files only)
+    const frameworkPatterns = detectFrameworkPatterns(appFiles, workspaceRoot.fsPath);
     
     if (frameworkPatterns.length > 0) {
       content += '## Framework Patterns\n\n';
@@ -1504,8 +1578,8 @@ async function generateConventionsFile(
       }
     }
 
-    // Test naming conventions
-    const testNaming = analyzeTestNaming(files, workspaceRoot.fsPath);
+    // Test naming conventions (use test files)
+    const testNaming = analyzeTestNaming(testFiles.length > 0 ? testFiles : files, workspaceRoot.fsPath);
     
     if (testNaming.patterns.length > 0) {
       content += '## Test Conventions\n\n';
@@ -1852,8 +1926,20 @@ function detectFrameworkPatterns(files: string[], workspaceRoot: string): Array<
     });
   }
   
-  // Django detection
-  if (fileNames.some(f => f === 'models.py' || f === 'views.py' || f === 'urls.py')) {
+  // Django detection (conservative - require multiple Django-specific signals)
+  const baseNames = new Set(fileNames);
+  const hasModelsPy = baseNames.has('models.py');
+  const hasViewsPy = baseNames.has('views.py');
+  const hasUrlsPy = baseNames.has('urls.py');
+  const hasSettingsPy = baseNames.has('settings.py');
+  const hasManagePy = baseNames.has('manage.py');
+
+  // Strong project signal: manage.py + (settings.py OR urls.py)
+  const strongProjectSignal = hasManagePy && (hasSettingsPy || hasUrlsPy);
+  // Strong app signal: models.py + (views.py OR urls.py)
+  const strongAppSignal = hasModelsPy && (hasViewsPy || hasUrlsPy);
+
+  if (strongProjectSignal || strongAppSignal) {
     frameworks.push({
       name: 'Django',
       patterns: [
@@ -1930,9 +2016,106 @@ function getFixTemplate(rule: string): string | null {
 // Helper Functions
 // ============================================================================
 
+// File classification for project-centric KB generation
+type FileKind = 'app' | 'test' | 'third_party';
+
+/**
+ * Classify a file as app code, test code, or third-party/environment.
+ * Used to focus KB on project code and avoid polluting architectural views
+ * with virtualenv, node_modules, build artifacts, or test files.
+ */
+function classifyFile(absPathOrRel: string, workspaceRoot: string): FileKind {
+  const rel = makeRelativePath(absPathOrRel, workspaceRoot).toLowerCase().replace(/\\/g, '/');
+
+  // Third-party / environment / build directories
+  const thirdPartyPatterns = [
+    '/.venv/', '/venv/', '/env/', '/.tox/', '/site-packages/',
+    '/node_modules/', '/__pycache__/', '/.pytest_cache/', '/.mypy_cache/',
+    '/dist/', '/build/', '/.next/', '/.turbo/', '/coverage/', '/.cache/',
+    '/dist-packages/', '/.git/', '/.hg/',
+  ];
+  // Also check if path starts with these (for top-level matches)
+  const thirdPartyPrefixes = [
+    '.venv/', 'venv/', 'env/', '.tox/', 'site-packages/',
+    'node_modules/', '__pycache__/', '.pytest_cache/', '.mypy_cache/',
+    'dist/', 'build/', '.next/', '.turbo/', 'coverage/', '.cache/',
+    'dist-packages/', '.git/', '.hg/',
+  ];
+  
+  if (thirdPartyPatterns.some(p => rel.includes(p)) ||
+      thirdPartyPrefixes.some(p => rel.startsWith(p))) {
+    return 'third_party';
+  }
+
+  // Test files - by directory or filename
+  const parts = rel.split('/');
+  const filename = parts[parts.length - 1] || '';
+  if (
+    parts.some(p => p === 'test' || p === 'tests' || p === 'spec' || p === '__tests__') ||
+    filename.startsWith('test_') ||
+    filename.endsWith('_test.py') ||
+    filename.endsWith('.test.ts') ||
+    filename.endsWith('.test.tsx') ||
+    filename.endsWith('.test.js') ||
+    filename.endsWith('.test.jsx') ||
+    filename.endsWith('.spec.ts') ||
+    filename.endsWith('.spec.tsx') ||
+    filename.endsWith('.spec.js') ||
+    filename.endsWith('.spec.jsx') ||
+    filename.includes('.spec.') ||
+    filename.includes('.test.')
+  ) {
+    return 'test';
+  }
+
+  return 'app';
+}
+
+/**
+ * Check if a file is "structural app code" - runtime/domain modules,
+ * not migrations, hooks, or generated tooling.
+ */
+function isStructuralAppFile(file: string, workspaceRoot: string): boolean {
+  if (classifyFile(file, workspaceRoot) !== 'app') return false;
+
+  const rel = makeRelativePath(file, workspaceRoot).toLowerCase().replace(/\\/g, '/');
+
+  // Exclude migrations / Alembic
+  if (rel.includes('/alembic/') || rel.includes('/migrations/')) {
+    return false;
+  }
+
+  // Exclude project generation hooks / scaffolding scripts
+  if (rel.includes('/hooks/')) {
+    return false;
+  }
+
+  // Exclude generated client/config tooling
+  const basename = path.basename(rel);
+  if (
+    basename === 'playwright.config.ts' ||
+    basename === 'openapi-ts.config.ts' ||
+    basename === 'vite.config.ts' ||
+    basename === 'vitest.config.ts' ||
+    basename === 'jest.config.ts' ||
+    basename === 'jest.config.js' ||
+    basename.endsWith('.gen.ts') ||
+    basename.endsWith('.gen.js') ||
+    basename.endsWith('.gen.tsx') ||
+    basename.endsWith('.gen.jsx') ||
+    basename.endsWith('sdk.gen.ts') ||
+    basename.endsWith('types.gen.ts')
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
 async function extractFileSymbols(
   filePath: string,
-  allLinks: DependencyLink[]
+  allLinks: DependencyLink[],
+  workspaceRoot?: string
 ): Promise<Array<{ name: string; kind: string; callsInto: string[]; calledBy: string[] }>> {
   const symbols: Array<{ name: string; kind: string; callsInto: string[]; calledBy: string[] }> = [];
   
@@ -1950,8 +2133,8 @@ async function extractFileSymbols(
           symbols.push({
             name: funcMatch[1],
             kind: 'function',
-            callsInto: getSymbolDependencies(filePath, allLinks),
-            calledBy: getSymbolCallers(funcMatch[1], filePath, allLinks)
+            callsInto: getSymbolDependencies(filePath, allLinks, workspaceRoot),
+            calledBy: getSymbolCallers(funcMatch[1], filePath, allLinks, workspaceRoot)
           });
         }
         
@@ -1960,8 +2143,8 @@ async function extractFileSymbols(
           symbols.push({
             name: classMatch[1],
             kind: 'class',
-            callsInto: getSymbolDependencies(filePath, allLinks),
-            calledBy: getSymbolCallers(classMatch[1], filePath, allLinks)
+            callsInto: getSymbolDependencies(filePath, allLinks, workspaceRoot),
+            calledBy: getSymbolCallers(classMatch[1], filePath, allLinks, workspaceRoot)
           });
         }
       }
@@ -1972,8 +2155,8 @@ async function extractFileSymbols(
           symbols.push({
             name: funcMatch[1],
             kind: 'function',
-            callsInto: getSymbolDependencies(filePath, allLinks),
-            calledBy: getSymbolCallers(funcMatch[1], filePath, allLinks)
+            callsInto: getSymbolDependencies(filePath, allLinks, workspaceRoot),
+            calledBy: getSymbolCallers(funcMatch[1], filePath, allLinks, workspaceRoot)
           });
         }
         
@@ -1982,8 +2165,8 @@ async function extractFileSymbols(
           symbols.push({
             name: classMatch[1],
             kind: 'class',
-            callsInto: getSymbolDependencies(filePath, allLinks),
-            calledBy: getSymbolCallers(classMatch[1], filePath, allLinks)
+            callsInto: getSymbolDependencies(filePath, allLinks, workspaceRoot),
+            calledBy: getSymbolCallers(classMatch[1], filePath, allLinks, workspaceRoot)
           });
         }
         
@@ -1992,8 +2175,8 @@ async function extractFileSymbols(
           symbols.push({
             name: constMatch[1],
             kind: 'const',
-            callsInto: getSymbolDependencies(filePath, allLinks),
-            calledBy: getSymbolCallers(constMatch[1], filePath, allLinks)
+            callsInto: getSymbolDependencies(filePath, allLinks, workspaceRoot),
+            calledBy: getSymbolCallers(constMatch[1], filePath, allLinks, workspaceRoot)
           });
         }
       }
@@ -2005,9 +2188,11 @@ async function extractFileSymbols(
   return symbols;
 }
 
-function getSymbolDependencies(filePath: string, allLinks: DependencyLink[]): string[] {
+function getSymbolDependencies(filePath: string, allLinks: DependencyLink[], workspaceRoot?: string): string[] {
   const deps = new Set<string>();
   for (const link of allLinks.filter(l => l.source === filePath)) {
+    // Filter out third-party and test files from dependencies
+    if (workspaceRoot && classifyFile(link.target, workspaceRoot) !== 'app') continue;
     for (const symbol of link.symbols) {
       deps.add(symbol);
     }
@@ -2015,9 +2200,14 @@ function getSymbolDependencies(filePath: string, allLinks: DependencyLink[]): st
   return Array.from(deps);
 }
 
-function getSymbolCallers(symbolName: string, filePath: string, allLinks: DependencyLink[]): string[] {
+function getSymbolCallers(symbolName: string, filePath: string, allLinks: DependencyLink[], workspaceRoot?: string): string[] {
   return allLinks
-    .filter(l => l.target === filePath && l.symbols.includes(symbolName))
+    .filter(l => {
+      if (l.target !== filePath || !l.symbols.includes(symbolName)) return false;
+      // Filter out third-party and test files from callers
+      if (workspaceRoot && classifyFile(l.source, workspaceRoot) !== 'app') return false;
+      return true;
+    })
     .slice(0, 5)
     .map(l => path.basename(l.source, path.extname(l.source)));
 }
@@ -2159,11 +2349,13 @@ async function getDetailedDependencyData(
 
 async function discoverWorkspaceFiles(workspaceRoot: vscode.Uri): Promise<string[]> {
   const files: string[] = [];
-  const extensions = ['.py', '.ts', '.tsx', '.js', '.jsx', '.java', '.cs', '.cpp', '.c'];
+  const extensions = ['.py', '.ts', '.tsx', '.js', '.jsx', '.java', '.cs', '.cpp', '.c', '.go', '.rs'];
 
   try {
     const pattern = new vscode.RelativePattern(workspaceRoot, '**/*');
-    const uris = await vscode.workspace.findFiles(pattern, '**/node_modules/**', 500);
+    // Exclude common environment, dependency, and build directories
+    const exclude = '{**/node_modules/**,**/.venv/**,**/venv/**,**/env/**,**/site-packages/**,**/__pycache__/**,**/.tox/**,**/.pytest_cache/**,**/.mypy_cache/**,**/dist/**,**/build/**,**/.next/**,**/.turbo/**,**/coverage/**,**/.cache/**,**/dist-packages/**,**/.git/**,**/.hg/**}';
+    const uris = await vscode.workspace.findFiles(pattern, exclude, 1000);
 
     for (const uri of uris) {
       const ext = path.extname(uri.fsPath).toLowerCase();
@@ -2185,6 +2377,8 @@ function makeRelativePath(absPath: string, workspaceRoot: string): string {
   return path.basename(absPath);
 }
 
+// ============================================================================
+// File Classification - Project vs Test vs Third-Party
 // ============================================================================
 // ALIGNMENTS.json - Issue Tracking & Resolution Log (in workspace root)
 // ============================================================================
