@@ -871,11 +871,16 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
           if (workspaceRoot) {
             const detected = await detectAssistants(workspaceRoot);
-            // Filter out aspectKB from instruction file detection
+            // Show + button if .aspect/ KB doesn't exist OR no instruction files exist
+            const hasAspectKB = detected.has('aspectKB');
+            // Check for instruction files (exclude aspectKB and alignments from count)
             const instructionAssistants = new Set(detected);
             instructionAssistants.delete('aspectKB');
+            instructionAssistants.delete('alignments');
             const hasInstructionFiles = instructionAssistants.size > 0;
-            this.post({ type: 'INSTRUCTION_FILES_STATUS', hasFiles: hasInstructionFiles });
+            // Show + if either is missing
+            const setupComplete = hasAspectKB && hasInstructionFiles;
+            this.post({ type: 'INSTRUCTION_FILES_STATUS', hasFiles: setupComplete });
             
             // TEMPORARILY DISABLED: Check if ALIGNMENTS.json exists to show align button
             // const hasAlignmentsFile = await alignmentsFileExists(workspaceRoot);
@@ -1712,6 +1717,98 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         }
         
         .view-content.active {
+            display: flex;
+        }
+
+        /* Simple/Full view mode toggle */
+        .simple-view {
+            display: none;
+            flex: 1;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 16px;
+            background: var(--vscode-sideBar-background);
+            min-height: 0; /* Allow flex shrinking */
+            padding-bottom: 20px; /* Offset to visually center accounting for header */
+        }
+        
+        body.simple-mode .main-content {
+            display: none;
+        }
+        
+        body.simple-mode .simple-view {
+            display: flex;
+        }
+        
+        .simple-view-buttons {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        
+        .simple-view-btn {
+            background: none;
+            border: none;
+            color: var(--vscode-charts-orange);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 13px;
+            font-weight: 500;
+            padding: 4px 8px;
+            border-radius: 4px;
+            transition: all 0.2s ease;
+            font-family: var(--vscode-font-family);
+        }
+        
+        .simple-view-btn:hover {
+            background: var(--vscode-toolbar-hoverBackground);
+        }
+        
+        .simple-view-btn.primary {
+            background: var(--vscode-charts-orange);
+            color: #000;
+            font-weight: 600;
+            padding: 3px 8px;
+            height: 22px;
+            animation: pulse-attention 1.5s ease-in-out infinite;
+            box-shadow: 0 0 8px var(--vscode-charts-orange);
+        }
+        
+        .simple-view-btn.primary:hover {
+            box-shadow: 0 0 12px var(--vscode-charts-orange);
+        }
+        
+        .view-mode-toggle {
+            background: transparent;
+            border: none;
+            color: var(--vscode-foreground);
+            cursor: pointer;
+            padding: 4px 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0.7;
+            transition: opacity 0.15s;
+        }
+        
+        .view-mode-toggle:hover {
+            opacity: 1;
+        }
+        
+        .simple-view-spinner {
+            position: absolute;
+            left: 12px;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 4px;
+            opacity: 0.8;
+        }
+        
+        .simple-view-spinner.active {
             display: flex;
         }
 
@@ -2664,6 +2761,37 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         </div>
     </div>
     
+    <!-- Simple View (minimal mode - default) -->
+    <div class="simple-view" id="simple-view">
+        <div class="simple-view-spinner" id="simple-view-spinner" title="Processing...">
+            <svg viewBox="0 0 16 16" width="14" height="14">
+                <circle cx="8" cy="8" r="6" stroke="var(--vscode-charts-orange)" stroke-width="2" fill="none" stroke-dasharray="18.85" stroke-dashoffset="9.42" stroke-linecap="round">
+                    <animateTransform attributeName="transform" type="rotate" from="0 8 8" to="360 8 8" dur="0.8s" repeatCount="indefinite"/>
+                </circle>
+            </svg>
+        </div>
+        <div class="simple-view-buttons">
+            <button id="simple-generate-btn" class="simple-view-btn primary" title="Generate AI instruction files" style="display: none;">
+                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <path d="M12 5v14M5 12h14"/>
+                </svg>
+            </button>
+            <button id="simple-propose-btn" class="simple-view-btn" title="Plan with Structure">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 20h9"></path>
+                    <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
+                </svg>
+            </button>
+            <button id="simple-expand-btn" class="view-mode-toggle" title="Show findings & graph">
+                <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor">
+                    <rect x="2" y="3" width="12" height="2" rx="0.5"/>
+                    <rect x="2" y="7" width="12" height="2" rx="0.5"/>
+                    <rect x="2" y="11" width="12" height="2" rx="0.5"/>
+                </svg>
+            </button>
+        </div>
+    </div>
+    
     <div class="main-content">
         <div class="view-container">
             <!-- View Toggle with Settings -->
@@ -2731,6 +2859,12 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                             </button>
                         </div>
                     </div>
+                    <button id="collapse-view-btn" class="view-mode-toggle" title="Switch to simple view">
+                        <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor">
+                            <rect x="2" y="5" width="12" height="2" rx="0.5"/>
+                            <rect x="2" y="9" width="12" height="2" rx="0.5"/>
+                        </svg>
+                    </button>
                 </div>
             </div>
             
@@ -2785,6 +2919,48 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         let currentActiveFile = ''; // Track currently active file for findings sorting
         let currentState = null; // Track latest state for re-rendering
         let severityFilters = { problems: true, informational: true }; // Track which priority types are shown (P0/P1 = problems, P2/P3 = informational)
+        
+        // View mode: 'simple' (default) or 'full'
+        let viewMode = 'simple';
+        const savedState = vscode.getState();
+        if (savedState && savedState.viewMode) {
+            viewMode = savedState.viewMode;
+        }
+        // Apply initial view mode
+        if (viewMode === 'simple') {
+            document.body.classList.add('simple-mode');
+        }
+        
+        function toggleViewMode() {
+            viewMode = viewMode === 'simple' ? 'full' : 'simple';
+            if (viewMode === 'simple') {
+                document.body.classList.add('simple-mode');
+            } else {
+                document.body.classList.remove('simple-mode');
+                // Re-render graph if switching to full and graph is active
+                if (currentView === 'graph' && currentGraph && currentGraph.nodes.length > 0) {
+                    setTimeout(() => renderDependencyGraph(currentGraph), 100);
+                }
+            }
+            // Persist state
+            const currentSavedState = vscode.getState() || {};
+            vscode.setState({ ...currentSavedState, viewMode });
+        }
+        
+        // Simple view button handlers
+        document.getElementById('simple-generate-btn').addEventListener('click', () => {
+            vscode.postMessage({ type: 'COMMAND', command: 'aspectcode.configureAssistants' });
+            // Hide both setup buttons after clicking
+            document.getElementById('simple-generate-btn').style.display = 'none';
+            document.getElementById('generate-instructions-btn').style.display = 'none';
+        });
+        
+        document.getElementById('simple-propose-btn').addEventListener('click', () => {
+            vscode.postMessage({ type: 'PROPOSE_FIXES', payload: { findings: currentFindings } });
+        });
+        
+        document.getElementById('simple-expand-btn').addEventListener('click', toggleViewMode);
+        document.getElementById('collapse-view-btn').addEventListener('click', toggleViewMode);
         
         // Action button handlers
         // Auto-Fix button handler disabled - feature temporarily disabled
@@ -2876,9 +3052,10 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 command: 'aspectcode.configureAssistants'
             });
             
-            // Hide the button after clicking (files will be generated)
+            // Hide both setup buttons after clicking (files will be generated)
             setTimeout(() => {
                 btn.style.display = 'none';
+                document.getElementById('simple-generate-btn').style.display = 'none';
             }, 500);
         });
 
@@ -4456,6 +4633,11 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     if (generateBtn) {
                         generateBtn.style.display = msg.hasFiles ? 'none' : 'flex';
                     }
+                    // Also sync simple view setup button
+                    const simpleGenerateBtn = document.getElementById('simple-generate-btn');
+                    if (simpleGenerateBtn) {
+                        simpleGenerateBtn.style.display = msg.hasFiles ? 'none' : 'flex';
+                    }
                     break;
                 case 'ALIGNMENTS_FILE_STATUS':
                     // Show/hide the align button based on whether ALIGNMENTS.json exists
@@ -4470,13 +4652,16 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         // Handle real progress updates from backend
         function handleRealProgress(phase, percentage, message) {
             const validationSpinner = document.getElementById('validation-spinner');
+            const simpleSpinner = document.getElementById('simple-view-spinner');
             
             // Show/hide inline validation spinner for all processing phases
             if (phase === 'validation' || phase === 'indexing' || phase === 'examination') {
                 if (percentage > 0 && percentage < 100) {
                     validationSpinner?.classList.add('active');
+                    simpleSpinner?.classList.add('active');
                 } else if (percentage >= 100 || percentage === 0) {
                     validationSpinner?.classList.remove('active');
+                    simpleSpinner?.classList.remove('active');
                 }
             }
             
