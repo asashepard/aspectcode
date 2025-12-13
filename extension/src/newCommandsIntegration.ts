@@ -424,6 +424,7 @@ async function handleConfigureAssistants(
 /**
  * Handle aspectcode.generateInstructionFiles command.
  * Generates KB files and instruction files based on settings.
+ * If no findings exist yet, runs INDEX and EXAMINE first.
  */
 async function handleGenerateInstructionFiles(
   state: AspectCodeState,
@@ -439,8 +440,36 @@ async function handleGenerateInstructionFiles(
 
     const workspaceRoot = workspaceFolders[0].uri;
 
+    // If no findings exist, run INDEX and EXAMINE first
+    let findings = state.s.findings;
+    if (!findings || findings.length === 0) {
+      outputChannel.appendLine('[Instructions] No findings exist, running INDEX and EXAMINE first...');
+      
+      // Show progress notification
+      await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: 'Aspect Code',
+        cancellable: false
+      }, async (progress) => {
+        progress.report({ message: 'Indexing repository...' });
+        await vscode.commands.executeCommand('aspectcode.index');
+        
+        // Wait a moment for index to complete
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        progress.report({ message: 'Running examination...' });
+        await vscode.commands.executeCommand('aspectcode.examine');
+        
+        // Wait for examine to complete and populate findings
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      });
+      
+      // Re-fetch findings after examination
+      findings = state.s.findings;
+      outputChannel.appendLine(`[Instructions] Examination complete, ${findings.length} findings`);
+    }
+
     // Calculate score from current findings
-    const findings = state.s.findings;
     let scoreResult: ScoreResult | null = null;
 
     if (findings.length > 0) {

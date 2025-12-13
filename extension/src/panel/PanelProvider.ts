@@ -826,14 +826,30 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     view.webview.onDidReceiveMessage(async (msg: any) => {
       switch (msg?.type) {
         case 'PANEL_READY':
-          // Auto-start processing when panel first loads, unless cache was already loaded
-          if (!this._autoProcessingStarted && !this._cacheLoadedSuccessfully) {
+          // Check if .aspect/ KB exists (indicates prior configuration)
+          const workspaceRootForKB = vscode.workspace.workspaceFolders?.[0]?.uri;
+          let hasAspectKB = false;
+          if (workspaceRootForKB) {
+            const detected = await detectAssistants(workspaceRootForKB);
+            hasAspectKB = detected.has('aspectKB');
+          }
+          
+          // Auto-start processing ONLY if:
+          // 1. Cache was loaded successfully, OR
+          // 2. .aspect/ KB exists (prior configuration) but cache is stale
+          // Otherwise, user must click '+' to initialize
+          if (!this._autoProcessingStarted && !this._cacheLoadedSuccessfully && hasAspectKB) {
             this._autoProcessingStarted = true;
-            // Send message to frontend to start automatic processing with UI
+            // KB exists but cache is stale - regenerate automatically
+            this._outputChannel?.appendLine('[PanelProvider] .aspect/ KB exists, regenerating cache...');
             this.post({ type: 'START_AUTOMATIC_PROCESSING' });
           } else if (this._cacheLoadedSuccessfully) {
             // Cache was loaded - just update the score display without running INDEX/VALIDATE
             this._outputChannel?.appendLine('[PanelProvider] Cache already loaded, skipping automatic processing');
+          } else if (!hasAspectKB) {
+            // No KB exists - user must click '+' to initialize
+            this._outputChannel?.appendLine('[PanelProvider] No .aspect/ KB found, waiting for user to configure via + button');
+            this.post({ type: 'SETUP_REQUIRED' });
           }
           // Send state with workspace root without modifying the original state
           const webviewState = {
@@ -855,7 +871,10 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
           if (workspaceRoot) {
             const detected = await detectAssistants(workspaceRoot);
-            const hasInstructionFiles = detected.size > 0;
+            // Filter out aspectKB from instruction file detection
+            const instructionAssistants = new Set(detected);
+            instructionAssistants.delete('aspectKB');
+            const hasInstructionFiles = instructionAssistants.size > 0;
             this.post({ type: 'INSTRUCTION_FILES_STATUS', hasFiles: hasInstructionFiles });
             
             // TEMPORARILY DISABLED: Check if ALIGNMENTS.json exists to show align button
@@ -4405,6 +4424,10 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     // Start automatic processing with the same UI as manual reload
                     setTimeout(() => startAutomaticProcessing(), 500);
                     break;
+                case 'SETUP_REQUIRED':
+                    // No .aspect/ KB exists - show setup message instead of auto-starting
+                    showSetupRequired();
+                    break;
                 case 'PROGRESS_UPDATE':
                     // Handle real progress updates from backend
                     handleRealProgress(msg.phase, msg.percentage, msg.message);
@@ -4468,6 +4491,24 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 
                 // Update progress bar
                 showProgress('', Math.max(5, Math.min(100, percentage)));
+            }
+        }
+        
+        // Show setup required message when no .aspect/ KB exists
+        function showSetupRequired() {
+            const scoreEl = document.getElementById('score');
+            const detailsEl = document.getElementById('score-details');
+            if (scoreEl) {
+                scoreEl.textContent = '—';
+                scoreEl.style.color = 'var(--vscode-descriptionForeground)';
+            }
+            if (detailsEl) {
+                detailsEl.innerHTML = 'Click <strong>+</strong> to set up Aspect Code';
+            }
+            // Show the generate instructions button prominently
+            const generateBtn = document.getElementById('generate-instructions-btn');
+            if (generateBtn) {
+                generateBtn.style.display = 'flex';
             }
         }
         

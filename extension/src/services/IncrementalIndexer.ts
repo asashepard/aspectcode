@@ -282,13 +282,8 @@ export class IncrementalIndexer {
       // Hide inline spinner
       this.sendProgressToPanel('examination', 100, 'Complete');
 
-      // Auto-regenerate .aspect KB files
-      try {
-        const { autoRegenerateKBFiles } = await import('../assistants/kb');
-        await autoRegenerateKBFiles(this.state, this.outputChannel);
-      } catch (kbError) {
-        this.outputChannel.appendLine(`[KB] Auto-regeneration failed (non-critical): ${kbError}`);
-      }
+      // Note: KB files (.aspect/) are regenerated on-demand when user clicks '+' button
+      // This avoids redundant regeneration on every examination
       
       // Update last examine info with bulk change marker
       const fixableCount = this.state.s.findings?.filter(f => f.fixable)?.length ?? 0;
@@ -404,13 +399,8 @@ export class IncrementalIndexer {
       // Hide inline spinner
       this.sendProgressToPanel('examination', 100, 'Complete');
 
-      // Auto-regenerate .aspect KB files after successful incremental examination
-      try {
-        const { autoRegenerateKBFiles } = await import('../assistants/kb');
-        await autoRegenerateKBFiles(this.state, this.outputChannel);
-      } catch (kbError) {
-        this.outputChannel.appendLine(`[KB] Auto-regeneration failed (non-critical): ${kbError}`);
-      }
+      // Note: KB files (.aspect/) are regenerated on-demand when user clicks '+' button
+      // This avoids redundant regeneration on every file save
 
       // Persist cache for instant startup next time
       await this.persistCache();

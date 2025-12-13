@@ -1,12 +1,19 @@
 import * as vscode from 'vscode';
 
-export type AssistantId = 'copilot' | 'cursor' | 'claude' | 'other' | 'alignments';
+export type AssistantId = 'copilot' | 'cursor' | 'claude' | 'other' | 'alignments' | 'aspectKB';
 
 /**
  * Detects which AI assistants are likely in use by checking for their config files.
+ * Also detects if Aspect Code KB (.aspect/) exists, indicating prior configuration.
  */
 export async function detectAssistants(workspaceRoot: vscode.Uri): Promise<Set<AssistantId>> {
   const detected = new Set<AssistantId>();
+
+  // Aspect Code KB: .aspect/ directory (indicates extension was previously configured)
+  try {
+    await vscode.workspace.fs.stat(vscode.Uri.joinPath(workspaceRoot, '.aspect'));
+    detected.add('aspectKB');
+  } catch {}
 
   // Copilot: .github/copilot-instructions.md
   try {
