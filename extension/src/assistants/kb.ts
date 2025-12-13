@@ -762,6 +762,62 @@ async function extractModelSignature(filePath: string, modelName: string): Promi
           return typeLine;
         }
       }
+    } else if (ext === '.java') {
+      // Find class/record definition
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (line.match(new RegExp(`(class|record|interface)\\s+${cleanName}\\s*`))) {
+          const classLine = line.trim();
+          const fields: string[] = [];
+          // For records, extract from constructor-like syntax
+          const recordMatch = line.match(/record\s+\w+\s*\(([^)]+)\)/);
+          if (recordMatch) {
+            const params = recordMatch[1].split(',').slice(0, 3).map(p => p.trim());
+            return `record ${cleanName}(${params.join(', ')}${params.length >= 3 ? ', ...' : ''})`;
+          }
+          // For classes, look for fields
+          for (let j = i + 1; j < Math.min(i + 12, lines.length); j++) {
+            const fieldMatch = lines[j].match(/^\s+(?:private|protected|public)\s+([\w<>\[\]]+)\s+(\w+)\s*[;=]/);
+            if (fieldMatch) {
+              fields.push(`${fieldMatch[2]}: ${fieldMatch[1]}`);
+              if (fields.length >= 3) break;
+            }
+            if (lines[j].match(/^\s*}/) || lines[j].match(/^\s*(?:public|private|protected).*\(/)) break;
+          }
+          if (fields.length > 0) {
+            return `${classLine.replace('{', '').trim()} { ${fields.join(', ')}${fields.length >= 3 ? ', ...' : ''} }`;
+          }
+          return classLine.replace('{', '').trim();
+        }
+      }
+    } else if (ext === '.cs') {
+      // Find class/record/struct definition
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (line.match(new RegExp(`(class|record|struct|interface)\\s+${cleanName}\\s*`))) {
+          const classLine = line.trim();
+          const fields: string[] = [];
+          // For records with primary constructor
+          const recordMatch = line.match(/record\s+\w+\s*\(([^)]+)\)/);
+          if (recordMatch) {
+            const params = recordMatch[1].split(',').slice(0, 3).map(p => p.trim());
+            return `record ${cleanName}(${params.join(', ')}${params.length >= 3 ? ', ...' : ''})`;
+          }
+          // For classes, look for properties
+          for (let j = i + 1; j < Math.min(i + 12, lines.length); j++) {
+            const propMatch = lines[j].match(/^\s+(?:public|protected|internal)\s+(?:required\s+)?([\w<>\[\]?]+)\s+(\w+)\s*{/);
+            if (propMatch) {
+              fields.push(`${propMatch[2]}: ${propMatch[1]}`);
+              if (fields.length >= 3) break;
+            }
+            if (lines[j].match(/^\s*}/) || lines[j].match(/^\s*(?:public|private|protected).*\(/)) break;
+          }
+          if (fields.length > 0) {
+            return `${classLine.replace('{', '').trim()} { ${fields.join('; ')}${fields.length >= 3 ? '; ...' : ''} }`;
+          }
+          return classLine.replace('{', '').trim();
+        }
+      }
     }
   } catch {
     // Ignore errors
@@ -870,6 +926,79 @@ async function extractFileSymbolsWithSignatures(
             kind: 'const',
             signature: null,
             calledBy: getSymbolCallers(constMatch[1], filePath, allLinks, workspaceRoot)
+          });
+        }
+      }
+    } else if (ext === '.java') {
+      for (const line of lines) {
+        // Public/protected methods with signatures
+        const methodMatch = line.match(/^\s*(?:public|protected)\s+(?:static\s+)?(?:async\s+)?([\w<>\[\],\s]+)\s+(\w+)\s*\(([^)]*)\)/);
+        if (methodMatch && !methodMatch[2].startsWith('_')) {
+          const returnType = methodMatch[1].trim();
+          const methodName = methodMatch[2];
+          const params = methodMatch[3].split(',').slice(0, 3).map(p => p.trim().split(/\s+/).pop() || '').filter(p => p);
+          const sig = params.length > 0 ? `(${params.join(', ')})` : '()';
+          symbols.push({
+            name: methodName,
+            kind: 'method',
+            signature: `${returnType} ${methodName}${sig}`,
+            calledBy: getSymbolCallers(methodName, filePath, allLinks, workspaceRoot)
+          });
+        }
+        
+        // Classes and interfaces
+        const classMatch = line.match(/^\s*(?:public|protected)?\s*(?:abstract\s+)?(?:class|interface|record)\s+(\w+)(?:\s+extends\s+(\w+))?(?:\s+implements\s+([\w,\s]+))?/);
+        if (classMatch) {
+          const className = classMatch[1];
+          const extendsClause = classMatch[2] ? ` extends ${classMatch[2]}` : '';
+          const implementsClause = classMatch[3] ? ` implements ${classMatch[3].split(',')[0].trim()}` : '';
+          symbols.push({
+            name: className,
+            kind: line.includes('interface') ? 'interface' : (line.includes('record') ? 'record' : 'class'),
+            signature: `class ${className}${extendsClause}${implementsClause}`,
+            calledBy: getSymbolCallers(className, filePath, allLinks, workspaceRoot)
+          });
+        }
+      }
+    } else if (ext === '.cs') {
+      for (const line of lines) {
+        // Public/protected/internal methods with signatures
+        const methodMatch = line.match(/^\s*(?:public|protected|internal)\s+(?:static\s+)?(?:async\s+)?(?:virtual\s+)?(?:override\s+)?([\w<>\[\],\s?]+)\s+(\w+)\s*\(([^)]*)\)/);
+        if (methodMatch && !methodMatch[2].startsWith('_')) {
+          const returnType = methodMatch[1].trim();
+          const methodName = methodMatch[2];
+          const params = methodMatch[3].split(',').slice(0, 3).map(p => p.trim().split(/\s+/).pop() || '').filter(p => p);
+          const sig = params.length > 0 ? `(${params.join(', ')})` : '()';
+          symbols.push({
+            name: methodName,
+            kind: 'method',
+            signature: `${returnType} ${methodName}${sig}`,
+            calledBy: getSymbolCallers(methodName, filePath, allLinks, workspaceRoot)
+          });
+        }
+        
+        // Classes, interfaces, records, structs
+        const classMatch = line.match(/^\s*(?:public|protected|internal)?\s*(?:abstract\s+)?(?:partial\s+)?(?:class|interface|record|struct)\s+(\w+)(?:\s*:\s*([\w,\s]+))?/);
+        if (classMatch) {
+          const className = classMatch[1];
+          const baseClause = classMatch[2] ? ` : ${classMatch[2].split(',')[0].trim()}` : '';
+          const kind = line.includes('interface') ? 'interface' : (line.includes('record') ? 'record' : (line.includes('struct') ? 'struct' : 'class'));
+          symbols.push({
+            name: className,
+            kind: kind,
+            signature: `${kind} ${className}${baseClause}`,
+            calledBy: getSymbolCallers(className, filePath, allLinks, workspaceRoot)
+          });
+        }
+        
+        // Properties (important in C#)
+        const propMatch = line.match(/^\s*(?:public|protected|internal)\s+(?:static\s+)?(?:virtual\s+)?(?:override\s+)?([\w<>\[\],\s?]+)\s+(\w+)\s*{\s*get/);
+        if (propMatch) {
+          symbols.push({
+            name: propMatch[2],
+            kind: 'property',
+            signature: `${propMatch[1].trim()} ${propMatch[2]}`,
+            calledBy: getSymbolCallers(propMatch[2], filePath, allLinks, workspaceRoot)
           });
         }
       }
@@ -1488,6 +1617,46 @@ async function analyzeImportPatterns(files: string[]): Promise<Array<{
     } catch {}
   }
   
+  // Java import patterns
+  const javaFiles = files.filter(f => f.endsWith('.java')).slice(0, 3);
+  for (const file of javaFiles) {
+    try {
+      const uri = vscode.Uri.file(file);
+      const content = await vscode.workspace.fs.readFile(uri);
+      const text = Buffer.from(content).toString('utf-8');
+      const lines = text.split('\n').slice(0, 30);
+      
+      const imports = lines.filter(l => l.trim().startsWith('import '));
+      if (imports.length >= 2) {
+        patterns.push({
+          language: 'Java',
+          example: imports.slice(0, 4).join('\n')
+        });
+        break;
+      }
+    } catch {}
+  }
+  
+  // C# using patterns
+  const csFiles = files.filter(f => f.endsWith('.cs')).slice(0, 3);
+  for (const file of csFiles) {
+    try {
+      const uri = vscode.Uri.file(file);
+      const content = await vscode.workspace.fs.readFile(uri);
+      const text = Buffer.from(content).toString('utf-8');
+      const lines = text.split('\n').slice(0, 30);
+      
+      const usings = lines.filter(l => l.trim().startsWith('using ') && l.includes(';'));
+      if (usings.length >= 2) {
+        patterns.push({
+          language: 'C#',
+          example: usings.slice(0, 4).join('\n')
+        });
+        break;
+      }
+    } catch {}
+  }
+  
   return patterns;
 }
 
@@ -1528,6 +1697,18 @@ async function analyzeFunctionNaming(files: string[]): Promise<{
       const tsMatches = text.matchAll(/function\s+(\w+)\s*\(|const\s+(\w+)\s*=\s*(?:async\s+)?\(/g);
       for (const match of tsMatches) {
         categorizeFunction(match[1] || match[2], patternCounts);
+      }
+      
+      // Java method pattern
+      const javaMatches = text.matchAll(/(?:public|protected|private)\s+(?:static\s+)?\w+\s+(\w+)\s*\(/g);
+      for (const match of javaMatches) {
+        categorizeFunction(match[1], patternCounts);
+      }
+      
+      // C# method pattern
+      const csMatches = text.matchAll(/(?:public|protected|private|internal)\s+(?:static\s+)?(?:async\s+)?\w+\s+(\w+)\s*\(/g);
+      for (const match of csMatches) {
+        categorizeFunction(match[1], patternCounts);
       }
     } catch {}
   }
@@ -1710,6 +1891,46 @@ function detectFrameworkPatterns(files: string[], workspaceRoot: string): Array<
         'URL patterns in `urls.py`',
         'Forms in `forms.py`',
         'Admin customization in `admin.py`'
+      ]
+    });
+  }
+  
+  // Spring Boot detection (Java)
+  const javaFiles = fileNames.filter(f => f.endsWith('.java'));
+  const hasSpringApp = javaFiles.some(f => f.includes('application'));
+  const hasController = dirNames.some(d => d.includes('/controller/') || d.includes('/controllers/'));
+  const hasService = dirNames.some(d => d.includes('/service/') || d.includes('/services/'));
+  const hasRepository = dirNames.some(d => d.includes('/repository/') || d.includes('/repositories/'));
+  
+  if (javaFiles.length > 0 && (hasSpringApp || (hasController && hasService))) {
+    frameworks.push({
+      name: 'Spring Boot',
+      patterns: [
+        'Use `@RestController` or `@Controller` for HTTP endpoints',
+        'Use `@Service` for business logic, `@Repository` for data access',
+        'Use `@Autowired` or constructor injection for dependencies',
+        'Use `@Entity` with JPA for ORM models',
+        'Place controllers in `/controller`, services in `/service`'
+      ]
+    });
+  }
+  
+  // ASP.NET Core detection (C#)
+  const csFiles = fileNames.filter(f => f.endsWith('.cs'));
+  const hasProgramCs = csFiles.some(f => f === 'program.cs');
+  const hasStartupCs = csFiles.some(f => f === 'startup.cs');
+  const hasCsControllers = dirNames.some(d => d.includes('/controllers/'));
+  const hasCsServices = dirNames.some(d => d.includes('/services/'));
+  
+  if (csFiles.length > 0 && (hasProgramCs || hasStartupCs || hasCsControllers)) {
+    frameworks.push({
+      name: 'ASP.NET Core',
+      patterns: [
+        'Use `[ApiController]` and `[Route]` attributes for HTTP endpoints',
+        'Use `[HttpGet]`, `[HttpPost]` etc. for HTTP methods',
+        'Register services in `Program.cs` or `Startup.cs`',
+        'Use Entity Framework Core with `DbContext` for data access',
+        'Place controllers in `/Controllers`, models in `/Models`'
       ]
     });
   }

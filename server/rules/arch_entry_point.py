@@ -76,6 +76,8 @@ class ArchEntryPointRule:
             "PatchMapping", "RequestMapping",
             # JAX-RS
             "GET", "POST", "PUT", "DELETE", "PATCH", "Path",
+            # Servlet
+            "WebServlet",
         },
         "csharp": {
             # ASP.NET Core
@@ -94,6 +96,9 @@ class ArchEntryPointRule:
 
     # Express/Koa/Fastify style - method calls on app/router object
     JS_HTTP_METHODS: Set[str] = {"get", "post", "put", "delete", "patch", "all", "options", "head"}
+
+    # C# Minimal API style - method calls like app.MapGet(), app.MapPost()
+    CSHARP_MINIMAL_API_METHODS: Set[str] = {"MapGet", "MapPost", "MapPut", "MapDelete", "MapPatch"}
 
     # CLI entry point patterns
     CLI_DECORATORS: Dict[str, Set[str]] = {
@@ -172,6 +177,16 @@ class ArchEntryPointRule:
             # 2. Check for Express/Koa style HTTP handlers (JS/TS)
             if lang in ("javascript", "typescript"):
                 entry_info = self._check_js_http_handler(ctx, node)
+                if entry_info:
+                    span = entry_info['span']
+                    if span not in found_spans:
+                        found_spans.add(span)
+                        yield self._make_finding(ctx, entry_info)
+                    continue
+
+            # 2b. Check for C# Minimal API style handlers (app.MapGet, etc.)
+            if lang == "csharp":
+                entry_info = self._check_csharp_minimal_api(ctx, node)
                 if entry_info:
                     span = entry_info['span']
                     if span not in found_spans:
@@ -304,6 +319,42 @@ class ArchEntryPointRule:
                         'span': (start, end),
                         'name': f'{method.upper()} handler',
                     }
+        
+        return None
+
+    def _check_csharp_minimal_api(self, ctx: RuleContext, node) -> dict | None:
+        """Check for C# Minimal API style route handlers (app.MapGet, app.MapPost, etc.)."""
+        node_type = getattr(node, 'type', '')
+        
+        if node_type not in ('invocation_expression', 'call_expression'):
+            return None
+        
+        call_text = self._get_node_text(ctx, node)
+        if not call_text:
+            return None
+        
+        # Look for app.MapGet, app.MapPost, etc.
+        for method in self.CSHARP_MINIMAL_API_METHODS:
+            if f".{method}(" in call_text:
+                route = self._extract_route_path(call_text)
+                if not route or route == "/":
+                    # Look for route string
+                    import re
+                    route_match = re.search(r'["\']/([\w/:*{}-]*)["\']', call_text)
+                    if route_match:
+                        route = "/" + route_match.group(1) if route_match.group(1) else "/"
+                    else:
+                        route = "/"
+                
+                http_method = method.replace("Map", "").upper()
+                start, end = ctx.node_span(node)
+                return {
+                    'type': 'http_handler',
+                    'method': http_method,
+                    'route': route,
+                    'span': (start, end),
+                    'name': f'{http_method} handler (Minimal API)',
+                }
         
         return None
 
