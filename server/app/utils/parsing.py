@@ -249,17 +249,24 @@ class PythonSummaryVisitor(cst.CSTVisitor):
 
 
 class TreeSitterParser:
-    """Placeholder for future tree-sitter based multi-language parser."""
+    """Fallback parser for non-Python languages.
+    
+    Returns a minimal IR structure to allow indexing to proceed.
+    Full tree-sitter parsing is done by the engine adapters during validation.
+    """
     
     def __init__(self, language: str):
         self.language = language
     
     def summarize(self, path: str, text: str) -> Dict[str, Any]:
-        """Tree-sitter parsing - not implemented yet."""
-        raise NotImplementedError(
-            f"Tree-sitter parser for {self.language} not implemented. "
-            "Currently only Python (LibCST) is supported."
-        )
+        """Return minimal IR structure for non-Python files."""
+        return {
+            "language": self.language,
+            "symbols": [],
+            "imports": [],
+            "exports": [],
+            "docstring": None
+        }
 
 
 def get_parser(language: str) -> Parser:
