@@ -33,8 +33,12 @@
     },
     "commands": [
       {
-        "command": "aspectcode.signInAlpha",
-        "title": "Aspect Code: Sign In to Alpha"
+        "command": "aspectcode.enterApiKey",
+        "title": "Aspect Code: Enter API Key"
+      },
+      {
+        "command": "aspectcode.clearApiKey",
+        "title": "Aspect Code: Clear API Key"
       },
       {
         "command": "aspectcode.showPanel",

@@ -123,6 +123,22 @@ async def get_current_user(
             is_alpha=db_user["is_alpha"],
         )
     
+    # Check if the token exists but was revoked
+    try:
+        if DATABASE_URL:
+            token_hash = db.hash_token(api_key)
+            is_revoked = await db.is_token_revoked(token_hash)
+            if is_revoked:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="API key has been revoked. Please contact support for a new key.",
+                )
+    except HTTPException:
+        raise  # Re-raise the 403
+    except Exception as e:
+        print(f"[auth] Error checking revoked status: {e}")
+        # Fall through to generic invalid key error
+    
     # No valid authentication found
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -143,24 +159,3 @@ def _check_client_version(client_version: Optional[str]) -> None:
         except version.InvalidVersion:
             # Invalid version string - allow through but log
             pass
-
-
-# Optional dependency for endpoints that may work without auth in dev mode
-async def get_optional_user(
-    api_key: Optional[str] = Depends(api_key_header),
-    client_version: Optional[str] = Depends(client_version_header),
-) -> Optional[UserContext]:
-    """
-    Optional auth - returns None if no API key provided.
-    Useful for endpoints that should work in dev mode without auth.
-    """
-    if not api_key:
-        # No API key provided - allow in dev mode or if no keys configured
-        if settings.debug or not settings.api_keys:
-            return None
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing API key. Set X-API-Key header.",
-        )
-    
-    return await get_current_user(api_key, client_version)

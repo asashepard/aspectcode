@@ -45,7 +45,8 @@ class Settings(BaseSettings):
     debug: bool = False
     
     # Authentication mode: alpha (free), prod (paid), or both
-    mode: Literal["alpha", "prod", "both"] = "alpha"
+    # Default to prod - all users need a valid API key
+    mode: Literal["alpha", "prod", "both"] = "prod"
 
     @computed_field
     @property

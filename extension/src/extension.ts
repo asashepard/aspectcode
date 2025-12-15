@@ -7,7 +7,7 @@ import { loadGrammarsOnce, getLoadedGrammarsSummary } from './tsParser';
 import { extractPythonImports, extractTSJSImports } from './importExtractors';
 import { AspectCodePanelProvider } from './panel/PanelProvider';
 import { AspectCodeState } from './state';
-import { post, fetchCapabilities, initHttp } from './http';
+import { post, fetchCapabilities, initHttp, getHeaders, handleHttpError } from './http';
 import Parser from 'web-tree-sitter';
 import { activateNewCommands } from './newCommandsIntegration';
 import { IncrementalIndexer } from './services/IncrementalIndexer';
@@ -503,19 +503,17 @@ async function examineWorkspaceDiff(context?: vscode.ExtensionContext) {
 
   try {
     outputChannel?.appendLine(`Making request to: ${apiUrl}/validate`);
+    const headers = await getHeaders();
     const res = await fetch(apiUrl + '/validate', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(payload)
     });
 
     outputChannel?.appendLine(`Response status: ${res.status}`);
 
     if (!res.ok) {
-      const errorText = await res.text();
-      outputChannel?.appendLine(`ERROR: ${res.status} ${errorText}`);
-      vscode.window.showErrorMessage(`Aspect Code examination failed: ${res.status} ${errorText}`);
-      return;
+      handleHttpError(res.status, res.statusText);
     }
 
     const json: any = await res.json();
@@ -1032,17 +1030,15 @@ async function callAutofixAPI(violationIds?: string[], context?: vscode.Extensio
 
     outputChannel?.appendLine(`Calling /autofix with ${violationIds ? violationIds.length : 'all'} violations`);
 
+    const headers = await getHeaders();
     const res = await fetch(apiUrl + '/autofix', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(payload)
     });
 
     if (!res.ok) {
-      const errorText = await res.text();
-      outputChannel?.appendLine(`Autofix API error: ${res.status} ${errorText}`);
-      vscode.window.showErrorMessage(`Aspect Code autofix failed: ${res.status} ${errorText}`);
-      return null;
+      handleHttpError(res.status, res.statusText);
     }
 
     const response = await res.json();
@@ -1218,21 +1214,19 @@ async function indexRepository(force: boolean = false, state?: AspectCodeState) 
         setTimeout(() => reject(new Error('Indexing timeout - repository may be too large')), timeoutMs);
       });
       
-      const fetchPromise = fetch(apiUrl + '/index', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
+      const fetchPromise = (async () => {
+        const headers = await getHeaders();
+        return fetch(apiUrl + '/index', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(payload)
+        });
+      })();
 
       const res = await Promise.race([fetchPromise, timeoutPromise]) as Response;
 
       if (!res.ok) {
-        const errorText = await res.text();
-        outputChannel?.appendLine(`ERROR: ${res.status} ${errorText}`);
-        if (state) {
-          sendProgressToPanel(state, 'indexing', 0, 'Error occurred during indexing');
-        }
-        throw new Error(`${res.status} ${errorText}`);
+        handleHttpError(res.status, res.statusText);
       }
 
       // Phase 5: Processing response (90%)
@@ -1353,21 +1347,19 @@ async function examineFullRepository(state?: AspectCodeState, context?: vscode.E
         setTimeout(() => reject(new Error('Examination timeout - repository may be too large or complex')), timeoutMs);
       });
 
-      const fetchPromise = fetch(apiUrl + '/validate_tree_sitter', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
+      const fetchPromise = (async () => {
+        const headers = await getHeaders();
+        return fetch(apiUrl + '/validate_tree_sitter', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(payload)
+        });
+      })();
 
       const res = await Promise.race([fetchPromise, timeoutPromise]) as Response;
 
       if (!res.ok) {
-        const errorText = await res.text();
-        outputChannel?.appendLine(`ERROR: ${res.status} ${errorText}`);
-        if (state) {
-          sendProgressToPanel(state, 'examination', 0, 'Error occurred during examination');
-        }
-        throw new Error(`${res.status} ${errorText}`);
+        handleHttpError(res.status, res.statusText);
       }
 
       // Phase 5: Processing results (80%)
@@ -1563,17 +1555,19 @@ async function showRepositoryStatus() {
 
   try {
     // Get snapshots
-    const snapshotsRes = await fetch(apiUrl + '/snapshots');
+    const snapshotsHeaders = await getHeaders();
+    const snapshotsRes = await fetch(apiUrl + '/snapshots', { headers: snapshotsHeaders });
     if (!snapshotsRes.ok) {
-      throw new Error(`Failed to get snapshots: ${snapshotsRes.status}`);
+      handleHttpError(snapshotsRes.status, snapshotsRes.statusText);
     }
 
     const snapshots = await snapshotsRes.json() as any[];
 
     // Get storage stats
-    const statsRes = await fetch(apiUrl + '/storage/stats');
+    const statsHeaders = await getHeaders();
+    const statsRes = await fetch(apiUrl + '/storage/stats', { headers: statsHeaders });
     if (!statsRes.ok) {
-      throw new Error(`Failed to get storage stats: ${statsRes.status}`);
+      handleHttpError(statsRes.status, statsRes.statusText);
     }
 
     const stats: any = await statsRes.json();
@@ -2064,6 +2058,26 @@ export async function activate(context: vscode.ExtensionContext) {
   // Initialize HTTP module with secrets storage for API key management
   initHttp(context);
 
+  // Check if API key is configured - prompt user if not
+  const existingApiKey = await context.secrets.get('aspectcode.apiKey');
+  const configApiKey = vscode.workspace.getConfiguration('aspectcode').get<string>('apiKey');
+  
+  if (!existingApiKey && !configApiKey) {
+    // No API key configured - prompt user
+    const choice = await vscode.window.showWarningMessage(
+      'Aspect Code requires an API key to function. Please enter your API key.',
+      'Enter API Key',
+      'Later'
+    );
+    
+    if (choice === 'Enter API Key') {
+      // Delay slightly to ensure extension is fully activated
+      setTimeout(() => {
+        vscode.commands.executeCommand('aspectcode.enterApiKey');
+      }, 500);
+    }
+  }
+
   // Initialize state
   const state = new AspectCodeState(context);
   state.load();
@@ -2185,79 +2199,99 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // ===== CORE Aspect Code COMMANDS (4 TOTAL) =====
   
-  // Sign In to Alpha - Register for alpha access and store API key
+  // Enter API Key - Allows users to input their API key manually
   context.subscriptions.push(
-    vscode.commands.registerCommand('aspectcode.signInAlpha', async () => {
+    vscode.commands.registerCommand('aspectcode.enterApiKey', async () => {
       try {
-        // Check if already signed in
+        // Check if already have a key
         const existingKey = await context.secrets.get('aspectcode.apiKey');
         if (existingKey) {
           const choice = await vscode.window.showInformationMessage(
-            'You are already signed in to Aspect Code Alpha. Do you want to sign in with a different account?',
-            'Sign in with different account',
+            'You already have an API key configured. Do you want to replace it with a new one?',
+            'Enter new API key',
             'Cancel'
           );
-          if (choice !== 'Sign in with different account') {
+          if (choice !== 'Enter new API key') {
             return;
           }
         }
 
-        // Prompt for email
-        const email = await vscode.window.showInputBox({
-          prompt: 'Enter your email address to sign up for Aspect Code Alpha',
-          placeHolder: 'you@example.com',
+        // Prompt for API key
+        const apiKey = await vscode.window.showInputBox({
+          prompt: 'Enter your Aspect Code API key',
+          placeHolder: 'paste-your-api-key-here',
+          password: true, // Hide the input for security
           validateInput: (value) => {
-            if (!value) {
-              return 'Email is required';
+            if (!value || value.trim().length === 0) {
+              return 'API key is required';
             }
-            // Basic email validation
-            if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
-              return 'Please enter a valid email address';
+            if (value.trim().length < 20) {
+              return 'API key appears too short - please check and try again';
             }
             return undefined;
           }
         });
 
-        if (!email) {
+        if (!apiKey) {
           return; // User cancelled
         }
 
-        // Get server URL from config
-        const config = vscode.workspace.getConfiguration('aspectcode');
-        const serverBaseUrl = config.get<string>('serverBaseUrl', 'http://localhost:8000');
-
-        // Call the alpha registration endpoint
-        const response = await fetch(`${serverBaseUrl}/alpha/register`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ email }),
-        });
-
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
-          throw new Error(errorData.detail || `Registration failed: ${response.status}`);
-        }
-
-        const data = await response.json() as { api_key: string; email: string; message: string };
-
         // Store the API key in SecretStorage
-        await context.secrets.store('aspectcode.apiKey', data.api_key);
+        await context.secrets.store('aspectcode.apiKey', apiKey.trim());
 
-        // Store the email in globalState for display purposes
-        await context.globalState.update('aspectcode.userEmail', data.email);
-
-        outputChannel?.appendLine(`[Alpha] Successfully registered: ${data.email}`);
+        outputChannel?.appendLine('[Auth] API key stored successfully');
 
         vscode.window.showInformationMessage(
-          `Welcome to Aspect Code Alpha! Signed in as ${data.email}.`,
+          'API key saved! You can now use Aspect Code.',
           'OK'
         );
 
       } catch (error: any) {
-        outputChannel?.appendLine(`[Alpha] Registration error: ${error.message}`);
-        vscode.window.showErrorMessage(`Failed to sign in: ${error.message}`);
+        outputChannel?.appendLine(`[Auth] Error storing API key: ${error.message}`);
+        vscode.window.showErrorMessage(`Failed to save API key: ${error.message}`);
+      }
+    })
+  );
+
+  // Clear API Key - Deletes the stored API key from SecretStorage
+  context.subscriptions.push(
+    vscode.commands.registerCommand('aspectcode.clearApiKey', async () => {
+      try {
+        const existingKey = await context.secrets.get('aspectcode.apiKey');
+        if (!existingKey) {
+          vscode.window.showInformationMessage('No stored API key found to clear.');
+          return;
+        }
+
+        const choice = await vscode.window.showWarningMessage(
+          'This will remove your stored Aspect Code API key from VS Code. You will need to enter it again to use Aspect Code.',
+          'Clear API Key',
+          'Cancel'
+        );
+        if (choice !== 'Clear API Key') {
+          return;
+        }
+
+        await context.secrets.delete('aspectcode.apiKey');
+        outputChannel?.appendLine('[Auth] API key cleared from SecretStorage');
+
+        const configApiKey = vscode.workspace.getConfiguration('aspectcode').get<string>('apiKey');
+        if (configApiKey && configApiKey.trim().length > 0) {
+          vscode.window.showInformationMessage(
+            "Stored API key cleared. Note: 'aspectcode.apiKey' is still set in Settings and will still be used.",
+            'Open Settings'
+          ).then(sel => {
+            if (sel === 'Open Settings') {
+              vscode.commands.executeCommand('workbench.action.openSettings', 'aspectcode.apiKey');
+            }
+          });
+          return;
+        }
+
+        vscode.window.showInformationMessage('Stored API key cleared.');
+      } catch (error: any) {
+        outputChannel?.appendLine(`[Auth] Error clearing API key: ${error.message}`);
+        vscode.window.showErrorMessage(`Failed to clear API key: ${error.message}`);
       }
     })
   );
@@ -2594,7 +2628,9 @@ export async function activate(context: vscode.ExtensionContext) {
       repo_root: root, diff, ir,
       type_facts, modes: ['structure', 'types'], autofix: false
     };
-    const vr = await fetch(apiUrl + '/validate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(validatePayload) });
+    const validateHeaders = await getHeaders();
+    const vr = await fetch(apiUrl + '/validate', { method: 'POST', headers: validateHeaders, body: JSON.stringify(validatePayload) });
+    if (!vr.ok) { handleHttpError(vr.status, vr.statusText); }
     const vjson: any = await vr.json();
 
     // Select first fixable import_insert violation at this file position
@@ -2609,7 +2645,9 @@ export async function activate(context: vscode.ExtensionContext) {
     }
 
     const afPayload = { repo_root: root, diff, ir, select: [pick.id] };
-    const ar = await fetch(apiUrl + '/autofix', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(afPayload) });
+    const afHeaders = await getHeaders();
+    const ar = await fetch(apiUrl + '/autofix', { method: 'POST', headers: afHeaders, body: JSON.stringify(afPayload) });
+    if (!ar.ok) { handleHttpError(ar.status, ar.statusText); }
     const aj: any = await ar.json();
 
     if (!aj?.patched_diff || !aj.patched_diff.trim()) {
@@ -2649,7 +2687,9 @@ export async function activate(context: vscode.ExtensionContext) {
       repo_root: root, diff, ir,
       type_facts, modes: ['structure', 'types'], autofix: false
     };
-    const vr = await fetch(apiUrl + '/validate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(validatePayload) });
+    const validateHeaders = await getHeaders();
+    const vr = await fetch(apiUrl + '/validate', { method: 'POST', headers: validateHeaders, body: JSON.stringify(validatePayload) });
+    if (!vr.ok) { handleHttpError(vr.status, vr.statusText); }
     const vjson: any = await vr.json();
 
     // Select first fixable optional_return_guard violation at this file position
@@ -2664,7 +2704,9 @@ export async function activate(context: vscode.ExtensionContext) {
     }
 
     const afPayload = { repo_root: root, diff, ir, select: [pick.id] };
-    const ar = await fetch(apiUrl + '/autofix', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(afPayload) });
+    const afHeaders = await getHeaders();
+    const ar = await fetch(apiUrl + '/autofix', { method: 'POST', headers: afHeaders, body: JSON.stringify(afPayload) });
+    if (!ar.ok) { handleHttpError(ar.status, ar.statusText); }
     const aj: any = await ar.json();
 
     if (!aj?.patched_diff || !aj.patched_diff.trim()) {

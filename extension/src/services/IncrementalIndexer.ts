@@ -9,6 +9,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { DependencyAnalyzer, DependencyLink } from '../panel/DependencyAnalyzer';
 import { AspectCodeState } from '../state';
+import { getHeaders, handleHttpError } from '../http';
 import type { CacheManager } from './CacheManager';
 
 interface FileSnapshot {
@@ -607,9 +608,10 @@ export class IncrementalIndexer {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 25000); // 25 second timeout
       
+      const headers = await getHeaders();
       const response = await fetch(apiUrl + '/validate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(payload),
         signal: controller.signal
       });
@@ -617,7 +619,7 @@ export class IncrementalIndexer {
       clearTimeout(timeoutId);
       
       if (!response.ok) {
-        throw new Error(`validate API failed: ${response.status}`);
+        handleHttpError(response.status, response.statusText);
       }
       
       const result = await response.json();

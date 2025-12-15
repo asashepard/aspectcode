@@ -20,7 +20,7 @@ const CONFIG_API_KEY = () => vscode.workspace.getConfiguration("aspectcode").get
 /**
  * Get the API key, preferring SecretStorage over config.
  */
-async function getApiKey(): Promise<string> {
+export async function getApiKey(): Promise<string> {
   // First, try SecretStorage (alpha registration)
   if (secretStorage) {
     const secretKey = await secretStorage.get('aspectcode.apiKey');
@@ -34,9 +34,10 @@ async function getApiKey(): Promise<string> {
 }
 
 /**
- * Build common headers for all requests including auth
+ * Build common headers for all requests including auth.
+ * Exported for use by direct fetch calls that can't use post()/get().
  */
-async function getHeaders(): Promise<Record<string, string>> {
+export async function getHeaders(): Promise<Record<string, string>> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "X-AspectCode-Client-Version": EXTENSION_VERSION,
@@ -51,19 +52,32 @@ async function getHeaders(): Promise<Record<string, string>> {
 }
 
 /**
- * Handle HTTP errors with user-friendly messages
+ * Handle HTTP errors with user-friendly messages.
+ * Exported for use by direct fetch calls.
  */
-function handleHttpError(status: number, statusText: string): never {
+export function handleHttpError(status: number, statusText: string): never {
   if (status === 401) {
     vscode.window.showErrorMessage(
-      "Aspect Code: API key is missing or invalid. Set 'aspectcode.apiKey' in your VS Code settings.",
-      "Open Settings"
+      "Aspect Code: API key is missing or invalid. Please enter a valid API key.",
+      "Enter API Key"
     ).then(choice => {
-      if (choice === "Open Settings") {
-        vscode.commands.executeCommand("workbench.action.openSettings", "aspectcode.apiKey");
+      if (choice === "Enter API Key") {
+        vscode.commands.executeCommand("aspectcode.enterApiKey");
       }
     });
     throw new Error("Authentication failed: Invalid or missing API key");
+  }
+  
+  if (status === 403) {
+    vscode.window.showErrorMessage(
+      "Aspect Code: Your API key has been revoked. Please contact support for a new key.",
+      "Enter New API Key"
+    ).then(choice => {
+      if (choice === "Enter New API Key") {
+        vscode.commands.executeCommand("aspectcode.enterApiKey");
+      }
+    });
+    throw new Error("Authentication failed: API key has been revoked");
   }
   
   if (status === 426) {

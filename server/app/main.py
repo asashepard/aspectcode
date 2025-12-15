@@ -17,7 +17,7 @@ from .models import (
 )
 from .storage import get_storage
 from .settings import settings, DATABASE_URL
-from .auth import get_current_user, get_optional_user, UserContext
+from .auth import get_current_user, UserContext
 from . import db
 
 # Import tree-sitter engine
@@ -104,81 +104,19 @@ def health():
     }
 
 
-# --- Alpha Registration ---
-
-class AlphaRegisterRequest(BaseModel):
-    """Request body for alpha registration."""
-    email: EmailStr
+# --- Alpha Registration (disabled in production mode) ---
+# API keys must be created manually via database.
+# See server/scripts/ for admin tooling.
 
 
-class AlphaRegisterResponse(BaseModel):
-    """Response from alpha registration."""
-    api_key: str
-    email: str
-    message: str
-
-
-@app.post("/alpha/register", response_model=AlphaRegisterResponse)
-@limiter.limit("5/minute")  # Stricter rate limit for registration
-async def alpha_register(
-    request: Request,
-    req: AlphaRegisterRequest = Body(...),
-):
-    """
-    Register for alpha access and receive an API key.
-    
-    This endpoint:
-    1. Creates or retrieves an alpha user by email
-    2. Generates a new API token
-    3. Returns the raw API key (only shown once)
-    
-    No authentication required for this endpoint.
-    """
-    if settings.mode == "prod":
-        raise HTTPException(
-            status_code=404,
-            detail="Alpha registration is not available in production mode"
-        )
-    
-    if not DATABASE_URL:
-        raise HTTPException(
-            status_code=503,
-            detail="Database not configured"
-        )
-    
-    try:
-        # Get or create the alpha user
-        alpha_user = await db.get_or_create_alpha_user(req.email)
-        
-        # Generate a new API token
-        raw_token, token_hash = db.generate_api_key()
-        
-        # Store the token
-        await db.create_api_token(
-            alpha_user_id=alpha_user["id"],
-            token_hash=token_hash,
-            name="extension",
-        )
-        
-        return AlphaRegisterResponse(
-            api_key=raw_token,
-            email=alpha_user["email"],
-            message="Welcome to the Aspect Code alpha! Store this API key securely - it won't be shown again.",
-        )
-    except Exception as e:
-        # Log the error but don't expose details
-        print(f"Alpha registration error: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to create alpha account. Please try again."
-        )
+# Alpha registration endpoint removed - API keys created manually via database
 
 
 @app.get("/patchlets/capabilities")
 @limiter.limit(f"{settings.rate_limit}/minute")
 def get_patchlets_capabilities(
     request: Request,
-    user: Optional[UserContext] = Depends(get_optional_user)
+    user: UserContext = Depends(get_current_user)
 ):
     """Get capabilities for patchlet fixes."""
     from engine.profiles import AUTO_FIX_V1_RULE_IDS
@@ -203,7 +141,7 @@ def get_patchlets_capabilities(
 def index_repository(
     request: Request,
     req: IndexRequest = Body(...),
-    user: Optional[UserContext] = Depends(get_optional_user)
+    user: UserContext = Depends(get_current_user)
 ):
     """Index a repository for analysis."""
     from .services.indexing import index_repository as index_repo_service
@@ -214,7 +152,7 @@ def index_repository(
 def validate_code(
     request: Request,
     req: ValidateFullRequest = Body(...),
-    user: Optional[UserContext] = Depends(get_optional_user)
+    user: UserContext = Depends(get_current_user)
 ):
     """
     Standard validation endpoint for tree-sitter analysis.
@@ -229,7 +167,7 @@ def validate_code(
 def validate_with_tree_sitter(
     request: Request,
     req: ValidateFullRequest = Body(...),
-    user: Optional[UserContext] = Depends(get_optional_user)
+    user: UserContext = Depends(get_current_user)
 ):
     """Validate using the tree-sitter engine."""
     return validate_with_tree_sitter_internal(req)
@@ -373,7 +311,7 @@ def validate_with_tree_sitter_internal(req: ValidateFullRequest):
 @limiter.limit(f"{settings.rate_limit}/minute")
 def list_snapshots(
     request: Request,
-    user: Optional[UserContext] = Depends(get_optional_user)
+    user: UserContext = Depends(get_current_user)
 ):
     """List available snapshots for the extension."""
     try:
@@ -396,7 +334,7 @@ def list_snapshots(
 @limiter.limit(f"{settings.rate_limit}/minute")
 def get_storage_stats(
     request: Request,
-    user: Optional[UserContext] = Depends(get_optional_user)
+    user: UserContext = Depends(get_current_user)
 ):
     """Get storage statistics."""
     try:
@@ -410,7 +348,7 @@ def get_storage_stats(
 def apply_autofixes(
     request: Request,
     req: AutofixRequest = Body(...),
-    user: Optional[UserContext] = Depends(get_optional_user)
+    user: UserContext = Depends(get_current_user)
 ):
     """Apply automatic fixes to findings."""
     print(f"[DEBUG] Autofix endpoint hit! repo_root={req.repo_root}")

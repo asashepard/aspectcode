@@ -224,6 +224,24 @@ async def revoke_api_token(token_id: str) -> bool:
         return result == "UPDATE 1"
 
 
+async def is_token_revoked(token_hash: str) -> bool:
+    """
+    Check if a token exists but has been revoked.
+    Returns True if token exists and is revoked, False otherwise.
+    """
+    async with get_connection() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT "revokedAt"
+            FROM "ApiToken"
+            WHERE "tokenHash" = $1
+            """,
+            token_hash,
+        )
+        # Token exists and has a revokedAt timestamp
+        return row is not None and row["revokedAt"] is not None
+
+
 async def get_tokens_for_alpha_user(alpha_user_id: str) -> list[dict]:
     """
     Get all active (non-revoked) tokens for an alpha user.
