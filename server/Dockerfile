@@ -1,5 +1,5 @@
 # Aspect Code Server
-# Production-ready Docker image
+# Production-ready Docker image for Google Cloud Run
 
 FROM python:3.11-slim
 
@@ -30,12 +30,13 @@ COPY --chown=aspectcode:aspectcode . .
 # Set Python path for module imports
 ENV PYTHONPATH=/app
 
-# Expose port
-EXPOSE 8000
+# Cloud Run uses PORT env var (default 8080)
+ENV PORT=8080
+EXPOSE 8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+# Health check (disabled for Cloud Run - it has its own)
+# HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+#     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')" || exit 1
 
-# Run the server
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run the server - use shell form to allow $PORT substitution
+CMD uvicorn app.main:app --host 0.0.0.0 --port $PORT

@@ -1,0 +1,64 @@
+# Google Cloud Build configuration for Aspect Code API
+# Triggered on push to main branch (configure in Cloud Console)
+#
+# Required secrets (set in Cloud Console > Secret Manager):
+#   - DATABASE_URL: Neon PostgreSQL connection string
+#   - ASPECT_CODE_API_KEYS_RAW: Comma-separated admin API keys (optional)
+#
+# Deploy manually:
+#   gcloud builds submit --config cloudbuild.yaml .
+
+steps:
+  # Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/aspectcode/api:latest'
+      - '.'
+
+  # Push to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/aspectcode/api:latest'
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - 'aspectcode-api'
+      - '--image'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/aspectcode/api:latest'
+      - '--region'
+      - '${_REGION}'
+      - '--platform'
+      - 'managed'
+      - '--memory'
+      - '1Gi'
+      - '--cpu'
+      - '1'
+      - '--timeout'
+      - '60s'
+      - '--concurrency'
+      - '2'
+      - '--min-instances'
+      - '0'
+      - '--max-instances'
+      - '5'
+      - '--set-env-vars'
+      - 'ASPECT_CODE_MODE=prod'
+      - '--set-secrets'
+      - 'DATABASE_URL=DATABASE_URL:latest'
+      - '--allow-unauthenticated'
+
+substitutions:
+  _REGION: us-central1
+
+images:
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/aspectcode/api:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
