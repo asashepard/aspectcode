@@ -48,11 +48,22 @@ class TokenMetadata(BaseModel):
     created_at: datetime = Field(..., description="Token creation timestamp")
     last_used_at: Optional[datetime] = Field(None, description="Last usage timestamp")
     revoked_at: Optional[datetime] = Field(None, description="Revocation timestamp (null if active)")
+    request_count: int = Field(0, description="Total number of authenticated requests")
 
 
 class ListTokensResponse(BaseModel):
     """Response containing list of token metadata."""
     tokens: List[TokenMetadata]
+
+
+class PlatformMetrics(BaseModel):
+    """Aggregate platform metrics for admin dashboard."""
+    total_requests: int = Field(..., description="Total authenticated requests across all tokens")
+    active_keys: int = Field(..., description="Number of non-revoked API keys")
+    total_keys: int = Field(..., description="Total API keys (including revoked)")
+    daily_active_users: int = Field(..., description="Unique users active in last 24 hours")
+    weekly_active_users: int = Field(..., description="Unique users active in last 7 days")
+    total_alpha_users: int = Field(..., description="Total registered alpha users")
 
 
 # --- Admin Dependency ---
@@ -186,6 +197,7 @@ async def list_api_tokens(
                     created_at=t["created_at"],
                     last_used_at=t.get("last_used_at"),
                     revoked_at=t.get("revoked_at"),
+                    request_count=t.get("request_count", 0),
                 )
                 for t in tokens
             ]
@@ -195,4 +207,28 @@ async def list_api_tokens(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to list API tokens.",
+        )
+
+
+@router.get("/metrics", response_model=PlatformMetrics)
+async def get_metrics(
+    admin: UserContext = Depends(require_admin),
+):
+    """
+    Get aggregate platform metrics.
+    
+    Returns usage statistics for the admin dashboard including:
+    - Total authenticated requests across all tokens
+    - Active/total API keys
+    - Daily and weekly active users
+    - Total registered alpha users
+    """
+    try:
+        metrics = await db.get_platform_metrics()
+        return PlatformMetrics(**metrics)
+    except Exception as e:
+        print(f"[admin] Error fetching metrics: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch platform metrics.",
         )

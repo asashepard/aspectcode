@@ -231,25 +231,33 @@ async def get_user_by_token_hash(token_hash: str) -> Optional[dict]:
 
 
 async def touch_token_last_used(token_hash: str, min_interval_seconds: int = 60) -> bool:
-    """Update api_tokens.last_used_at (and updated_at) if it is stale.
+    """Update api_tokens.last_used_at, updated_at, and increment request_count.
 
     Returns True if a row was updated, False otherwise.
     Intended to be called after a token has already been validated.
+    
+    The request_count is always incremented, but last_used_at only updates
+    if stale (to avoid excessive timestamp writes).
     """
     if min_interval_seconds <= 0:
         min_interval_seconds = 0
 
     async with get_connection() as conn:
+        # Always increment request_count, but only update last_used_at if stale
         row = await conn.fetchrow(
             """
             UPDATE api_tokens
-            SET last_used_at = NOW(), updated_at = NOW()
+            SET 
+                request_count = COALESCE(request_count, 0) + 1,
+                updated_at = NOW(),
+                last_used_at = CASE 
+                    WHEN last_used_at IS NULL 
+                         OR last_used_at < (NOW() - ($2 * INTERVAL '1 second'))
+                    THEN NOW()
+                    ELSE last_used_at
+                END
             WHERE token_hash = $1
               AND revoked_at IS NULL
-              AND (
-                last_used_at IS NULL
-                OR last_used_at < (NOW() - ($2 * INTERVAL '1 second'))
-              )
             RETURNING id
             """,
             token_hash,
@@ -315,7 +323,8 @@ async def get_tokens_for_alpha_user(alpha_user_id: str, include_revoked: bool = 
         where_clause = "alpha_user_id = $1" if include_revoked else "alpha_user_id = $1 AND revoked_at IS NULL"
         rows = await conn.fetch(
             f"""
-            SELECT id, name, created_at, last_used_at, revoked_at
+            SELECT id, name, created_at, last_used_at, revoked_at,
+                   COALESCE(request_count, 0) as request_count
             FROM api_tokens
             WHERE {where_clause}
             ORDER BY created_at DESC
@@ -329,6 +338,7 @@ async def get_tokens_for_alpha_user(alpha_user_id: str, include_revoked: bool = 
                 "created_at": row["created_at"],
                 "last_used_at": row["last_used_at"],
                 "revoked_at": row["revoked_at"],
+                "request_count": row["request_count"],
             }
             for row in rows
         ]
@@ -440,7 +450,8 @@ async def list_api_tokens(
             f"""
             SELECT 
                 id, name, alpha_user_id, user_id,
-                created_at, last_used_at, revoked_at
+                created_at, last_used_at, revoked_at,
+                COALESCE(request_count, 0) as request_count
             FROM api_tokens
             {where_clause}
             ORDER BY created_at DESC
@@ -457,6 +468,50 @@ async def list_api_tokens(
                 "created_at": row["created_at"],
                 "last_used_at": row["last_used_at"],
                 "revoked_at": row["revoked_at"],
+                "request_count": row["request_count"],
             }
             for row in rows
         ]
+
+
+async def get_platform_metrics() -> dict:
+    """
+    Get aggregate platform metrics for admin dashboard.
+    
+    Returns:
+        Dict with total_requests, active_keys, total_keys, 
+        daily_active_users, weekly_active_users, total_alpha_users
+    """
+    async with get_connection() as conn:
+        # Get token/request metrics
+        token_stats = await conn.fetchrow(
+            """
+            SELECT 
+                COALESCE(SUM(COALESCE(request_count, 0)), 0) as total_requests,
+                COUNT(*) FILTER (WHERE revoked_at IS NULL) as active_keys,
+                COUNT(*) as total_keys,
+                COUNT(DISTINCT alpha_user_id) FILTER (
+                    WHERE revoked_at IS NULL 
+                    AND last_used_at >= NOW() - INTERVAL '1 day'
+                ) as daily_active_users,
+                COUNT(DISTINCT alpha_user_id) FILTER (
+                    WHERE revoked_at IS NULL 
+                    AND last_used_at >= NOW() - INTERVAL '7 days'
+                ) as weekly_active_users
+            FROM api_tokens
+            """
+        )
+        
+        # Get total alpha users
+        alpha_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM alpha_users"
+        )
+        
+        return {
+            "total_requests": int(token_stats["total_requests"]),
+            "active_keys": int(token_stats["active_keys"]),
+            "total_keys": int(token_stats["total_keys"]),
+            "daily_active_users": int(token_stats["daily_active_users"]),
+            "weekly_active_users": int(token_stats["weekly_active_users"]),
+            "total_alpha_users": int(alpha_count or 0),
+        }
