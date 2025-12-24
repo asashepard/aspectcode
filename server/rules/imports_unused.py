@@ -90,6 +90,11 @@ class ImportsUnusedRule:
             consider_type_checking: If False, type-only usage counts as "used".
                                    If True, type-only usage is ignored (stricter).
         """
+        # React is implicitly used by JSX transform in React 17+ / Next.js
+        # Don't report React as unused in JSX/TSX files
+        if symbol.name == 'React' and language in ['javascript', 'typescript']:
+            return True
+        
         # Check for direct references in scope graph
         if scopes.has_refs_to(symbol):
             # Language-specific handling for type-only imports
