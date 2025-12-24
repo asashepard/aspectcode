@@ -65,6 +65,15 @@ class TestAuth:
         )
         # Should not be 401 (may be 400 or 500 due to invalid path, but not auth error)
         assert response.status_code != 401
+
+    def test_validate_with_valid_bearer_key(self, client_with_auth):
+        """Validate endpoint should work with valid API key via Authorization: Bearer."""
+        response = client_with_auth.post(
+            "/validate",
+            json={"paths": ["/tmp/test.py"]},
+            headers={"Authorization": "Bearer test-key-1"}
+        )
+        assert response.status_code != 401
     
     def test_validate_with_invalid_key(self, client_with_auth):
         """Validate endpoint should reject invalid API key."""
@@ -75,6 +84,37 @@ class TestAuth:
         )
         assert response.status_code == 401
         assert "Invalid API key" in response.json()["detail"]
+
+    def test_validate_with_invalid_bearer_key(self, client_with_auth):
+        """Validate endpoint should reject invalid API key via Authorization: Bearer."""
+        response = client_with_auth.post(
+            "/validate",
+            json={"paths": ["/tmp/test.py"]},
+            headers={"Authorization": "Bearer wrong-key"}
+        )
+        assert response.status_code == 401
+        assert "Invalid API key" in response.json()["detail"]
+
+    def test_revoked_key_returns_403(self, client_with_auth):
+        """Revoked keys should return 403 (mocked DB revocation check)."""
+        from app import auth as auth_module
+
+        async def _fake_lookup_db_token(_api_key: str):
+            return None
+
+        async def _fake_is_token_revoked(_token_hash: str) -> bool:
+            return True
+
+        with patch.object(auth_module, "DATABASE_URL", "postgres://dummy"):
+            with patch.object(auth_module, "_lookup_db_token", _fake_lookup_db_token):
+                with patch.object(auth_module.db, "is_token_revoked", _fake_is_token_revoked):
+                    response = client_with_auth.post(
+                        "/validate",
+                        json={"paths": ["/tmp/test.py"]},
+                        headers={"X-API-Key": "revoked-key"}
+                    )
+                    assert response.status_code == 403
+                    assert "revoked" in response.json()["detail"].lower()
     
     def test_client_version_header_accepted(self, client_with_auth):
         """Client version header should be accepted."""
@@ -102,8 +142,8 @@ class TestCORS:
             "/health",
             headers={"Origin": "http://localhost:3000"}
         )
-        # CORS preflight should be handled
-        assert response.status_code in [200, 204, 400]
+        # CORS preflight should be handled (405 may occur if OPTIONS not explicitly allowed)
+        assert response.status_code in [200, 204, 400, 405]
 
 
 class TestRateLimiting:

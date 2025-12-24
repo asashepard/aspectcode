@@ -7,7 +7,7 @@ import { loadGrammarsOnce, getLoadedGrammarsSummary } from './tsParser';
 import { extractPythonImports, extractTSJSImports } from './importExtractors';
 import { AspectCodePanelProvider } from './panel/PanelProvider';
 import { AspectCodeState } from './state';
-import { post, fetchCapabilities, initHttp, getHeaders, handleHttpError } from './http';
+import { post, fetchCapabilities, initHttp, getHeaders, handleHttpError, getBaseUrl } from './http';
 import Parser from 'web-tree-sitter';
 import { activateNewCommands } from './newCommandsIntegration';
 import { IncrementalIndexer } from './services/IncrementalIndexer';
@@ -456,7 +456,7 @@ async function examineWorkspaceDiff(context?: vscode.ExtensionContext) {
   }
   outputChannel?.appendLine(`Workspace root: ${root}`);
 
-  const apiUrl = vscode.workspace.getConfiguration().get<string>('aspectcode.apiUrl') || 'http://localhost:8000';
+  const apiUrl = getBaseUrl();
   outputChannel?.appendLine(`API URL: ${apiUrl}`);
 
   const diff = await runGitDiff(root);
@@ -990,7 +990,7 @@ async function callAutofixAPI(violationIds?: string[], context?: vscode.Extensio
     return null;
   }
 
-  const apiUrl = vscode.workspace.getConfiguration().get<string>('aspectcode.apiUrl') || 'http://localhost:8000';
+  const apiUrl = getBaseUrl();
 
   try {
     // Build payload same as validate
@@ -1162,7 +1162,7 @@ async function indexRepository(force: boolean = false, state?: AspectCodeState) 
     return;
   }
 
-  const apiUrl = vscode.workspace.getConfiguration().get<string>('aspectcode.apiUrl') || 'http://localhost:8000';
+  const apiUrl = getBaseUrl();
 
   try {
     outputChannel?.appendLine(`=== ${force ? 'Re-indexing' : 'Indexing'} repository: ${root} ===`);
@@ -1297,7 +1297,7 @@ async function examineFullRepository(state?: AspectCodeState, context?: vscode.E
     return;
   }
 
-  const apiUrl = vscode.workspace.getConfiguration().get<string>('aspectcode.apiUrl') || 'http://localhost:8000';
+  const apiUrl = getBaseUrl();
 
   try {
     outputChannel?.appendLine(`=== Full repository examination: ${root} ===`);
@@ -1551,7 +1551,7 @@ async function showRepositoryStatus() {
     return;
   }
 
-  const apiUrl = vscode.workspace.getConfiguration().get<string>('aspectcode.apiUrl') || 'http://localhost:8000';
+  const apiUrl = getBaseUrl();
 
   try {
     // Get snapshots
@@ -2607,7 +2607,7 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(vscode.commands.registerCommand('aspectcode.applySuggestedImport', async (uri: vscode.Uri, diag: vscode.Diagnostic) => {
     const root = await getWorkspaceRoot();
     if (!root) return;
-    const apiUrl = vscode.workspace.getConfiguration().get<string>('aspectcode.apiUrl') || 'http://localhost:8000';
+    const apiUrl = getBaseUrl();
 
     // Build payload same as validate
     const diff = await runGitDiff(root);
@@ -2666,7 +2666,7 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(vscode.commands.registerCommand('aspectcode.applyOptionalGuard', async (uri: vscode.Uri, diag: vscode.Diagnostic) => {
     const root = await getWorkspaceRoot();
     if (!root) return;
-    const apiUrl = vscode.workspace.getConfiguration().get<string>('aspectcode.apiUrl') || 'http://localhost:8000';
+    const apiUrl = getBaseUrl();
 
     // Build payload same as validate
     const diff = await runGitDiff(root);

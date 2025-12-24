@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 
-// Extension version - updated on each release
-const EXTENSION_VERSION = "0.0.1";
+// Extension version - read from package.json at activation
+let extensionVersion = "0.0.0";
 
 // Secret storage reference - set during extension activation
 let secretStorage: vscode.SecretStorage | undefined;
@@ -12,9 +12,23 @@ let secretStorage: vscode.SecretStorage | undefined;
  */
 export function initHttp(context: vscode.ExtensionContext): void {
   secretStorage = context.secrets;
+  // Read version from extension manifest (package.json)
+  extensionVersion = context.extension.packageJSON.version ?? "0.0.0";
 }
 
-const BASE = () => vscode.workspace.getConfiguration("aspectcode").get<string>("serverBaseUrl") ?? "http://localhost:8000";
+/**
+ * Get the canonical base URL for the Aspect Code server.
+ * Checks serverBaseUrl first (preferred), then apiUrl (legacy), then default.
+ * Exported so all call sites can use a single source of truth.
+ */
+export function getBaseUrl(): string {
+  const config = vscode.workspace.getConfiguration("aspectcode");
+  // Prefer serverBaseUrl (canonical), fall back to apiUrl (legacy), then default
+  return config.get<string>("serverBaseUrl")
+    || config.get<string>("apiUrl")
+    || "http://localhost:8000";
+}
+
 const CONFIG_API_KEY = () => vscode.workspace.getConfiguration("aspectcode").get<string>("apiKey") ?? "";
 
 /**
@@ -40,7 +54,7 @@ export async function getApiKey(): Promise<string> {
 export async function getHeaders(): Promise<Record<string, string>> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    "X-AspectCode-Client-Version": EXTENSION_VERSION,
+    "X-AspectCode-Client-Version": extensionVersion,
   };
   
   const apiKey = await getApiKey();
@@ -108,7 +122,7 @@ export async function post<T>(path: string, body: any): Promise<T> {
   
   try {
     const headers = await getHeaders();
-    const res = await fetch(`${BASE()}${path}`, { 
+    const res = await fetch(`${getBaseUrl()}${path}`, { 
       method: "POST", 
       headers, 
       body: JSON.stringify(body),
@@ -132,7 +146,7 @@ export async function get<T>(path: string): Promise<T> {
   
   try {
     const headers = await getHeaders();
-    const res = await fetch(`${BASE()}${path}`, { 
+    const res = await fetch(`${getBaseUrl()}${path}`, { 
       method: "GET", 
       headers,
       signal: controller.signal

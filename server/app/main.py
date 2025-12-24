@@ -2,6 +2,7 @@ import time
 import sys
 import os
 import importlib.util
+import hashlib
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Depends, Request, Body
@@ -35,8 +36,16 @@ except ImportError as e:
 # Uses API key if available, otherwise falls back to IP address
 def get_rate_limit_key(request: Request) -> str:
     api_key = request.headers.get("X-API-Key")
-    if api_key:
-        return api_key
+    authz = request.headers.get("Authorization")
+
+    bearer_token: Optional[str] = None
+    if authz and authz.lower().startswith("bearer "):
+        bearer_token = authz.split(" ", 1)[1].strip() or None
+
+    token = api_key or bearer_token
+    if token:
+        # Avoid using raw secrets as limiter keys.
+        return "key:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
     return get_remote_address(request)
 
 limiter = Limiter(key_func=get_rate_limit_key)
@@ -83,7 +92,7 @@ app.add_middleware(
     allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "X-API-Key", "X-AspectCode-Client-Version"],
+    allow_headers=["Content-Type", "X-API-Key", "Authorization", "X-AspectCode-Client-Version"],
 )
 
 # Server version for health checks
@@ -100,7 +109,7 @@ def health():
         "version": SERVER_VERSION,
         "engine": "tree-sitter" if TREE_SITTER_AVAILABLE else "unavailable",
         "timestamp": int(time.time()),
-        "auth_required": bool(settings.api_keys),
+        "auth_required": bool(settings.api_keys) or bool(DATABASE_URL),
     }
 
 

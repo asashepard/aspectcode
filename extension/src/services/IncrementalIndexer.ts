@@ -9,7 +9,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { DependencyAnalyzer, DependencyLink } from '../panel/DependencyAnalyzer';
 import { AspectCodeState } from '../state';
-import { getHeaders, handleHttpError } from '../http';
+import { getHeaders, handleHttpError, getBaseUrl } from '../http';
 import type { CacheManager } from './CacheManager';
 
 interface FileSnapshot {
@@ -583,8 +583,7 @@ export class IncrementalIndexer {
    * Re-examine specific files and merge results
    */
   private async revalidateFiles(scope: ValidationScope): Promise<void> {
-    const apiUrl = vscode.workspace.getConfiguration().get<string>('aspectcode.apiUrl') 
-      || 'http://localhost:8000';
+    const apiUrl = getBaseUrl();
     
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!workspaceRoot) return;
