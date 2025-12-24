@@ -45,8 +45,9 @@ class Settings(BaseSettings):
     debug: bool = False
     
     # Authentication mode: alpha (free), prod (paid), or both
-    # Default to prod - all users need a valid API key
-    mode: Literal["alpha", "prod", "both"] = "prod"
+    # Default to 'both' - check both alpha_users and users tables
+    # (alpha_users will be renamed to users when we exit alpha)
+    mode: Literal["alpha", "prod", "both"] = "both"
 
     @computed_field
     @property

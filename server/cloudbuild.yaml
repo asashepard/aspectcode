@@ -49,7 +49,7 @@ steps:
       - '--max-instances'
       - '5'
       - '--set-env-vars'
-      - 'ASPECT_CODE_MODE=prod'
+      - 'ASPECT_CODE_MODE=both'
       - '--set-secrets'
       - 'DATABASE_URL=DATABASE_URL:latest'
       - '--allow-unauthenticated'
