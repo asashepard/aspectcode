@@ -19,6 +19,7 @@ from .models import (
 from .storage import get_storage
 from .settings import settings, DATABASE_URL
 from .auth import get_current_user, UserContext
+from .admin import router as admin_router
 from . import db
 
 # Import tree-sitter engine
@@ -74,6 +75,9 @@ app = FastAPI(
     title="Aspect Code — Tree-sitter Code Analysis",
     lifespan=lifespan
 )
+
+# Include admin router
+app.include_router(admin_router)
 
 # Add rate limiter to app state
 app.state.limiter = limiter

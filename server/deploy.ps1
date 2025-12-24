@@ -16,8 +16,8 @@ gcloud run deploy aspectcode-api `
   --concurrency 2 `
   --min-instances 0 `
   --max-instances 5 `
-  --set-env-vars ASPECT_CODE_MODE=prod `
-  --set-secrets DATABASE_URL=DATABASE_URL:latest `
+  --set-env-vars "ASPECT_CODE_MODE=prod" `
+  --set-secrets "DATABASE_URL=DATABASE_URL:latest,ASPECT_CODE_API_KEYS_RAW=ASPECT_CODE_API_KEYS_RAW:latest" `
   --no-invoker-iam-check
 
 if ($LASTEXITCODE -eq 0) {

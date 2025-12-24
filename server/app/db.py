@@ -5,6 +5,7 @@ Uses asyncpg for async Postgres access.
 
 import hashlib
 import secrets
+import uuid
 from datetime import datetime
 from typing import Optional, Any
 from contextlib import asynccontextmanager
@@ -89,14 +90,14 @@ async def get_alpha_user_by_email(email: str) -> Optional[dict]:
     async with get_connection() as conn:
         row = await conn.fetchrow(
             """
-            SELECT id, email, "createdAt"
-            FROM "AlphaUser"
+            SELECT id, email, created_at
+            FROM alpha_users
             WHERE email = $1
             """,
             email.lower(),
         )
         if row:
-            return {"id": row["id"], "email": row["email"], "created_at": row["createdAt"]}
+            return {"id": row["id"], "email": row["email"], "created_at": row["created_at"]}
         return None
 
 
@@ -108,13 +109,13 @@ async def create_alpha_user(email: str) -> dict:
     async with get_connection() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO "AlphaUser" (email, "createdAt", "updatedAt")
+            INSERT INTO alpha_users (email, created_at, updated_at)
             VALUES ($1, NOW(), NOW())
-            RETURNING id, email, "createdAt"
+            RETURNING id, email, created_at
             """,
             email.lower(),
         )
-        return {"id": row["id"], "email": row["email"], "created_at": row["createdAt"]}
+        return {"id": row["id"], "email": row["email"], "created_at": row["created_at"]}
 
 
 async def get_or_create_alpha_user(email: str) -> dict:
@@ -156,13 +157,15 @@ async def create_api_token_with_hash(
     name: str = "default",
 ) -> dict:
     """Create a new API token using a pre-computed token hash (admin/internal use)."""
+    token_id = str(uuid.uuid4())
     async with get_connection() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO "ApiToken" ("alphaUserId", "tokenHash", name, "createdAt", "updatedAt")
-            VALUES ($1, $2, $3, NOW(), NOW())
-            RETURNING id, name, "createdAt", "updatedAt"
+            INSERT INTO api_tokens (id, alpha_user_id, token_hash, name, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, NOW(), NOW())
+            RETURNING id, name, created_at, updated_at
             """,
+            token_id,
             alpha_user_id,
             token_hash,
             name,
@@ -170,8 +173,8 @@ async def create_api_token_with_hash(
         return {
             "id": row["id"],
             "name": row["name"],
-            "created_at": row["createdAt"],
-            "updated_at": row["updatedAt"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
         }
 
 
@@ -184,10 +187,10 @@ async def get_alpha_user_by_token_hash(token_hash: str) -> Optional[dict]:
         row = await conn.fetchrow(
             """
             SELECT u.id, u.email, t.id as token_id, t.name as token_name
-            FROM "ApiToken" t
-            JOIN "AlphaUser" u ON t."alphaUserId" = u.id
-            WHERE t."tokenHash" = $1
-              AND t."revokedAt" IS NULL
+            FROM api_tokens t
+            JOIN alpha_users u ON t.alpha_user_id = u.id
+            WHERE t.token_hash = $1
+              AND t.revoked_at IS NULL
             """,
             token_hash,
         )
@@ -210,10 +213,10 @@ async def get_user_by_token_hash(token_hash: str) -> Optional[dict]:
         row = await conn.fetchrow(
             """
             SELECT u.id, u.email, t.id as token_id, t.name as token_name
-            FROM "ApiToken" t
-            JOIN "User" u ON t."userId" = u.id
-            WHERE t."tokenHash" = $1
-              AND t."revokedAt" IS NULL
+            FROM api_tokens t
+            JOIN users u ON t.user_id = u.id
+            WHERE t.token_hash = $1
+              AND t.revoked_at IS NULL
             """,
             token_hash,
         )
@@ -228,7 +231,7 @@ async def get_user_by_token_hash(token_hash: str) -> Optional[dict]:
 
 
 async def touch_token_last_used(token_hash: str, min_interval_seconds: int = 60) -> bool:
-    """Update ApiToken.lastUsedAt (and updatedAt) if it is stale.
+    """Update api_tokens.last_used_at (and updated_at) if it is stale.
 
     Returns True if a row was updated, False otherwise.
     Intended to be called after a token has already been validated.
@@ -239,13 +242,13 @@ async def touch_token_last_used(token_hash: str, min_interval_seconds: int = 60)
     async with get_connection() as conn:
         row = await conn.fetchrow(
             """
-            UPDATE "ApiToken"
-            SET "lastUsedAt" = NOW(), "updatedAt" = NOW()
-            WHERE "tokenHash" = $1
-              AND "revokedAt" IS NULL
+            UPDATE api_tokens
+            SET last_used_at = NOW(), updated_at = NOW()
+            WHERE token_hash = $1
+              AND revoked_at IS NULL
               AND (
-                "lastUsedAt" IS NULL
-                OR "lastUsedAt" < (NOW() - ($2 * INTERVAL '1 second'))
+                last_used_at IS NULL
+                OR last_used_at < (NOW() - ($2 * INTERVAL '1 second'))
               )
             RETURNING id
             """,
@@ -257,14 +260,14 @@ async def touch_token_last_used(token_hash: str, min_interval_seconds: int = 60)
 
 async def revoke_api_token(token_id: str) -> bool:
     """
-    Revoke an API token by setting revokedAt.
+    Revoke an API token by setting revoked_at.
     Idempotent: returns True if token exists (even if already revoked).
     """
     async with get_connection() as conn:
         row = await conn.fetchrow(
             """
-            UPDATE "ApiToken"
-            SET "revokedAt" = COALESCE("revokedAt", NOW()), "updatedAt" = NOW()
+            UPDATE api_tokens
+            SET revoked_at = COALESCE(revoked_at, NOW()), updated_at = NOW()
             WHERE id = $1
             RETURNING id
             """,
@@ -278,9 +281,9 @@ async def revoke_api_token_by_hash(token_hash: str) -> bool:
     async with get_connection() as conn:
         row = await conn.fetchrow(
             """
-            UPDATE "ApiToken"
-            SET "revokedAt" = COALESCE("revokedAt", NOW()), "updatedAt" = NOW()
-            WHERE "tokenHash" = $1
+            UPDATE api_tokens
+            SET revoked_at = COALESCE(revoked_at, NOW()), updated_at = NOW()
+            WHERE token_hash = $1
             RETURNING id
             """,
             token_hash,
@@ -296,26 +299,26 @@ async def is_token_revoked(token_hash: str) -> bool:
     async with get_connection() as conn:
         row = await conn.fetchrow(
             """
-            SELECT "revokedAt"
-            FROM "ApiToken"
-            WHERE "tokenHash" = $1
+            SELECT revoked_at
+            FROM api_tokens
+            WHERE token_hash = $1
             """,
             token_hash,
         )
-        # Token exists and has a revokedAt timestamp
-        return row is not None and row["revokedAt"] is not None
+        # Token exists and has a revoked_at timestamp
+        return row is not None and row["revoked_at"] is not None
 
 
 async def get_tokens_for_alpha_user(alpha_user_id: str, include_revoked: bool = False) -> list[dict]:
     """Get tokens for an alpha user (optionally including revoked tokens)."""
     async with get_connection() as conn:
-        where_clause = "\"alphaUserId\" = $1" if include_revoked else "\"alphaUserId\" = $1 AND \"revokedAt\" IS NULL"
+        where_clause = "alpha_user_id = $1" if include_revoked else "alpha_user_id = $1 AND revoked_at IS NULL"
         rows = await conn.fetch(
             f"""
-            SELECT id, name, "createdAt", "lastUsedAt", "revokedAt"
-            FROM "ApiToken"
+            SELECT id, name, created_at, last_used_at, revoked_at
+            FROM api_tokens
             WHERE {where_clause}
-            ORDER BY "createdAt" DESC
+            ORDER BY created_at DESC
             """,
             alpha_user_id,
         )
@@ -323,9 +326,137 @@ async def get_tokens_for_alpha_user(alpha_user_id: str, include_revoked: bool = 
             {
                 "id": row["id"],
                 "name": row["name"],
-                "created_at": row["createdAt"],
-                "last_used_at": row["lastUsedAt"],
-                "revoked_at": row["revokedAt"],
+                "created_at": row["created_at"],
+                "last_used_at": row["last_used_at"],
+                "revoked_at": row["revoked_at"],
+            }
+            for row in rows
+        ]
+
+
+# --- Admin Token Management ---
+
+
+async def create_api_token_for_admin(
+    alpha_user_id: str | None = None,
+    user_id: str | None = None,
+    name: str = "default",
+) -> tuple[str, dict]:
+    """
+    Create an API token for admin purposes.
+    
+    Accepts either alpha_user_id, user_id, or neither.
+    Returns (raw_token, token_row_dict).
+    """
+    raw_token, token_hash = generate_api_key(prefix="ac_")  # Unpack tuple correctly
+    token_id = str(uuid.uuid4())
+    
+    async with get_connection() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO api_tokens (
+                id, alpha_user_id, user_id, token_hash, name, 
+                created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+            RETURNING id, created_at
+            """,
+            token_id,
+            alpha_user_id,
+            user_id,
+            token_hash,
+            name,
+        )
+        
+        return raw_token, {
+            "id": row["id"],
+            "created_at": row["created_at"],
+        }
+
+
+async def revoke_api_token_by_id(token_id: str) -> dict | None:
+    """
+    Revoke a token by its database ID.
+    
+    Returns token info with revoked_at, or None if token not found.
+    Idempotent - if already revoked, returns existing revoked_at.
+    """
+    async with get_connection() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE api_tokens
+            SET revoked_at = COALESCE(revoked_at, NOW()), updated_at = NOW()
+            WHERE id = $1
+            RETURNING id, revoked_at
+            """,
+            token_id,
+        )
+        
+        if row is None:
+            return None
+        
+        return {
+            "id": row["id"],
+            "revoked_at": row["revoked_at"],
+        }
+
+
+async def list_api_tokens(
+    alpha_user_id: str | None = None,
+    user_id: str | None = None,
+    include_revoked: bool = True,
+) -> list[dict]:
+    """
+    List API tokens with optional filtering.
+    
+    Filters:
+    - alpha_user_id: Filter by alpha user
+    - user_id: Filter by paid user
+    - include_revoked: Include revoked tokens (default: True)
+    
+    Returns list of token metadata (never includes raw token or hash).
+    """
+    async with get_connection() as conn:
+        conditions = []
+        params = []
+        param_idx = 1
+        
+        if alpha_user_id is not None:
+            conditions.append(f'alpha_user_id = ${param_idx}')
+            params.append(alpha_user_id)
+            param_idx += 1
+        
+        if user_id is not None:
+            conditions.append(f'user_id = ${param_idx}')
+            params.append(user_id)
+            param_idx += 1
+        
+        if not include_revoked:
+            conditions.append('revoked_at IS NULL')
+        
+        where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+        
+        rows = await conn.fetch(
+            f"""
+            SELECT 
+                id, name, alpha_user_id, user_id,
+                created_at, last_used_at, revoked_at
+            FROM api_tokens
+            {where_clause}
+            ORDER BY created_at DESC
+            """,
+            *params,
+        )
+        
+        return [
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "alpha_user_id": row["alpha_user_id"],
+                "user_id": row["user_id"],
+                "created_at": row["created_at"],
+                "last_used_at": row["last_used_at"],
+                "revoked_at": row["revoked_at"],
             }
             for row in rows
         ]
