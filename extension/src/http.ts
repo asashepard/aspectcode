@@ -26,7 +26,7 @@ export function getBaseUrl(): string {
   // Prefer serverBaseUrl (canonical), fall back to apiUrl (legacy), then default
   return config.get<string>("serverBaseUrl")
     || config.get<string>("apiUrl")
-    || "http://localhost:8000";
+    || "https://api.aspectcode.com";
 }
 
 const CONFIG_API_KEY = () => vscode.workspace.getConfiguration("aspectcode").get<string>("apiKey") ?? "";

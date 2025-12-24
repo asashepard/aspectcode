@@ -92,7 +92,7 @@
       "properties": {
         "aspectcode.serverBaseUrl": {
           "type": "string",
-          "default": "http://localhost:8000",
+          "default": "https://api.aspectcode.com",
           "description": "Base URL of the Aspect Code server. Remote servers require an API key for authentication."
         },
         "aspectcode.apiKey": {
@@ -102,8 +102,8 @@
         },
         "aspectcode.apiUrl": {
           "type": "string",
-          "default": "http://localhost:8000",
-          "description": "Base URL of the Aspect Code hosted API"
+          "default": "https://api.aspectcode.com",
+          "description": "Base URL of the Aspect Code hosted API (deprecated, use serverBaseUrl)"
         },
         "aspectcode.engine.enabled": {
           "type": "boolean",
