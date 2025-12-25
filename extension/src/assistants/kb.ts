@@ -3,6 +3,14 @@ import * as path from 'path';
 import { AspectCodeState } from '../state';
 import { ScoreResult } from '../scoring/scoreEngine';
 import { DependencyAnalyzer, DependencyLink } from '../panel/DependencyAnalyzer';
+import { loadGrammarsOnce, LoadedGrammars } from '../tsParser';
+import { 
+  extractPythonSymbols, 
+  extractTSJSSymbols, 
+  extractJavaSymbols, 
+  extractCSharpSymbols,
+  ExtractedSymbol
+} from '../importExtractors';
 
 // ============================================================================
 // KB Size Budgets & Invariants
@@ -202,7 +210,8 @@ function extractKBEnrichingFindings(
  */
 export async function autoRegenerateKBFiles(
   state: AspectCodeState,
-  outputChannel: vscode.OutputChannel
+  outputChannel: vscode.OutputChannel,
+  context?: vscode.ExtensionContext
 ): Promise<void> {
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders || workspaceFolders.length === 0) {
@@ -246,7 +255,7 @@ export async function autoRegenerateKBFiles(
     }
 
     // Regenerate KB files
-    await generateKnowledgeBase(workspaceRoot, state, scoreResult, outputChannel);
+    await generateKnowledgeBase(workspaceRoot, state, scoreResult, outputChannel, context);
     
     outputChannel.appendLine('[KB] Auto-regenerated after examination update');
   } catch (error) {
@@ -266,7 +275,8 @@ export async function generateKnowledgeBase(
   workspaceRoot: vscode.Uri,
   state: AspectCodeState,
   scoreResult: ScoreResult | null,
-  outputChannel: vscode.OutputChannel
+  outputChannel: vscode.OutputChannel,
+  context?: vscode.ExtensionContext
 ): Promise<void> {
   const aspectCodeDir = vscode.Uri.joinPath(workspaceRoot, '.aspect');
   
@@ -282,6 +292,17 @@ export async function generateKnowledgeBase(
 
   outputChannel.appendLine('[KB] Generating V3 knowledge base in .aspect/');
 
+  // Load tree-sitter grammars if context is available
+  let grammars: LoadedGrammars | null = null;
+  if (context) {
+    try {
+      grammars = await loadGrammarsOnce(context, outputChannel);
+      outputChannel.appendLine('[KB] Tree-sitter grammars loaded for enhanced symbol extraction');
+    } catch (e) {
+      outputChannel.appendLine(`[KB] Tree-sitter grammars not available, using regex fallback: ${e}`);
+    }
+  }
+
   // Pre-fetch shared data
   const files = await discoverWorkspaceFiles(workspaceRoot);
   const { stats: depData, links: allLinks } = await getDetailedDependencyData(workspaceRoot, files, outputChannel);
@@ -289,7 +310,7 @@ export async function generateKnowledgeBase(
   // Generate all KB files in parallel (V3: 3 files)
   await Promise.all([
     generateArchitectureFile(aspectCodeDir, state, workspaceRoot, files, depData, allLinks, outputChannel),
-    generateMapFile(aspectCodeDir, state, workspaceRoot, files, depData, allLinks, outputChannel),
+    generateMapFile(aspectCodeDir, state, workspaceRoot, files, depData, allLinks, outputChannel, grammars),
     generateContextFile(aspectCodeDir, state, workspaceRoot, files, allLinks, outputChannel)
   ]);
 
@@ -684,7 +705,8 @@ async function generateMapFile(
   files: string[],
   depData: Map<string, { inDegree: number; outDegree: number }>,
   allLinks: DependencyLink[],
-  outputChannel: vscode.OutputChannel
+  outputChannel: vscode.OutputChannel,
+  grammars?: LoadedGrammars | null
 ): Promise<void> {
   let content = '# Map\n\n';
   content += '_Symbol index with signatures and conventions. Use to find types, functions, and coding patterns._\n\n';
@@ -826,7 +848,7 @@ async function generateMapFile(
 
     for (const file of sortedFiles) {
       const relPath = makeRelativePath(file, workspaceRoot.fsPath);
-      const symbols = await extractFileSymbolsWithSignatures(file, allLinks, workspaceRoot.fsPath);
+      const symbols = await extractFileSymbolsWithSignatures(file, allLinks, workspaceRoot.fsPath, grammars);
 
       if (symbols.length === 0) continue;
 
@@ -1026,12 +1048,15 @@ async function extractModelSignature(filePath: string, modelName: string): Promi
 }
 
 /**
- * Extract file symbols with enhanced signature information
+ * Extract file symbols with enhanced signature information.
+ * Uses tree-sitter AST parsing when grammars are available for accurate multi-line support.
+ * Falls back to regex for backwards compatibility.
  */
 async function extractFileSymbolsWithSignatures(
   filePath: string,
   allLinks: DependencyLink[],
-  workspaceRoot: string
+  workspaceRoot: string,
+  grammars?: LoadedGrammars | null
 ): Promise<Array<{ name: string; kind: string; signature: string | null; calledBy: string[] }>> {
   const symbols: Array<{ name: string; kind: string; signature: string | null; calledBy: string[] }> = [];
   
@@ -1039,8 +1064,50 @@ async function extractFileSymbolsWithSignatures(
     const uri = vscode.Uri.file(filePath);
     const content = await vscode.workspace.fs.readFile(uri);
     const text = Buffer.from(content).toString('utf-8');
-    const lines = text.split('\n');
     const ext = path.extname(filePath).toLowerCase();
+    
+    // Try tree-sitter extraction if grammars available
+    let extracted: ExtractedSymbol[] | null = null;
+    
+    if (grammars) {
+      try {
+        if (ext === '.py' && grammars.python) {
+          extracted = extractPythonSymbols(grammars.python, text);
+        } else if (ext === '.ts' && grammars.typescript) {
+          extracted = extractTSJSSymbols(grammars.typescript, text);
+        } else if (ext === '.tsx' && grammars.tsx) {
+          extracted = extractTSJSSymbols(grammars.tsx, text);
+        } else if ((ext === '.js' || ext === '.jsx') && grammars.javascript) {
+          extracted = extractTSJSSymbols(grammars.javascript, text);
+        } else if (ext === '.java' && grammars.java) {
+          extracted = extractJavaSymbols(grammars.java, text);
+        } else if (ext === '.cs' && grammars.csharp) {
+          extracted = extractCSharpSymbols(grammars.csharp, text);
+        }
+      } catch {
+        // Tree-sitter parsing failed, fall through to regex
+        extracted = null;
+      }
+    }
+    
+    // If tree-sitter succeeded, convert ExtractedSymbol to our format
+    if (extracted && extracted.length > 0) {
+      for (const sym of extracted) {
+        // Only include exported symbols for TS/JS, all for Python/Java/C#
+        if (sym.exported || ext === '.py' || ext === '.java' || ext === '.cs') {
+          symbols.push({
+            name: sym.name,
+            kind: sym.kind,
+            signature: sym.signature,
+            calledBy: getSymbolCallers(sym.name, filePath, allLinks, workspaceRoot)
+          });
+        }
+      }
+      return symbols;
+    }
+    
+    // Fallback to regex extraction
+    const lines = text.split('\n');
     
     if (ext === '.py') {
       for (const line of lines) {
@@ -1087,11 +1154,11 @@ async function extractFileSymbolsWithSignatures(
         // Classes
         const classMatch = line.match(/export\s+(?:abstract\s+)?class\s+(\w+)(?:\s+extends\s+(\w+))?/);
         if (classMatch) {
-          const ext = classMatch[2] ? ` extends ${classMatch[2]}` : '';
+          const extCls = classMatch[2] ? ` extends ${classMatch[2]}` : '';
           symbols.push({
             name: classMatch[1],
             kind: 'class',
-            signature: `class ${classMatch[1]}${ext}`,
+            signature: `class ${classMatch[1]}${extCls}`,
             calledBy: getSymbolCallers(classMatch[1], filePath, allLinks, workspaceRoot)
           });
         }

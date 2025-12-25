@@ -1,17 +1,19 @@
 #!/usr/bin/env node
-// Fetch Tree-sitter parser WASMs for Python and TypeScript/JavaScript
+// Fetch Tree-sitter parser WASMs for Python, TypeScript/JavaScript, Java, and C#
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
 
 const PARSERS_DIR = path.join(__dirname, '..', 'parsers');
 
-// Official WASM URLs from tree-sitter-wasms npm package or direct builds
+// Official WASM URLs from tree-sitter releases (updated to latest versions with WASM assets)
 const WASM_URLS = {
-  'python.wasm': 'https://github.com/tree-sitter/tree-sitter-python/releases/download/v0.23.2/tree-sitter-python.wasm',
-  'typescript.wasm': 'https://github.com/tree-sitter/tree-sitter-typescript/releases/download/v0.23.0/tree-sitter-typescript.wasm',
-  'tsx.wasm': 'https://github.com/tree-sitter/tree-sitter-typescript/releases/download/v0.23.0/tree-sitter-tsx.wasm',
-  'javascript.wasm': 'https://github.com/tree-sitter/tree-sitter-javascript/releases/download/v0.23.0/tree-sitter-javascript.wasm'
+  'python.wasm': 'https://github.com/tree-sitter/tree-sitter-python/releases/download/v0.23.6/tree-sitter-python.wasm',
+  'typescript.wasm': 'https://github.com/tree-sitter/tree-sitter-typescript/releases/download/v0.23.2/tree-sitter-typescript.wasm',
+  'tsx.wasm': 'https://github.com/tree-sitter/tree-sitter-typescript/releases/download/v0.23.2/tree-sitter-tsx.wasm',
+  'javascript.wasm': 'https://github.com/tree-sitter/tree-sitter-javascript/releases/download/v0.23.1/tree-sitter-javascript.wasm',
+  'java.wasm': 'https://github.com/tree-sitter/tree-sitter-java/releases/download/v0.23.4/tree-sitter-java.wasm',
+  'c_sharp.wasm': 'https://github.com/tree-sitter/tree-sitter-c-sharp/releases/download/v0.23.1/tree-sitter-c_sharp.wasm'
 };
 
 async function downloadWasm(name, url, dest) {

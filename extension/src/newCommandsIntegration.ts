@@ -48,7 +48,7 @@ export function activateNewCommands(context: vscode.ExtensionContext, state: Asp
       return await handleConfigureAssistants(context, state, commands, outputChannel);
     }),
     vscode.commands.registerCommand('aspectcode.generateInstructionFiles', async () => {
-      return await handleGenerateInstructionFiles(state, commands, outputChannel);
+      return await handleGenerateInstructionFiles(state, commands, outputChannel, context);
     })
   );
 
@@ -571,7 +571,8 @@ async function handleConfigureAssistants(
 async function handleGenerateInstructionFiles(
   state: AspectCodeState,
   commands: AspectCodeCommands,
-  outputChannel: vscode.OutputChannel
+  outputChannel: vscode.OutputChannel,
+  context?: vscode.ExtensionContext
 ): Promise<void> {
   try {
     const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -646,7 +647,7 @@ async function handleGenerateInstructionFiles(
     }
 
     // Generate instruction files
-    await generateInstructionFiles(workspaceRoot, state, scoreResult, outputChannel);
+    await generateInstructionFiles(workspaceRoot, state, scoreResult, outputChannel, context);
 
     // Save cache after generating files (ensures cache is in sync with KB)
     try {

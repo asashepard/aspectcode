@@ -1524,7 +1524,7 @@ async function examineFullRepository(state?: AspectCodeState, context?: vscode.E
       if (state) {
         try {
           const { autoRegenerateKBFiles } = await import('./assistants/kb');
-          await autoRegenerateKBFiles(state, outputChannel!);
+          await autoRegenerateKBFiles(state, outputChannel!, context);
         } catch (kbError) {
           outputChannel?.appendLine(`[KB] Auto-regeneration failed (non-critical): ${kbError}`);
         }

@@ -2,11 +2,13 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import Parser from 'web-tree-sitter';
 
-type LoadedGrammars = {
+export type LoadedGrammars = {
   python?: Parser.Language;
   typescript?: Parser.Language;
   tsx?: Parser.Language;
   javascript?: Parser.Language;
+  java?: Parser.Language;
+  csharp?: Parser.Language;
 };
 
 type GrammarSummary = {
@@ -14,6 +16,8 @@ type GrammarSummary = {
   typescript: boolean;
   tsx: boolean;
   javascript: boolean;
+  java: boolean;
+  csharp: boolean;
   initFailed: boolean;
 };
 
@@ -23,6 +27,8 @@ let grammarSummary: GrammarSummary = {
   typescript: false,
   tsx: false,
   javascript: false,
+  java: false,
+  csharp: false,
   initFailed: false
 };
 
@@ -103,6 +109,26 @@ export async function loadGrammarsOnce(context: vscode.ExtensionContext, outputC
         outputChannel?.appendLine(`Tree-sitter: javascript grammar failed: ${error}`);
       }
       
+      // Java grammar
+      try {
+        outputChannel?.appendLine('Loading java.wasm...');
+        grammars.java = await Parser.Language.load(path.join(base, 'java.wasm'));
+        grammarSummary.java = true;
+        outputChannel?.appendLine('Tree-sitter: java grammar loaded ✓');
+      } catch (error) {
+        outputChannel?.appendLine(`Tree-sitter: java grammar failed: ${error}`);
+      }
+      
+      // C# grammar
+      try {
+        outputChannel?.appendLine('Loading c_sharp.wasm...');
+        grammars.csharp = await Parser.Language.load(path.join(base, 'c_sharp.wasm'));
+        grammarSummary.csharp = true;
+        outputChannel?.appendLine('Tree-sitter: csharp grammar loaded ✓');
+      } catch (error) {
+        outputChannel?.appendLine(`Tree-sitter: csharp grammar failed: ${error}`);
+      }
+      
       outputChannel?.appendLine('Tree-sitter: initialization complete');
       return grammars;
     } catch (error) {
@@ -126,6 +152,8 @@ export function resetGrammarCache(): void {
     typescript: false,
     tsx: false,
     javascript: false,
+    java: false,
+    csharp: false,
     initFailed: false
   };
 }

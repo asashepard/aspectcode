@@ -95,10 +95,11 @@ export async function generateInstructionFiles(
   workspaceRoot: vscode.Uri,
   state: AspectCodeState,
   scoreResult: ScoreResult | null,
-  outputChannel: vscode.OutputChannel
+  outputChannel: vscode.OutputChannel,
+  context?: vscode.ExtensionContext
 ): Promise<void> {
   // Always generate KB files first
-  await generateKnowledgeBase(workspaceRoot, state, scoreResult, outputChannel);
+  await generateKnowledgeBase(workspaceRoot, state, scoreResult, outputChannel, context);
 
   // Read assistant settings
   const config = vscode.workspace.getConfiguration('aspectcode.assistants');
