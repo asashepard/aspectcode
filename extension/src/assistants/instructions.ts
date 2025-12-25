@@ -19,6 +19,8 @@ function generateCanonicalContent(): string {
 
 Before multi-file edits, read the KB files in \`.aspect/\`:
 
+> **Tip:** For small single-file changes, you usually only need \`map.md\` (and \`architecture.md\` if the file is a hub).
+
 | File | Contains | When to Read |
 |------|----------|--------------|
 | \`architecture.md\` | High-risk hubs, entry points, circular deps | **Always first** |
@@ -62,9 +64,9 @@ Hub files have many dependents — changes ripple widely. Before editing:
 1. Confirm the file is in \`architecture.md\` → \`## High-Risk Architectural Hubs\`
 2. Check dependent count (e.g., "8 dependents" = high risk)
 3. Prefer **additive changes** (new functions) over modifying existing signatures
-4. If you must change a signature, update all callers listed in "Called by"
+4. If you must change a signature, update all callers listed in "Called by (files)"
 
-**Example:** If \`models.py\` has 8 dependents, adding a new field is safer than renaming an existing one.
+**Example:** If a hub file has 8+ dependents, adding a new function is safer than renaming an existing one.
 
 ---
 
