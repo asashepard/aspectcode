@@ -141,6 +141,148 @@ export function activateNewCommands(context: vscode.ExtensionContext, state: Asp
   alignmentsWatcher.onDidDelete(updateAlignmentsButton);
   context.subscriptions.push(alignmentsWatcher);
 
+  // Watch for .aspect/ folder and instruction file changes to update the '+' button visibility
+  // Track if we've recently shown the notification to avoid spamming
+  let lastNotificationTime = 0;
+  const NOTIFICATION_DEBOUNCE_MS = 5000;
+
+  const updateInstructionFilesStatus = async (showNotificationOnMissing: boolean = false) => {
+    const panelProvider = (state as any)._panelProvider;
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!workspaceRoot) {return;}
+
+    const detected = await detectAssistants(workspaceRoot);
+    const hasAspectKB = detected.has('aspectKB');
+    
+    // Check for instruction files (exclude aspectKB and alignments from count)
+    const instructionAssistants = new Set(detected);
+    instructionAssistants.delete('aspectKB');
+    instructionAssistants.delete('alignments');
+    const hasInstructionFiles = instructionAssistants.size > 0;
+    
+    // Show + button if either is missing
+    const setupComplete = hasAspectKB && hasInstructionFiles;
+    
+    // Update panel if available
+    if (panelProvider && typeof panelProvider.post === 'function') {
+      panelProvider.post({ type: 'INSTRUCTION_FILES_STATUS', hasFiles: setupComplete });
+    }
+
+    // Show notification if setup is incomplete and we should notify
+    if (showNotificationOnMissing && !setupComplete) {
+      const now = Date.now();
+      if (now - lastNotificationTime > NOTIFICATION_DEBOUNCE_MS) {
+        lastNotificationTime = now;
+        outputChannel.appendLine(`[Watcher] Detected missing files: aspectKB=${hasAspectKB}, instructionFiles=${hasInstructionFiles}`);
+        const message = !hasAspectKB 
+          ? 'Aspect Code: Knowledge base (.aspect/) was deleted.'
+          : 'Aspect Code: AI instruction files were deleted.';
+        const action = await vscode.window.showWarningMessage(
+          message + ' Regenerate to restore AI assistant context.',
+          'Regenerate'
+        );
+        if (action === 'Regenerate') {
+          vscode.commands.executeCommand('aspectcode.configureAssistants');
+        }
+      }
+    }
+  };
+
+  // Debounce the update to avoid rapid-fire during git operations
+  let instructionUpdateTimeout: NodeJS.Timeout | undefined;
+  const debouncedInstructionUpdate = (showNotification: boolean = false) => {
+    if (instructionUpdateTimeout) {
+      clearTimeout(instructionUpdateTimeout);
+    }
+    instructionUpdateTimeout = setTimeout(() => {
+      updateInstructionFilesStatus(showNotification);
+    }, 500);
+  };
+
+  // Watch for .aspect/ folder changes (including files within it)
+  const aspectWatcher = vscode.workspace.createFileSystemWatcher('**/.aspect/**');
+  aspectWatcher.onDidCreate((uri) => {
+    outputChannel.appendLine(`[Watcher] .aspect file created: ${uri.fsPath}`);
+    debouncedInstructionUpdate(false);
+  });
+  aspectWatcher.onDidDelete((uri) => {
+    outputChannel.appendLine(`[Watcher] .aspect file deleted: ${uri.fsPath}`);
+    debouncedInstructionUpdate(true);
+  });
+  context.subscriptions.push(aspectWatcher);
+
+  // Also watch for the .aspect folder itself being deleted
+  const aspectFolderWatcher = vscode.workspace.createFileSystemWatcher('**/.aspect');
+  aspectFolderWatcher.onDidCreate((uri) => {
+    outputChannel.appendLine(`[Watcher] .aspect folder created: ${uri.fsPath}`);
+    debouncedInstructionUpdate(false);
+  });
+  aspectFolderWatcher.onDidDelete((uri) => {
+    outputChannel.appendLine(`[Watcher] .aspect folder deleted: ${uri.fsPath}`);
+    debouncedInstructionUpdate(true);
+  });
+  context.subscriptions.push(aspectFolderWatcher);
+
+  // Watch for instruction files: AGENTS.md, CLAUDE.md
+  const rootInstructionWatcher = vscode.workspace.createFileSystemWatcher('**/{AGENTS,CLAUDE}.md');
+  rootInstructionWatcher.onDidCreate(() => debouncedInstructionUpdate(false));
+  rootInstructionWatcher.onDidDelete(() => debouncedInstructionUpdate(true));
+  context.subscriptions.push(rootInstructionWatcher);
+
+  // Watch for Copilot instructions
+  const copilotWatcher = vscode.workspace.createFileSystemWatcher('**/.github/copilot-instructions.md');
+  copilotWatcher.onDidCreate(() => debouncedInstructionUpdate(false));
+  copilotWatcher.onDidDelete(() => debouncedInstructionUpdate(true));
+  context.subscriptions.push(copilotWatcher);
+
+  // Watch for Cursor files
+  const cursorWatcher = vscode.workspace.createFileSystemWatcher('**/{.cursor,.cursorrules}');
+  cursorWatcher.onDidCreate(() => debouncedInstructionUpdate(false));
+  cursorWatcher.onDidDelete(() => debouncedInstructionUpdate(true));
+  const cursorFolderWatcher = vscode.workspace.createFileSystemWatcher('**/.cursor/**');
+  cursorFolderWatcher.onDidCreate(() => debouncedInstructionUpdate(false));
+  cursorFolderWatcher.onDidDelete(() => debouncedInstructionUpdate(true));
+  context.subscriptions.push(cursorWatcher, cursorFolderWatcher);
+
+  // Run initial check on startup (after a short delay to let panel initialize)
+  // This ensures notification shows even if panel is never opened
+  setTimeout(async () => {
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!workspaceRoot) {return;}
+
+    const detected = await detectAssistants(workspaceRoot);
+    const hasAspectKB = detected.has('aspectKB');
+    
+    const instructionAssistants = new Set(detected);
+    instructionAssistants.delete('aspectKB');
+    instructionAssistants.delete('alignments');
+    const hasInstructionFiles = instructionAssistants.size > 0;
+    
+    const setupComplete = hasAspectKB && hasInstructionFiles;
+    
+    outputChannel.appendLine(`[Startup] Instruction files check: aspectKB=${hasAspectKB}, instructionFiles=${hasInstructionFiles}, setupComplete=${setupComplete}`);
+    
+    if (!setupComplete) {
+      // Update panel if available
+      const panelProvider = (state as any)._panelProvider;
+      if (panelProvider && typeof panelProvider.post === 'function') {
+        panelProvider.post({ type: 'INSTRUCTION_FILES_STATUS', hasFiles: false });
+      }
+      
+      // Show warning notification (more persistent than info)
+      const message = !hasAspectKB 
+        ? 'Aspect Code: Knowledge base (.aspect/) not found.'
+        : 'Aspect Code: No AI instruction files found.';
+      const action = await vscode.window.showWarningMessage(
+        message + ' Generate them to provide AI assistants with project context.',
+        'Generate Now'
+      );
+      if (action === 'Generate Now') {
+        vscode.commands.executeCommand('aspectcode.configureAssistants');
+      }
+    }
+  }, 2000);
+
   // Add legacy CLI scan status bar items (only if enabled)
   const config = vscode.workspace.getConfiguration('aspectcode');
   const enableLegacyPreflight = config.get<boolean>('enableLegacyPreflight', false);
@@ -505,6 +647,31 @@ async function handleGenerateInstructionFiles(
 
     // Generate instruction files
     await generateInstructionFiles(workspaceRoot, state, scoreResult, outputChannel);
+
+    // Save cache after generating files (ensures cache is in sync with KB)
+    try {
+      const { getCacheManager, getIncrementalIndexer } = await import('./extension');
+      const cacheManager = getCacheManager();
+      const incrementalIndexer = getIncrementalIndexer();
+      
+      if (cacheManager && incrementalIndexer) {
+        outputChannel.appendLine('[Cache] Saving cache after KB generation...');
+        const signatures = await cacheManager.buildFileSignatures();
+        const cachedFindings = cacheManager.findingsToCache(state.s.findings || []);
+        const dependencies = cacheManager.dependenciesToCache(incrementalIndexer.getReverseDependencyGraph());
+        const lastValidate = state.s.lastValidate ? {
+          total: state.s.lastValidate.total,
+          fixable: state.s.lastValidate.fixable,
+          tookMs: state.s.lastValidate.tookMs
+        } : undefined;
+        await cacheManager.saveCache(signatures, cachedFindings, dependencies, lastValidate);
+        outputChannel.appendLine(`[Cache] Saved ${cachedFindings.length} findings to cache`);
+      } else {
+        outputChannel.appendLine('[Cache] Cache manager or indexer not available, skipping cache save');
+      }
+    } catch (cacheError) {
+      outputChannel.appendLine(`[Cache] Failed to save cache (non-critical): ${cacheError}`);
+    }
 
     // DISABLED: ALIGNMENTS.json feature - never generate this file
     // const assistantsConfig = vscode.workspace.getConfiguration('aspectcode.assistants');

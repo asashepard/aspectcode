@@ -1809,7 +1809,7 @@ function parseLocationToFileAndSpan(loc?: string): { file: string; span?: { star
 }
 
 /**
- * Fetch patchlet capabilities if not already cached.
+ * Fetch capabilities if not already cached.
  */
 async function fetchCapabilitiesIfNeeded(state: AspectCodeState, force: boolean = false) {
   try {
@@ -1821,7 +1821,7 @@ async function fetchCapabilitiesIfNeeded(state: AspectCodeState, force: boolean 
       return;
     }
 
-    outputChannel?.appendLine('Fetching patchlet capabilities...');
+    outputChannel?.appendLine('Fetching capabilities...');
     const capabilities = await fetchCapabilities();
     state.setCapabilities(capabilities);
     outputChannel?.appendLine(`Cached ${capabilities.fixable_rules.length} fixable rules`);
@@ -2138,11 +2138,6 @@ export async function activate(context: vscode.ExtensionContext) {
   // Initialize state
   const state = new AspectCodeState(context);
   state.load();
-
-  // Fetch capabilities on activation if not cached (don't block startup)
-  fetchCapabilitiesIfNeeded(state).catch(e => {
-    outputChannel.appendLine(`Failed to fetch capabilities: ${e}`);
-  });
 
   // Register the panel provider
   const panelProvider = new AspectCodePanelProvider(context, state, outputChannel);

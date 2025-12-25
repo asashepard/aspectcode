@@ -113,30 +113,6 @@ def health():
 # Alpha registration endpoint removed - API keys created manually via database
 
 
-@app.get("/patchlets/capabilities")
-@limiter.limit(f"{settings.rate_limit}/minute")
-def get_patchlets_capabilities(
-    request: Request,
-    user: UserContext = Depends(get_current_user)
-):
-    """Get capabilities for patchlet fixes."""
-    from engine.profiles import AUTO_FIX_V1_RULE_IDS
-    
-    # Return the list of auto-fixable rules with metadata
-    fixable_rules = [
-        {
-            "rule": rule_id,
-            "fixable": True,
-            "safe": True
-        }
-        for rule_id in AUTO_FIX_V1_RULE_IDS
-    ]
-    
-    return {
-        "language": "python",
-        "fixable_rules": fixable_rules
-    }
-
 @app.post("/index", response_model=IndexResult)
 @limiter.limit(f"{settings.rate_limit}/minute")
 def index_repository(

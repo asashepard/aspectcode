@@ -3156,21 +3156,22 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             }
         }
         
-        // Settings menu toggle
-        document.getElementById('settings-toggle').addEventListener('click', (e) => {
-            e.stopPropagation();
-            const menu = document.getElementById('settings-menu');
-            menu.classList.toggle('hidden');
-        });
+        // Settings menu toggle - disabled, settings button replaced with reindex button
+        // The settings-toggle button no longer exists in the HTML
+        // document.getElementById('settings-toggle').addEventListener('click', (e) => {
+        //     e.stopPropagation();
+        //     const menu = document.getElementById('settings-menu');
+        //     menu.classList.toggle('hidden');
+        // });
         
-        // Close settings menu when clicking elsewhere
-        document.addEventListener('click', (e) => {
-            const menu = document.getElementById('settings-menu');
-            const toggle = document.getElementById('settings-toggle');
-            if (!menu.contains(e.target) && e.target !== toggle) {
-                menu.classList.add('hidden');
-            }
-        });
+        // Close settings menu when clicking elsewhere - disabled since settings button removed
+        // document.addEventListener('click', (e) => {
+        //     const menu = document.getElementById('settings-menu');
+        //     const toggle = document.getElementById('settings-toggle');
+        //     if (!menu.contains(e.target) && e.target !== toggle) {
+        //         menu.classList.add('hidden');
+        //     }
+        // });
         
         function renderDependencyGraph(graph) {
             currentGraph = graph || { nodes: [], links: [] };
@@ -4591,17 +4592,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             return Math.max(0, score);
         }
         
-        // Request initial state and dependency graph
-        vscode.postMessage({ type: 'PANEL_READY' });
-        // Request initial graph based on dropdown preference
-        const savedGraphType = localStorage.getItem('Aspect Code-graph-type') || '2d';
-        if (savedGraphType === '3d') {
-            vscode.postMessage({ type: 'REQUEST_OVERVIEW_GRAPH' });
-        } else {
-            vscode.postMessage({ type: 'REQUEST_FOCUSED_GRAPH' });
-        }
-        
-        // Handle state updates from extension
+        // IMPORTANT: Set up message listener BEFORE sending any requests
+        // to avoid race conditions where responses are lost
         window.addEventListener('message', (event) => {
             const msg = event.data;
             switch (msg.type) {
@@ -4673,6 +4665,16 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     break;
             }
         });
+
+        // Now request initial state and dependency graph (listener is ready)
+        vscode.postMessage({ type: 'PANEL_READY' });
+        // Request initial graph based on dropdown preference
+        const savedGraphType = localStorage.getItem('Aspect Code-graph-type') || '2d';
+        if (savedGraphType === '3d') {
+            vscode.postMessage({ type: 'REQUEST_OVERVIEW_GRAPH' });
+        } else {
+            vscode.postMessage({ type: 'REQUEST_FOCUSED_GRAPH' });
+        }
         
         // Handle real progress updates from backend
         function handleRealProgress(phase, percentage, message) {
