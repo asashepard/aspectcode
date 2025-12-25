@@ -4,6 +4,64 @@ import { AspectCodeState } from '../state';
 import { ScoreResult } from '../scoring/scoreEngine';
 import { DependencyAnalyzer, DependencyLink } from '../panel/DependencyAnalyzer';
 
+// ============================================================================
+// KB Size Budgets & Invariants
+// ============================================================================
+
+/**
+ * Maximum line counts for each KB file.
+ * These ensure the files stay useful for AI context windows.
+ */
+const KB_SIZE_LIMITS = {
+  architecture: 200,  // Guardrail file - most critical, keep concise
+  map: 300,           // Symbol index - can be denser
+  context: 200        // Flow file - focus on key relationships
+} as const;
+
+/**
+ * Maximum items per section to prevent runaway lists.
+ */
+const KB_SECTION_LIMITS = {
+  hubs: 12,
+  hubDetails: 3,
+  entryPoints: 10,
+  directories: 12,
+  dataModels: 15,
+  symbolsPerFile: 10,
+  filesInSymbolIndex: 30,
+  clusters: 6,
+  chains: 8,
+  integrations: 4
+} as const;
+
+/**
+ * Trim content to stay within line budget, preserving structure.
+ * Adds a note if content was truncated.
+ */
+function enforceLineBudget(content: string, maxLines: number, fileName: string): string {
+  const lines = content.split('\n');
+  if (lines.length <= maxLines) {
+    return content;
+  }
+  
+  // Find a good truncation point (end of a section)
+  let truncateAt = maxLines - 3;
+  for (let i = maxLines - 3; i > maxLines - 20 && i > 0; i--) {
+    if (lines[i].startsWith('##') || lines[i].startsWith('---')) {
+      truncateAt = i;
+      break;
+    }
+  }
+  
+  const truncated = lines.slice(0, truncateAt);
+  truncated.push('');
+  truncated.push(`_[Content truncated at ${maxLines} lines. ${lines.length - truncateAt} lines omitted.]_`);
+  truncated.push('');
+  truncated.push(`_Generated: ${new Date().toISOString()}_`);
+  
+  return truncated.join('\n');
+}
+
 /**
  * Ensures .aspect/ and AGENTS.md are added to .gitignore.
  * If .gitignore doesn't exist, prompts the user to create one.
@@ -315,7 +373,7 @@ async function generateArchitectureFile(
       })
       .filter(h => h.totalDegree > 2 || h.findings > 0)
       .sort((a, b) => b.hotspotScore - a.hotspotScore)
-      .slice(0, 12);
+      .slice(0, KB_SECTION_LIMITS.hubs);
 
     if (hubs.length > 0) {
       content += '## ⚠️ High-Risk Architectural Hubs\n\n';
@@ -334,25 +392,49 @@ async function generateArchitectureFile(
       }
       content += '\n';
 
-      // Show top 3 hub details (who imports them)
-      content += '### Hub Details\n\n';
-      for (let i = 0; i < Math.min(3, hubs.length); i++) {
+      // Show top hub details with blast radius
+      content += '### Hub Details & Blast Radius\n\n';
+      content += '_Blast radius = files that would be affected if this hub breaks._\n\n';
+      
+      for (let i = 0; i < Math.min(KB_SECTION_LIMITS.hubDetails, hubs.length); i++) {
         const hub = hubs[i];
         const relPath = makeRelativePath(hub.file, workspaceRoot.fsPath);
-        const importers = allLinks
-          .filter(l => l.target === hub.file && l.source !== hub.file)
-          .filter(l => classifyFile(l.source, workspaceRoot.fsPath) === 'app')
-          .slice(0, 5);
         
-        content += `**${i + 1}. \`${relPath}\`** (${hub.inDegree} importers)\n`;
-        if (importers.length > 0) {
-          content += 'Imported by:\n';
-          for (const imp of importers) {
-            const impRel = makeRelativePath(imp.source, workspaceRoot.fsPath);
-            content += `- \`${impRel}\`\n`;
+        // Get direct importers (first-level blast radius)
+        const directImporters = dedupe(
+          allLinks
+            .filter(l => l.target === hub.file && l.source !== hub.file)
+            .filter(l => classifyFile(l.source, workspaceRoot.fsPath) === 'app'),
+          l => l.source
+        );
+        
+        // Get second-level importers (files that import the direct importers)
+        const secondLevelImporters = new Set<string>();
+        for (const importer of directImporters.slice(0, 10)) {
+          const indirectLinks = allLinks.filter(l => 
+            l.target === importer.source && 
+            l.source !== hub.file &&
+            classifyFile(l.source, workspaceRoot.fsPath) === 'app'
+          );
+          for (const il of indirectLinks.slice(0, 3)) {
+            secondLevelImporters.add(il.source);
           }
-          if (hub.inDegree > 5) {
-            content += `- _...and ${hub.inDegree - 5} more_\n`;
+        }
+        
+        const totalBlastRadius = directImporters.length + secondLevelImporters.size;
+        
+        content += `**${i + 1}. \`${relPath}\`** — Blast radius: ${totalBlastRadius} files\n`;
+        content += `   - Direct dependents: ${directImporters.length}\n`;
+        content += `   - Indirect dependents: ~${secondLevelImporters.size}\n`;
+        
+        if (directImporters.length > 0) {
+          content += '\n   Imported by:\n';
+          for (const imp of directImporters.slice(0, 5)) {
+            const impRel = makeRelativePath(imp.source, workspaceRoot.fsPath);
+            content += `   - \`${impRel}\`\n`;
+          }
+          if (directImporters.length > 5) {
+            content += `   - _...and ${directImporters.length - 5} more_\n`;
           }
         }
         content += '\n';
@@ -368,15 +450,24 @@ async function generateArchitectureFile(
     
     if (ruleEntryPoints.length > 0 || fileEntryPoints.length > 0) {
       content += '## Entry Points\n\n';
-      content += '_Where requests enter the system._\n\n';
+      content += '_Where requests enter the system. Confidence indicates detection reliability._\n\n';
       
-      // Group by type
-      const httpHandlers = ruleEntryPoints.filter(f => f.message.includes('HTTP'));
-      const cliCommands = ruleEntryPoints.filter(f => f.message.includes('CLI'));
-      const mainFunctions = ruleEntryPoints.filter(f => f.message.includes('Main'));
+      // Group rule-based entry points by type
+      const httpHandlers = dedupe(
+        ruleEntryPoints.filter(f => f.message.includes('HTTP')),
+        f => f.file
+      );
+      const cliCommands = dedupe(
+        ruleEntryPoints.filter(f => f.message.includes('CLI')),
+        f => f.file
+      );
+      const mainFunctions = dedupe(
+        ruleEntryPoints.filter(f => f.message.includes('Main')),
+        f => f.file
+      );
       
       if (httpHandlers.length > 0) {
-        content += `**API Routes:** ${httpHandlers.length} endpoints\n`;
+        content += `**API Routes** (${httpHandlers.length} endpoints) — 🟢 High confidence\n`;
         for (const handler of httpHandlers.slice(0, 5)) {
           const relPath = makeRelativePath(handler.file, workspaceRoot.fsPath);
           const info = handler.message.replace('HTTP entry point: ', '');
@@ -389,7 +480,7 @@ async function generateArchitectureFile(
       }
       
       if (cliCommands.length > 0) {
-        content += `**CLI Commands:** ${cliCommands.length}\n`;
+        content += `**CLI Commands** (${cliCommands.length}) — 🟢 High confidence\n`;
         for (const cmd of cliCommands.slice(0, 3)) {
           const relPath = makeRelativePath(cmd.file, workspaceRoot.fsPath);
           content += `- \`${relPath}\`: ${cmd.message}\n`;
@@ -397,15 +488,32 @@ async function generateArchitectureFile(
         content += '\n';
       }
       
-      if (mainFunctions.length > 0 || fileEntryPoints.length > 0) {
+      // Combine main functions and file-based entry points
+      const appEntries: Array<{ path: string; reason: string; confidence: string }> = [];
+      for (const entry of mainFunctions.slice(0, 2)) {
+        appEntries.push({
+          path: makeRelativePath(entry.file, workspaceRoot.fsPath),
+          reason: entry.message,
+          confidence: '🟢 High'
+        });
+      }
+      for (const entry of fileEntryPoints.slice(0, 5)) {
+        const confIcon = entry.confidence === 'high' ? '🟢 High' : 
+                        entry.confidence === 'medium' ? '🟡 Medium' : '🟠 Low';
+        appEntries.push({
+          path: entry.path,
+          reason: entry.reason,
+          confidence: confIcon
+        });
+      }
+      
+      // Dedupe and limit application entries
+      const uniqueAppEntries = dedupe(appEntries, e => e.path).slice(0, 5);
+      
+      if (uniqueAppEntries.length > 0) {
         content += '**Application Entry:**\n';
-        for (const entry of [...mainFunctions.slice(0, 2), ...fileEntryPoints.slice(0, 3)].slice(0, 4)) {
-          if ('message' in entry) {
-            const relPath = makeRelativePath(entry.file, workspaceRoot.fsPath);
-            content += `- \`${relPath}\`: ${entry.message}\n`;
-          } else {
-            content += `- \`${entry.path}\`: ${entry.reason}\n`;
-          }
+        for (const entry of uniqueAppEntries) {
+          content += `- \`${entry.path}\`: ${entry.reason} — ${entry.confidence}\n`;
         }
         content += '\n';
       }
@@ -546,9 +654,12 @@ async function generateArchitectureFile(
 
   content += `\n_Generated: ${new Date().toISOString()}_\n`;
 
+  // Enforce size budget before writing
+  const finalContent = enforceLineBudget(content, KB_SIZE_LIMITS.architecture, 'architecture.md');
+  
   const architectureFile = vscode.Uri.joinPath(aspectCodeDir, 'architecture.md');
-  await vscode.workspace.fs.writeFile(architectureFile, Buffer.from(content, 'utf-8'));
-  outputChannel.appendLine(`[KB] Generated architecture.md`);
+  await vscode.workspace.fs.writeFile(architectureFile, Buffer.from(finalContent, 'utf-8'));
+  outputChannel.appendLine(`[KB] Generated architecture.md (${finalContent.split('\n').length} lines)`);
 }
 
 // ============================================================================
@@ -785,9 +896,12 @@ async function generateMapFile(
 
   content += `\n_Generated: ${new Date().toISOString()}_\n`;
 
+  // Enforce size budget before writing
+  const finalContent = enforceLineBudget(content, KB_SIZE_LIMITS.map, 'map.md');
+  
   const mapFile = vscode.Uri.joinPath(aspectCodeDir, 'map.md');
-  await vscode.workspace.fs.writeFile(mapFile, Buffer.from(content, 'utf-8'));
-  outputChannel.appendLine(`[KB] Generated map.md`);
+  await vscode.workspace.fs.writeFile(mapFile, Buffer.from(finalContent, 'utf-8'));
+  outputChannel.appendLine(`[KB] Generated map.md (${finalContent.split('\n').length} lines)`);
 }
 
 /**
@@ -1164,15 +1278,16 @@ async function generateContextFile(
     const clusters = findModuleClusters(appLinks, workspaceRoot.fsPath);
     if (clusters.length > 0) {
       content += '## Module Clusters\n\n';
-      content += '_Files commonly edited/imported together. Use for feature co-location._\n\n';
+      content += '_Files commonly imported together. Editing one likely requires editing the others._\n\n';
       
-      for (const cluster of clusters.slice(0, 8)) {
+      for (const cluster of clusters.slice(0, 6)) {
         content += `### ${cluster.name}\n\n`;
-        for (const file of cluster.files.slice(0, 6)) {
+        content += `_${cluster.reason}_\n\n`;
+        for (const file of cluster.files.slice(0, 5)) {
           content += `- \`${file}\`\n`;
         }
-        if (cluster.files.length > 6) {
-          content += `- _...and ${cluster.files.length - 6} more_\n`;
+        if (cluster.files.length > 5) {
+          content += `- _...and ${cluster.files.length - 5} more_\n`;
         }
         content += '\n';
       }
@@ -1201,14 +1316,24 @@ async function generateContextFile(
     }
 
     // ============================================================
-    // DEPENDENCY CHAINS
+    // DEPENDENCY CHAINS (top 3-10 chains)
     // ============================================================
-    const chains = findDependencyChains(appLinks, workspaceRoot.fsPath, 3);
+    const chains = findDependencyChains(appLinks, workspaceRoot.fsPath, 4);
     if (chains.length > 0) {
-      content += '## Dependency Chains\n\n';
-      content += '_How modules chain together. Useful for tracing data flow._\n\n';
+      // Limit to 3-10 chains, preferring longer chains
+      const sortedChains = chains
+        .map(c => ({ chain: c, depth: c.split(' → ').length }))
+        .sort((a, b) => b.depth - a.depth)
+        .slice(0, 8)
+        .map(c => c.chain);
       
-      for (const chain of chains.slice(0, 4)) {
+      content += '## Dependency Chains\n\n';
+      content += '_Top data/call flow paths. Shows how changes propagate through the codebase._\n\n';
+      
+      for (let i = 0; i < sortedChains.length && i < 8; i++) {
+        const chain = sortedChains[i];
+        const depth = chain.split(' → ').length;
+        content += `**Chain ${i + 1}** (${depth} modules):\n`;
         content += `\`\`\`\n${chain}\n\`\`\`\n\n`;
       }
     }
@@ -1303,9 +1428,12 @@ async function generateContextFile(
 
   content += `\n\n_Generated: ${new Date().toISOString()}_\n`;
 
+  // Enforce size budget before writing
+  const finalContent = enforceLineBudget(content, KB_SIZE_LIMITS.context, 'context.md');
+  
   const contextFile = vscode.Uri.joinPath(aspectCodeDir, 'context.md');
-  await vscode.workspace.fs.writeFile(contextFile, Buffer.from(content, 'utf-8'));
-  outputChannel.appendLine(`[KB] Generated context.md`);
+  await vscode.workspace.fs.writeFile(contextFile, Buffer.from(finalContent, 'utf-8'));
+  outputChannel.appendLine(`[KB] Generated context.md (${finalContent.split('\n').length} lines)`);
 }
 
 /**
@@ -1515,13 +1643,14 @@ function findDependencyChains(
 }
 
 /**
- * Find clusters of files that are commonly imported together
+ * Find clusters of files that are commonly imported together.
+ * Returns clusters with explanation of WHY they're grouped.
  */
 function findModuleClusters(
   allLinks: DependencyLink[],
   workspaceRoot: string
-): Array<{ name: string; files: string[] }> {
-  const clusters: Array<{ name: string; files: string[] }> = [];
+): Array<{ name: string; files: string[]; reason: string; sharedImporters: string[] }> {
+  const clusters: Array<{ name: string; files: string[]; reason: string; sharedImporters: string[] }> = [];
   
   // Group files by common importers (files that import the same things)
   const importedBy = new Map<string, Set<string>>();
@@ -1535,7 +1664,7 @@ function findModuleClusters(
   
   // Find files that share many importers (they're often used together)
   const fileList = Array.from(importedBy.keys());
-  const coImportScores = new Map<string, Map<string, number>>();
+  const coImportScores = new Map<string, Map<string, { score: number; sharedImporters: string[] }>>();
   
   for (let i = 0; i < fileList.length; i++) {
     for (let j = i + 1; j < fileList.length; j++) {
@@ -1544,17 +1673,22 @@ function findModuleClusters(
       const importersA = importedBy.get(fileA) || new Set();
       const importersB = importedBy.get(fileB) || new Set();
       
-      // Count shared importers
-      let shared = 0;
+      // Find shared importers
+      const sharedImporters: string[] = [];
       for (const importer of importersA) {
-        if (importersB.has(importer)) shared++;
+        if (importersB.has(importer)) {
+          sharedImporters.push(importer);
+        }
       }
       
-      if (shared >= 2) {
+      if (sharedImporters.length >= 2) {
         if (!coImportScores.has(fileA)) {
           coImportScores.set(fileA, new Map());
         }
-        coImportScores.get(fileA)!.set(fileB, shared);
+        coImportScores.get(fileA)!.set(fileB, { 
+          score: sharedImporters.length, 
+          sharedImporters 
+        });
       }
     }
   }
@@ -1566,25 +1700,40 @@ function findModuleClusters(
     if (processed.has(file)) continue;
     
     const related = Array.from(relatedMap.entries())
-      .filter(([_, score]) => score >= 2)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 5)
-      .map(([f]) => f);
+      .filter(([_, data]) => data.score >= 2)
+      .sort((a, b) => b[1].score - a[1].score)
+      .slice(0, 5);
     
     if (related.length >= 2) {
-      const clusterFiles = [file, ...related].map(f => makeRelativePath(f, workspaceRoot));
+      const clusterFiles = dedupe([file, ...related.map(([f]) => f)].map(f => makeRelativePath(f, workspaceRoot)));
+      
+      // Collect all shared importers across the cluster
+      const allSharedImporters = new Set<string>();
+      for (const [_, data] of related) {
+        for (const imp of data.sharedImporters) {
+          allSharedImporters.add(makeRelativePath(imp, workspaceRoot));
+        }
+      }
       
       // Determine cluster name from common path components
       const parts = clusterFiles[0].split(/[/\\]/);
       let clusterName = parts.length > 1 ? parts[parts.length - 2] : path.basename(clusterFiles[0]);
       
+      // Build reason explaining the cluster
+      const topImporters = Array.from(allSharedImporters).slice(0, 3);
+      const reason = topImporters.length > 0 
+        ? `Co-imported by: ${topImporters.map(i => `\`${i}\``).join(', ')}${allSharedImporters.size > 3 ? ' and others' : ''}`
+        : 'Frequently used together';
+      
       clusters.push({
         name: clusterName,
-        files: clusterFiles
+        files: clusterFiles,
+        reason,
+        sharedImporters: Array.from(allSharedImporters)
       });
       
       processed.add(file);
-      related.forEach(f => processed.add(f));
+      related.forEach(([f]) => processed.add(f));
     }
   }
   
@@ -2258,6 +2407,9 @@ async function extractFileSymbols(
   return symbols;
 }
 
+/**
+ * Get symbols that a file depends on (outgoing symbols from imports)
+ */
 function getSymbolDependencies(filePath: string, allLinks: DependencyLink[], workspaceRoot?: string): string[] {
   const deps = new Set<string>();
   for (const link of allLinks.filter(l => l.source === filePath)) {
@@ -2270,11 +2422,15 @@ function getSymbolDependencies(filePath: string, allLinks: DependencyLink[], wor
   return Array.from(deps);
 }
 
+/**
+ * Get files that import/call a specific symbol from a file.
+ * Returns formatted strings like "handler.ts" or "handler.ts:processRequest"
+ */
 function getSymbolCallers(symbolName: string, filePath: string, allLinks: DependencyLink[], workspaceRoot?: string): string[] {
   // Normalize the file path for comparison
   const normalizedFilePath = filePath.replace(/\\/g, '/');
   
-  return allLinks
+  const callers = allLinks
     .filter(l => {
       // Normalize target path for comparison
       const normalizedTarget = l.target.replace(/\\/g, '/');
@@ -2292,9 +2448,21 @@ function getSymbolCallers(symbolName: string, filePath: string, allLinks: Depend
       // Filter out third-party and test files from callers
       if (workspaceRoot && classifyFile(l.source, workspaceRoot) !== 'app') return false;
       return true;
-    })
-    .slice(0, 5)
-    .map(l => path.basename(l.source, path.extname(l.source)));
+    });
+  
+  // Dedupe by source file and return with relative path context
+  const uniqueCallers = dedupe(callers, l => l.source);
+  
+  return uniqueCallers
+    .slice(0, 4)
+    .map(l => {
+      const basename = path.basename(l.source, path.extname(l.source));
+      // If the link has explicit symbols, show which symbol references this
+      if (l.symbols.length > 0 && l.symbols[0] !== '*' && l.symbols[0] !== symbolName) {
+        return `${basename}`;
+      }
+      return basename;
+    });
 }
 
 function analyzeDirStructure(
@@ -2353,18 +2521,36 @@ function inferDirPurpose(dirName: string): string {
   return purposes[lower] || 'General';
 }
 
-function detectEntryPoints(files: string[], workspaceRoot: string): Array<{ path: string; reason: string }> {
-  const entryPoints: Array<{ path: string; reason: string }> = [];
-  const entryNames = ['main', 'index', 'app', '__main__', 'server', 'start'];
+function detectEntryPoints(files: string[], workspaceRoot: string): Array<{ path: string; reason: string; confidence: 'high' | 'medium' | 'low' }> {
+  const entryPoints: Array<{ path: string; reason: string; confidence: 'high' | 'medium' | 'low' }> = [];
+  
+  // High-confidence entry point patterns
+  const highConfidence = ['main', '__main__', 'server', 'app'];
+  // Medium-confidence entry point patterns
+  const mediumConfidence = ['index', 'start', 'cli', 'run'];
+  // Low-confidence (could be entry, needs verification)
+  const lowConfidence = ['bootstrap', 'init', 'setup'];
 
   for (const file of files) {
     const basename = path.basename(file, path.extname(file)).toLowerCase();
     const relPath = makeRelativePath(file, workspaceRoot);
+    const ext = path.extname(file).toLowerCase();
 
-    if (entryNames.includes(basename)) {
-      entryPoints.push({ path: relPath, reason: `Entry point (${basename})` });
+    // Python __main__.py is always high confidence
+    if (basename === '__main__' && ext === '.py') {
+      entryPoints.push({ path: relPath, reason: 'Python main module', confidence: 'high' });
+    } else if (highConfidence.includes(basename)) {
+      entryPoints.push({ path: relPath, reason: `Entry point (${basename})`, confidence: 'high' });
+    } else if (mediumConfidence.includes(basename)) {
+      entryPoints.push({ path: relPath, reason: `Entry point (${basename})`, confidence: 'medium' });
+    } else if (lowConfidence.includes(basename)) {
+      entryPoints.push({ path: relPath, reason: `Possible entry (${basename})`, confidence: 'low' });
     }
   }
+
+  // Sort by confidence (high first)
+  const confidenceOrder = { high: 0, medium: 1, low: 2 };
+  entryPoints.sort((a, b) => confidenceOrder[a.confidence] - confidenceOrder[b.confidence]);
 
   return entryPoints;
 }
@@ -2455,11 +2641,32 @@ async function discoverWorkspaceFiles(workspaceRoot: vscode.Uri): Promise<string
   return files;
 }
 
+/**
+ * Convert an absolute path to a relative path from the workspace root.
+ * Always uses forward slashes for cross-platform consistency.
+ */
 function makeRelativePath(absPath: string, workspaceRoot: string): string {
-  if (absPath.startsWith(workspaceRoot)) {
-    return absPath.substring(workspaceRoot.length).replace(/^[\\\/]/, '');
+  // Normalize both paths to use forward slashes for comparison
+  const normalizedAbs = absPath.replace(/\\/g, '/');
+  const normalizedRoot = workspaceRoot.replace(/\\/g, '/').replace(/\/$/, '');
+  
+  if (normalizedAbs.startsWith(normalizedRoot)) {
+    return normalizedAbs.substring(normalizedRoot.length).replace(/^\//, '');
   }
   return path.basename(absPath);
+}
+
+/**
+ * Remove duplicate entries from an array while preserving order.
+ */
+function dedupe<T>(items: T[], keyFn?: (item: T) => string): T[] {
+  const seen = new Set<string>();
+  return items.filter(item => {
+    const key = keyFn ? keyFn(item) : String(item);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 // ============================================================================

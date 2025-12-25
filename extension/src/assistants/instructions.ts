@@ -7,134 +7,86 @@ const ASPECT_CODE_START = '<!-- ASPECT_CODE_START -->';
 const ASPECT_CODE_END = '<!-- ASPECT_CODE_END -->';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Shared content blocks for standardized instruction structure
+// Canonical instruction content - all exports derive from this
 // ─────────────────────────────────────────────────────────────────────────────
 
-const INTRO_BLOCK = `
-**Aspect Code** is a static-analysis extension that generates a Knowledge Base (KB) for your codebase. The KB lives in \`.aspect/\` and contains these files:
+/**
+ * Generates the canonical instruction content.
+ * All assistant-specific exports are derived from this single source.
+ */
+function generateCanonicalContent(): string {
+  return `## Aspect Code Knowledge Base
 
-| File | Purpose |
-|------|---------|  
-| \`architecture.md\` | **Read first.** High-risk hubs, circular deps, shared state, entry points—the "Do Not Break" zones |
-| \`map.md\` | Data models with signatures, symbol index, naming conventions |
-| \`context.md\` | Module clusters (co-edited files), external integrations, data flow paths |
+Before multi-file edits, read the KB files in \`.aspect/\`:
 
-**Key architectural intelligence:**
-- **High-Risk Hubs** in \`architecture.md\`: Files with many dependents—changes here ripple widely
-- **Entry Points** in \`architecture.md\`: HTTP handlers, CLI commands, event listeners
-- **Circular Dependencies** in \`architecture.md\`: Bidirectional imports creating tight coupling
-- **Shared State** in \`architecture.md\`: Global/singleton state locations
-- **External Integrations** in \`context.md\`: API clients, database connections, message queues
-- **Data Models** in \`map.md\`: ORM models, dataclasses, TypeScript interfaces with signatures
+| File | Contains | When to Read |
+|------|----------|--------------|
+| \`architecture.md\` | High-risk hubs, entry points, circular deps | **Always first** |
+| \`map.md\` | Data models, symbol index, naming conventions | Before modifying functions |
+| \`context.md\` | Module clusters, external integrations, data flows | Before architectural changes |
 
-Read the relevant KB files **before** making multi-file changes.
-`.trim();
+---
 
-const GOLDEN_RULES = `
-## Golden Rules
+## Workflow Checklist
 
-1. **Read the KB as a map, not a checklist.** Use \`.aspect/*.md\` files to understand architecture, not as a to-do list.
-2. **Read before you write.** Open the relevant KB files before multi-file edits.
-3. **Check architecture first.** Review \`architecture.md\` to understand high-risk zones before coding.
-4. **Think step-by-step.** Break complex tasks into smaller steps; reason through each before coding.
-5. **Prefer minimal, local changes.** Small patches are safer than large refactors, especially in hub files.
-6. **Never truncate code.** Don't use placeholders like \`// ...rest\` or \`# existing code...\`. Provide complete implementations.
-7. **Don't touch tests, migrations, or third-party code** unless the user explicitly asks you to.
-8. **Never remove referenced logic.** If a symbol appears in \`map.md\`, check all callers before deleting.
-9. **Understand blast radius.** Use \`context.md\` and \`map.md\` to trace relationships before refactors.
-10. **Follow naming patterns in map.md.** Match the project's existing naming patterns and import styles.
-11. **When unsure, go small.** Propose a minimal, reversible change instead of a sweeping refactor.
-`.trim();
+1. **Parse the task** → Identify which files/endpoints are involved
+2. **Read \`architecture.md\`** → Find high-risk hubs (3+ dependents) and entry points
+3. **Read \`map.md\`** → Locate relevant symbols; check "Called by" for blast radius
+4. **Read \`context.md\`** → See which files are commonly co-edited (module clusters)
+5. **Plan minimal change** → Target the smallest, safest location
+6. **Implement** → Preserve all existing exports; match naming conventions
+7. **Verify** → Run tests; check you didn't break callers
 
-const WORKFLOW_STEPS = `
-## Recommended Workflow
+---
 
-1. **Understand the task.** Parse requirements; note which files or endpoints are involved.
-2. **Check architecture.** Open \`architecture.md\` → identify high-risk hubs and entry points.
-3. **Find relevant code.** Open \`map.md\` → locate data models, symbols, and naming conventions.
-4. **Understand relationships.** Open \`context.md\` → see module clusters (co-edited files) and integrations.
-5. **Trace impact.** Review "Called by" in \`map.md\` to gauge the blast radius of changes.
-6. **Gather evidence.** If behavior is unclear, add targeted logging or traces to confirm assumptions.
-7. **Make minimal edits.** Implement the smallest change that solves the task; run tests.
-`.trim();
+## Core Rules
 
-const CHANGE_RULES = `
-## When Changing Code
+**Do:**
+- Read the complete file before modifying it
+- Add code; don't reorganize unless explicitly asked
+- Match naming patterns shown in \`map.md\`
+- Check "Called by" in \`map.md\` before renaming/deleting symbols
 
-- **Read the COMPLETE file** before modifying it. Preserve all existing exports/functions.
-- **Add, don't reorganize.** Unless the task says "refactor", avoid moving code around.
-- **Check high-risk hubs** (\`architecture.md\`) before editing widely-imported files.
-- **Avoid renaming** widely-used symbols listed in \`map.md\` without updating all callers.
-- **No new cycles.** Before adding an import, verify it won't create a circular dependency (\`architecture.md\`).
-- **Match conventions.** Follow naming patterns shown in \`map.md\` (naming, imports, frameworks).
-- **Check module clusters** (\`context.md\`) to understand which files are commonly edited together.
-- **Prefer small, localized changes** in the most relevant app module identified by the KB.
-- **Use \`architecture.md\`, \`map.md\`, and \`context.md\`** to locate the smallest, safest place to make a change.
-`.trim();
+**Don't:**
+- Edit files with 5+ dependents without acknowledging the risk
+- Create circular dependencies (check \`architecture.md\`)
+- Use placeholders like \`// ...rest\` — provide complete code
+- Touch tests, migrations, or third-party code unless asked
 
-const KB_USAGE = `
-## How to Use the KB Files
+---
 
-| File | When to Open | What to Look For |
-|------|--------------|------------------|
-| \`architecture.md\` | **First, always** | High-risk hubs, directory layout, entry points, circular dependencies |
-| \`map.md\` | Before modifying a function | Data models with signatures, symbol index, naming conventions |
-| \`context.md\` | Before architectural changes | Module clusters, external integrations, data flow patterns |
+## Editing Hub Files
 
-### Quick Reference
+Hub files have many dependents — changes ripple widely. Before editing:
 
-- **High-risk hubs** → Files with 3+ dependents listed in \`architecture.md\`—changes ripple widely
-- **Entry points** → HTTP handlers, CLI commands, event listeners in \`architecture.md\`
-- **External integrations** → HTTP clients, DB connections, message queues in \`context.md\`
-- **Data models** → ORM models, dataclasses, interfaces with signatures in \`map.md\`
-- **Module clusters** → Files commonly edited together in \`context.md\`
-- **High-impact symbol** → 5+ callers in \`map.md\` "Called by" column
-`.trim();
+1. Confirm the file is in \`architecture.md\` → \`## High-Risk Architectural Hubs\`
+2. Check dependent count (e.g., "8 dependents" = high risk)
+3. Prefer **additive changes** (new functions) over modifying existing signatures
+4. If you must change a signature, update all callers listed in "Called by"
 
-const TROUBLESHOOTING = `
-## When Things Go Wrong
+**Example:** If \`models.py\` has 8 dependents, adding a new field is safer than renaming an existing one.
 
-If you encounter repeated errors or unexpected behavior:
+---
 
-1. **Use git** to see what changed: \`git diff\`, \`git status\`
-2. **Restore lost code** with \`git checkout -- <file>\` if needed
-3. **Re-read the complete file** before making more changes
-4. **Trace data flows** using \`context.md\` to understand execution paths
-5. **Run actual tests** to verify behavior before assuming something works
-6. **Check module clusters** in \`context.md\` for related files that may need updates
-`.trim();
+## MCP Tools
 
-const MCP_TOOLS = `
-## MCP Tool Calls (API Access)
+If MCP is configured, query the dependency graph programmatically:
 
-If you have MCP server access configured, you can query the dependency graph programmatically:
+| Tool | Use Case |
+|------|----------|
+| \`get_file_dependents\` | What files import this file? (blast radius) |
+| \`get_file_dependencies\` | What does this file import? |
+| \`get_architectural_hubs\` | Find files with N+ dependents |
+| \`get_circular_dependencies\` | Detect import cycles |
+| \`get_impact_analysis\` | Cascading impact of changes |
 
-| Tool | Purpose |
-|------|---------|
-| \`get_file_dependencies\` | Get files a given file imports from |
-| \`get_file_dependents\` | Get files that import from a given file |
-| \`get_architectural_hubs\` | Find high-impact files with many dependents |
-| \`get_circular_dependencies\` | Detect circular import chains |
-| \`list_files\` | List indexed files, optionally by language |
-| \`get_impact_analysis\` | Analyze cascading impact of changing a file |
-
-### Example: Check impact before refactoring
+**Example:**
+\`\`\`json
+{ "tool": "get_file_dependents", "arguments": { "file_path": "src/utils/helpers.ts" } }
 \`\`\`
-Tool: get_file_dependents
-Arguments: { "file_path": "src/utils/helpers.ts" }
-→ Returns list of files that will be affected by changes
-\`\`\`
-
-### Example: Find architectural hubs
-\`\`\`
-Tool: get_architectural_hubs
-Arguments: { "threshold": 5 }
-→ Returns files with 5+ dependents that require careful changes
-\`\`\`
-
-**MCP Endpoint:** \`POST /mcp/execute\` with \`{ tool, arguments, snapshot_id }\`
-**List Tools:** \`GET /mcp/tools\` returns all available tools with schemas.
+→ Returns files affected by changes to \`helpers.ts\`
 `.trim();
+}
 
 /**
  * Generates or updates instruction files for configured AI assistants.
@@ -196,7 +148,7 @@ async function generateCopilotInstructions(
     await vscode.workspace.fs.createDirectory(githubDir);
   } catch {}
 
-  const aspectCodeContent = generateCopilotContent(scoreResult);
+  const aspectCodeContent = generateCopilotContent();
 
   let existingContent = '';
   try {
@@ -212,45 +164,21 @@ async function generateCopilotInstructions(
   outputChannel.appendLine('[Instructions] Generated .github/copilot-instructions.md');
 }
 
-function generateCopilotContent(scoreResult: ScoreResult | null): string {
-  // Copilot-specific: emphasize file-local context and @-references
-  return `
-## Aspect Code Knowledge Base
+function generateCopilotContent(): string {
+  return `${generateCanonicalContent()}
 
-${INTRO_BLOCK}
+---
 
-Use \`@.aspect/<file>.md\` syntax to reference KB files in Copilot Chat.
+## Copilot Tips
 
-${GOLDEN_RULES}
-
-${WORKFLOW_STEPS}
-
-${CHANGE_RULES}
-
-${KB_USAGE}
-
-${TROUBLESHOOTING}
-
-${MCP_TOOLS}
-
-## Copilot-Specific Tips
-
-- **Use @-references.** Type \`@.aspect/architecture.md\` to include KB context in chat.
-- **Check architecture first.** Understand high-risk hubs and entry points before coding.
-- **Ask for small patches.** "Show me only the lines to change" keeps edits minimal.
-- **One file at a time.** When editing, work on a single file before moving on.
-- **Match conventions.** Ask "What naming pattern should I use?" and reference \`map.md\`.
-
-## Section Headers (Pattern-Matching)
-
-**\`architecture.md\`:** \`## High-Risk Architectural Hubs\`, \`## Directory Layout\`, \`## Entry Points\`, \`## Circular Dependencies\`
-**\`map.md\`:** \`## Data Models\` (with signatures), \`## Symbol Index\` (with Called By), \`## Conventions\`
-**\`context.md\`:** \`## Module Clusters\` (co-edited files), \`## External Integrations\`, \`## Critical Flows\`
+- Use \`@.aspect/architecture.md\` to include KB context in chat
+- Ask "Show me only the lines to change" to keep edits minimal
+- Reference \`@.aspect/map.md\` when asking about naming conventions
 `.trim();
 }
 
 /**
- * Generate/update .cursor/rules/Aspect Code.mdc
+ * Generate/update .cursor/rules/aspectcode.mdc
  */
 async function generateCursorRules(
   workspaceRoot: vscode.Uri,
@@ -267,46 +195,25 @@ async function generateCursorRules(
   const content = generateCursorContent();
 
   await vscode.workspace.fs.writeFile(rulesFile, Buffer.from(content, 'utf-8'));
-  outputChannel.appendLine('[Instructions] Generated .cursor/rules/Aspect Code.mdc');
+  outputChannel.appendLine('[Instructions] Generated .cursor/rules/aspectcode.mdc');
 }
 
 function generateCursorContent(): string {
-  // Cursor-specific: lean into multi-file edits but enforce KB-driven plans
   return `---
-title: Aspect Code Knowledge Base
-tags: [architecture, dependencies, Aspect Code]
-priority: always
+description: Aspect Code KB integration - read before multi-file edits
+globs: 
+alwaysApply: true
 ---
 
-# Aspect Code Knowledge Base
+${generateCanonicalContent()}
 
-${INTRO_BLOCK}
+---
 
-${GOLDEN_RULES}
+## Cursor Tips
 
-${WORKFLOW_STEPS}
-
-${CHANGE_RULES}
-
-${KB_USAGE}
-
-${TROUBLESHOOTING}
-
-${MCP_TOOLS}
-
-## Cursor-Specific Tips
-
-- **Check architecture first.** Know the high-risk hubs and entry points before writing code.
-- **Plan before multi-file edits.** Even with Cursor's agent mode, read KB files first.
-- **Follow map.md conventions.** Match naming patterns and import styles consistently.
-- **Check callers before renaming.** Use \`map.md\` to find all usages.
-- **Avoid wide-scope refactors** unless the task explicitly calls for them.
-
-## Section Headers (Pattern-Matching)
-
-**\`architecture.md\`:** \`## High-Risk Architectural Hubs\`, \`## Directory Layout\`, \`## Entry Points\`, \`## Circular Dependencies\`
-**\`map.md\`:** \`## Data Models\` (with signatures), \`## Symbol Index\` (with Called By), \`## Conventions\`
-**\`context.md\`:** \`## Module Clusters\` (co-edited files), \`## External Integrations\`, \`## Critical Flows\`
+- Read KB files before using Composer for multi-file edits
+- Check \`architecture.md\` for hub files before agent-mode refactors
+- Use "Called by" in \`map.md\` to find all usages before renaming
 `.trim();
 }
 
@@ -320,7 +227,7 @@ async function generateClaudeInstructions(
 ): Promise<void> {
   const claudeFile = vscode.Uri.joinPath(workspaceRoot, 'CLAUDE.md');
 
-  const aspectCodeContent = generateClaudeContent(scoreResult);
+  const aspectCodeContent = generateClaudeContent();
 
   let existingContent = '';
   try {
@@ -337,50 +244,16 @@ async function generateClaudeInstructions(
   outputChannel.appendLine('[Instructions] Generated CLAUDE.md');
 }
 
-function generateClaudeContent(scoreResult: ScoreResult | null): string {
-  // Claude-specific: encourage plan + patch style with explicit KB summarization
-  return `
-## Aspect Code Knowledge Base
+function generateClaudeContent(): string {
+  return `${generateCanonicalContent()}
 
-${INTRO_BLOCK}
+---
 
-Reference KB files using: \`@.aspect/<file>.md\`
+## Claude Tips
 
-${GOLDEN_RULES}
-
-${WORKFLOW_STEPS}
-
-${CHANGE_RULES}
-
-${KB_USAGE}
-
-${TROUBLESHOOTING}
-
-${MCP_TOOLS}
-
-## Claude-Specific Tips
-
-- **Check architecture first.** Understand high-risk hubs and entry points before proposing solutions.
-- **OBSERVATIONS → REASONING → PLAN.** State what you observed, why it's the issue, then your approach.
-- **Summarize KB findings.** Before writing code, state what you learned from each KB file.
-- **Plan, then patch.** Outline your approach (which files, what changes) before providing code.
-- **Follow map.md conventions.** Match naming patterns and styles exactly.
-- **Cite risk levels.** If touching a hub module or high-impact file, acknowledge it explicitly.
-
-## Example Workflow
-
-1. **"OBSERVATIONS: I see X in the code…"** → Describe what you found.
-2. **"REASONING: This causes Y because…"** → Explain why it's the issue.
-3. **"PLAN: I'll fix by changing Z in file A…"** → State your approach.
-4. **"Based on \`architecture.md\`, \`models.py\` is a high-risk hub (8 dependents)…"** → Acknowledge risk.
-5. **"Module clusters in context.md show these files are edited together…"** → Note co-location.
-6. **"Here's the patch:"** → Provide minimal, complete code changes.
-
-## Section Headers (Pattern-Matching)
-
-**\`architecture.md\`:** \`## High-Risk Architectural Hubs\`, \`## Directory Layout\`, \`## Entry Points\`, \`## Circular Dependencies\`
-**\`map.md\`:** \`## Data Models\` (with signatures), \`## Symbol Index\` (with Called By), \`## Conventions\`
-**\`context.md\`:** \`## Module Clusters\` (co-edited files), \`## External Integrations\`, \`## Critical Flows\`
+- Summarize what you found in KB files before proposing changes
+- State "This file has N dependents" when editing hubs
+- Use \`@.aspect/architecture.md\` to reference KB in chat
 `.trim();
 }
 
@@ -394,7 +267,7 @@ async function generateOtherInstructions(
 ): Promise<void> {
   const agentsFile = vscode.Uri.joinPath(workspaceRoot, 'AGENTS.md');
 
-  const aspectCodeContent = generateOtherContent(scoreResult);
+  const aspectCodeContent = generateCanonicalContent();
 
   let existingContent = '';
   try {
@@ -402,59 +275,13 @@ async function generateOtherInstructions(
     existingContent = Buffer.from(bytes).toString('utf-8');
   } catch {
     // File doesn't exist, create new one
-    existingContent = '# AI Coding Agent Instructions\n\nThis file provides instructions for AI coding assistants working on this codebase.\n\n';
+    existingContent = '# AI Coding Agent Instructions\n\n';
   }
 
   const newContent = mergeAspectCodeSection(existingContent, aspectCodeContent);
 
   await vscode.workspace.fs.writeFile(agentsFile, Buffer.from(newContent, 'utf-8'));
   outputChannel.appendLine('[Instructions] Generated AGENTS.md');
-}
-
-function generateOtherContent(scoreResult: ScoreResult | null): string {
-  // Generic instructions for any AI coding assistant
-  return `
-## Aspect Code Knowledge Base
-
-${INTRO_BLOCK}
-
-Reference KB files at: \`.aspect/<file>.md\`
-
-${GOLDEN_RULES}
-
-${WORKFLOW_STEPS}
-
-${CHANGE_RULES}
-
-${KB_USAGE}
-
-${TROUBLESHOOTING}
-
-${MCP_TOOLS}
-
-## General Guidelines
-
-- **Read KB files first.** Before making changes, consult the relevant knowledge base files.
-- **Start with architecture.md.** Understand high-risk hubs and entry points.
-- **Check hub modules.** Know which files have many dependents before editing.
-- **Follow map.md conventions.** Match existing naming patterns and coding styles exactly.
-- **Minimal changes.** Make the smallest change that solves the problem correctly.
-- **Acknowledge risk.** If editing a hub module or high-impact file, note the elevated risk.
-
-## KB File Reference
-
-| File | Purpose |
-|------|---------|
-| \`architecture.md\` | High-risk hubs, project layout, entry points, circular dependencies |
-| \`map.md\` | Data models with signatures, symbol index, naming conventions |
-| \`context.md\` | Module clusters, external integrations, data flow patterns |
-
-## Section Headers (Pattern-Matching)
-
-**\`architecture.md\`:** \`## High-Risk Architectural Hubs\`, \`## Directory Layout\`, \`## Entry Points\`, \`## Circular Dependencies\`
-**\`map.md\`:** \`## Data Models\` (with signatures), \`## Symbol Index\` (with Called By), \`## Conventions\`
-**\`context.md\`:** \`## Module Clusters\` (co-edited files), \`## External Integrations\`, \`## Critical Flows\`
-`.trim();
 }
 
 /**
