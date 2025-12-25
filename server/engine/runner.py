@@ -15,7 +15,7 @@ from typing import List, Dict, Any, Tuple, Optional
 from pathlib import Path
 
 from .types import RuleContext, Finding
-from .registry import register_adapter, get_adapter, get_enabled_rules, discover_rules, get_rule_ids, get_all_adapters, is_user_facing_rule
+from .registry import register_adapter, get_adapter, get_enabled_rules, discover_rules, discover_alpha_rules_only, get_rule_ids, get_all_adapters, is_user_facing_rule
 from .config import load_config, find_config_file, EngineConfig
 from .profiles import RuleProfile, validate_profile, get_default_profile
 from .schema import (validate_findings, validate_runner_output, findings_to_json, 
@@ -1056,8 +1056,11 @@ def analyze_paths(paths: List[str], discovery_packages: List[str] = None,
             config_path = find_config_file(paths[0] if paths else ".")
         config = load_config(config_path)
         
-        # Discover rules
-        rules_discovered = discover_rules(discovery_packages)
+        # Discover rules - use optimized loading for alpha profile
+        if rule_profile == RuleProfile.ALPHA_DEFAULT:
+            rules_discovered = discover_alpha_rules_only()
+        else:
+            rules_discovered = discover_rules(discovery_packages)
         
         # Get enabled rules for all languages
         all_findings = []
@@ -1285,9 +1288,14 @@ Examples:
     if args.verbose:
         print(f"Using config: {config_path or 'defaults'}", file=sys.stderr)
     
-    # Discover rules
+    # Discover rules - use optimized loading for alpha profile
     discovery_packages = [pkg.strip() for pkg in args.discover.split(",")]
-    rules_discovered = discover_rules(discovery_packages)
+    rule_profile = validate_profile(args.profile)
+    
+    if rule_profile == RuleProfile.ALPHA_DEFAULT:
+        rules_discovered = discover_alpha_rules_only()
+    else:
+        rules_discovered = discover_rules(discovery_packages)
     
     if args.verbose:
         print(f"Discovered {rules_discovered} rules from {discovery_packages}", file=sys.stderr)
@@ -1300,8 +1308,7 @@ Examples:
     else:
         rule_patterns = [pattern.strip() for pattern in args.rules.split(",")]
     
-    # Validate profile
-    rule_profile = validate_profile(args.profile)
+    # Profile already validated above
     
     # Get enabled rules for this language and profile
     rules = get_enabled_rules(rule_patterns, args.lang, rule_profile)

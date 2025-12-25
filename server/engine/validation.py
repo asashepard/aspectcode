@@ -77,13 +77,39 @@ class ValidationService:
         
         self._adapters_loaded = True
     
-    def ensure_rules_loaded(self) -> None:
-        """Ensure all rules are loaded systematically."""
+    def ensure_rules_loaded(self, profile: Optional[str] = None) -> None:
+        """Ensure rules are loaded for the given profile.
+        
+        For alpha_default profile, only loads the 7 KB-enriching rules.
+        For other profiles, loads all rules.
+        """
         if self._rules_loaded:
             return
-            
+        
+        # Determine the profile
+        if profile is None:
+            rule_profile = get_default_profile()
+        else:
+            rule_profile = validate_profile(profile)
+        
+        # Use optimized loading for alpha profile
+        if rule_profile == RuleProfile.ALPHA_DEFAULT:
+            from .registry import discover_alpha_rules_only, get_rule_ids
+            rules_discovered = discover_alpha_rules_only()
+            loaded_rules = get_rule_ids()
+            print(f"Loaded {rules_discovered} alpha rules (optimized): {loaded_rules}")
+        else:
+            # Fall back to loading all rules for non-alpha profiles
+            self._load_all_rules()
+            from .registry import get_rule_ids
+            loaded_rules = get_rule_ids()
+        
+        self._loaded_rule_ids = loaded_rules
+        self._rules_loaded = True
+    
+    def _load_all_rules(self) -> None:
+        """Load all rules from the rules directory (for non-alpha profiles)."""
         import importlib.util
-        import sys
         import glob
         
         # Get the rules directory - use absolute path based on this file's location
@@ -150,10 +176,6 @@ class ValidationService:
                 print(f"Warning: Could not load rule file {rule_file}: {e}")
         
         print(f"Loaded {len(loaded_rules)} rules from {len(rule_files)} rule files")
-        print(f"Loaded rules: {loaded_rules}")
-        
-        self._loaded_rule_ids = loaded_rules
-        self._rules_loaded = True
     
     def get_loaded_rules(self) -> List[str]:
         """Get list of loaded rule IDs."""
@@ -185,7 +207,7 @@ class ValidationService:
         
         # Ensure everything is loaded
         self.ensure_adapters_loaded()
-        self.ensure_rules_loaded()
+        self.ensure_rules_loaded(profile)  # Pass profile for optimized loading
         
         # Validate and set profile
         if profile is None:
@@ -444,7 +466,7 @@ class ValidationService:
         
         # Ensure everything is loaded
         self.ensure_adapters_loaded()
-        self.ensure_rules_loaded()
+        self.ensure_rules_loaded(profile)  # Pass profile for optimized loading
         
         # Validate and set profile
         if profile is None:

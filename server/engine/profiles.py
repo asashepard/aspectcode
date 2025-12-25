@@ -50,6 +50,18 @@ ALPHA_RULES_REGISTRY: List[tuple] = [
     ("analysis.change_impact", True, "KB: Change blast radius analysis → architecture.md"),
 ]
 
+# Mapping from rule ID to module name for optimized loading
+# This avoids importing all 90+ rule modules when only 7 are needed
+ALPHA_RULE_MODULES: Dict[str, str] = {
+    "arch.entry_point": "rules.arch_entry_point",
+    "arch.external_integration": "rules.arch_external_integration",
+    "arch.data_model": "rules.arch_data_model",
+    "arch.global_state_usage": "rules.arch_global_state_usage",
+    "imports.cycle.advanced": "rules.imports_cycle",
+    "architecture.critical_dependency": "rules.analysis_impact",  # Same module as change_impact
+    "analysis.change_impact": "rules.analysis_impact",
+}
+
 
 def get_alpha_enabled_rules() -> List[str]:
     """Get list of enabled rule IDs for alpha profile."""

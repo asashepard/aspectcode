@@ -11,7 +11,7 @@ import importlib
 import sys
 from typing import Dict, List, Optional, Set
 from .types import Rule, LanguageAdapter
-from .profiles import RuleProfile, get_profile_rule_ids, get_default_profile
+from .profiles import RuleProfile, get_profile_rule_ids, get_default_profile, ALPHA_RULE_MODULES
 
 
 class Registry:
@@ -240,6 +240,30 @@ class Registry:
         self._adapters.clear()
         self._rule_index.clear()
 
+    def discover_alpha_rules_only(self) -> int:
+        """
+        Load ONLY the rules needed for the alpha profile.
+        
+        This is an optimized version that imports only the 5 specific rule modules
+        needed for KB-enriching rules, instead of all 90+ rule modules.
+        
+        Returns:
+            Number of rules discovered and registered
+        """
+        initial_count = len(self._rules)
+        
+        # Get unique module names from the alpha rule mapping
+        modules_to_load = set(ALPHA_RULE_MODULES.values())
+        
+        for module_name in modules_to_load:
+            try:
+                module = importlib.import_module(module_name)
+                self._extract_rules_from_module(module, module_name)
+            except Exception as e:
+                print(f"Warning: Failed to load alpha rule module {module_name}: {e}", file=sys.stderr)
+        
+        return len(self._rules) - initial_count
+
 
 # Global registry instance
 _global_registry = Registry()
@@ -348,6 +372,11 @@ def list_supported_languages() -> List[str]:
 def discover_rules(entry_packages: List[str]) -> int:
     """Auto-discover and register rules from packages."""
     return _global_registry.discover_rules(entry_packages)
+
+
+def discover_alpha_rules_only() -> int:
+    """Load only the alpha profile rules for optimized startup."""
+    return _global_registry.discover_alpha_rules_only()
 
 
 def clear() -> None:
