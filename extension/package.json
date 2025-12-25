@@ -76,6 +76,11 @@
         "title": "Aspect Code: Examine"
       },
       {
+        "command": "aspectcode.forceReindex",
+        "title": "Aspect Code: Force Reindex (Clear Cache)",
+        "icon": "$(sync)"
+      },
+      {
         "command": "aspectcode.configureAssistants",
         "title": "Aspect Code: Configure AI Assistants",
         "icon": "$(sparkle)"

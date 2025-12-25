@@ -2457,8 +2457,58 @@ export async function activate(context: vscode.ExtensionContext) {
       await vscode.commands.executeCommand('aspectcode.panel.focus');
     })
   );
+
+  // 5. FORCE REINDEX - Clear cache and reindex entire workspace
+  context.subscriptions.push(
+    vscode.commands.registerCommand('aspectcode.forceReindex', async () => {
+      try {
+        outputChannel?.appendLine('=== FORCE REINDEX: Clearing cache and reindexing ===');
+        
+        // Clear the cache
+        if (cacheManager) {
+          await cacheManager.clearCache();
+          outputChannel?.appendLine('=== FORCE REINDEX: Cache cleared ===');
+        }
+        
+        // Reset incremental indexer
+        if (incrementalIndexer) {
+          incrementalIndexer.dispose();
+          outputChannel?.appendLine('=== FORCE REINDEX: Incremental indexer reset ===');
+        }
+        
+        // Clear state and run full index + examine
+        state.update({
+          busy: false,
+          findings: [],
+          lastEXAMINE: undefined,
+          capabilities: undefined,
+          error: undefined
+        });
+        
+        // Run full index (force = true bypasses cache)
+        await indexRepository(true, state);
+        
+        // Re-initialize incremental indexer
+        if (incrementalIndexer) {
+          const allFiles = await discoverWorkspaceSourceFiles();
+          await incrementalIndexer.initialize(allFiles);
+          outputChannel?.appendLine('=== FORCE REINDEX: Incremental indexer re-initialized ===');
+        }
+        
+        // Run full validation
+        await examineFullRepository(state, context);
+        
+        outputChannel?.appendLine('=== FORCE REINDEX: Complete ===');
+        vscode.window.showInformationMessage('Workspace reindexed successfully');
+        
+      } catch (error) {
+        outputChannel?.appendLine(`FORCE REINDEX ERROR: ${error}`);
+        vscode.window.showErrorMessage(`Reindex failed: ${error}`);
+      }
+    })
+  );
   
-  // 4. PREVIEW AUTOFIX - Auto-Fix feature temporarily disabled
+  // 6. PREVIEW AUTOFIX - Auto-Fix feature temporarily disabled
   // context.subscriptions.push(
   //   vscode.commands.registerCommand('aspectcode.previewAutofix', async (violationIds?: string[]) => {
   //     await previewAutofix(violationIds, context);

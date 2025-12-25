@@ -1010,6 +1010,18 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           // await vscode.commands.executeCommand('aspectcode.applyAutofix');
           break;
 
+        case 'FORCE_REINDEX':
+          // Show native VS Code confirmation dialog
+          const confirmed = await vscode.window.showWarningMessage(
+            'Clear cache and reindex the entire workspace? This may take a moment.',
+            { modal: true },
+            'Reindex'
+          );
+          if (confirmed === 'Reindex') {
+            await vscode.commands.executeCommand('aspectcode.forceReindex');
+          }
+          break;
+
         case 'COMMAND':
           if (msg?.command) {
             await vscode.commands.executeCommand(msg.command);
@@ -2789,6 +2801,11 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     <rect x="2" y="11" width="12" height="2" rx="0.5"/>
                 </svg>
             </button>
+            <button id="simple-reindex-btn" class="view-mode-toggle" title="Reindex workspace (clear cache)">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+                </svg>
+            </button>
         </div>
     </div>
     
@@ -2843,10 +2860,9 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                             <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
                         </svg>
                     </button>
-                    <button class="settings-toggle" id="settings-toggle" title="Settings">
+                    <button class="action-button icon-only" id="complex-reindex-btn" title="Reindex workspace (clear cache)">
                         <svg class="action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"></path>
-                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1Z"></path>
+                            <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
                         </svg>
                     </button>
                     <div class="settings-menu hidden" id="settings-menu">
@@ -2962,6 +2978,14 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         
         document.getElementById('simple-expand-btn').addEventListener('click', toggleViewMode);
         document.getElementById('collapse-view-btn').addEventListener('click', toggleViewMode);
+        
+        // Reindex button handlers (both simple and complex views)
+        // Note: confirm() doesn't work in webviews, so we send message to extension which shows native dialog
+        function handleReindex() {
+            vscode.postMessage({ type: 'FORCE_REINDEX' });
+        }
+        document.getElementById('simple-reindex-btn')?.addEventListener('click', handleReindex);
+        document.getElementById('complex-reindex-btn')?.addEventListener('click', handleReindex);
         
         // Action button handlers
         // Auto-Fix button handler disabled - feature temporarily disabled
