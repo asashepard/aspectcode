@@ -63,7 +63,74 @@ class PlatformMetrics(BaseModel):
     total_keys: int = Field(..., description="Total API keys (including revoked)")
     daily_active_users: int = Field(..., description="Unique users active in last 24 hours")
     weekly_active_users: int = Field(..., description="Unique users active in last 7 days")
+    monthly_active_users: int = Field(0, description="Unique users active in last 30 days")
     total_alpha_users: int = Field(..., description="Total registered alpha users")
+    dormant_users: int = Field(0, description="Users inactive for 30+ days")
+    avg_requests_per_user: float = Field(0.0, description="Average requests per active user (30 days)")
+
+
+class RuleTriggerStats(BaseModel):
+    """Statistics for a single rule."""
+    rule_id: str = Field(..., description="Rule identifier")
+    count: int = Field(..., description="Number of times triggered")
+    percentage: float = Field(..., description="Percentage of all findings")
+
+
+class ResponseTimeStats(BaseModel):
+    """Response time statistics."""
+    avg_ms: float = Field(..., description="Average response time in ms")
+    p50_ms: float = Field(..., description="Median response time")
+    p95_ms: float = Field(..., description="95th percentile response time")
+    p99_ms: float = Field(..., description="99th percentile response time")
+    sample_count: int = Field(..., description="Number of requests sampled")
+
+
+class FilesStats(BaseModel):
+    """Statistics on files analyzed per request."""
+    avg_files: float = Field(..., description="Average files per request")
+    median_files: int = Field(..., description="Median files per request")
+    max_files: int = Field(..., description="Maximum files in a single request")
+    sample_count: int = Field(..., description="Number of requests sampled")
+
+
+class AutofixStats(BaseModel):
+    """Autofix adoption statistics."""
+    total_requests: int = Field(..., description="Total validation requests")
+    autofix_requests: int = Field(..., description="Requests with autofix enabled")
+    adoption_rate: float = Field(..., description="Adoption rate percentage")
+
+
+class ErrorStats(BaseModel):
+    """Error and timeout rate statistics."""
+    total_requests: int = Field(..., description="Total requests")
+    success_count: int = Field(..., description="Successful requests")
+    error_count: int = Field(..., description="Failed requests")
+    timeout_count: int = Field(..., description="Timed out requests")
+    success_rate: float = Field(..., description="Success rate percentage")
+    error_rate: float = Field(..., description="Error rate percentage")
+    timeout_rate: float = Field(..., description="Timeout rate percentage")
+
+
+class DetailedMetrics(BaseModel):
+    """Comprehensive platform metrics for admin dashboard."""
+    # Phase 1A (from api_tokens)
+    total_requests: int
+    active_keys: int
+    total_keys: int
+    daily_active_users: int
+    weekly_active_users: int
+    monthly_active_users: int
+    total_alpha_users: int
+    dormant_users: int
+    avg_requests_per_user: float
+    
+    # Phase 2 (from api_request_logs)
+    top_rules: List[RuleTriggerStats] = Field(default_factory=list)
+    response_times: ResponseTimeStats
+    language_breakdown: dict = Field(default_factory=dict)
+    files_stats: FilesStats
+    autofix_stats: AutofixStats
+    error_stats: ErrorStats
 
 
 # --- Admin Dependency ---
@@ -215,12 +282,14 @@ async def get_metrics(
     admin: UserContext = Depends(require_admin),
 ):
     """
-    Get aggregate platform metrics.
+    Get aggregate platform metrics (Phase 1A - from api_tokens table).
     
     Returns usage statistics for the admin dashboard including:
     - Total authenticated requests across all tokens
     - Active/total API keys
-    - Daily and weekly active users
+    - Daily, weekly, and monthly active users
+    - Dormant users (inactive 30+ days)
+    - Average requests per active user
     - Total registered alpha users
     """
     try:
@@ -231,4 +300,62 @@ async def get_metrics(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to fetch platform metrics.",
+        )
+
+
+@router.get("/metrics/detailed", response_model=DetailedMetrics)
+async def get_detailed_metrics(
+    days: int = 30,
+    admin: UserContext = Depends(require_admin),
+):
+    """
+    Get detailed platform metrics (Phase 1A + Phase 2).
+    
+    Includes all Phase 1A metrics plus detailed request analytics:
+    - Top triggered rules with counts
+    - Response time statistics (avg, P50, P95, P99)
+    - Language breakdown (Python/TypeScript/JavaScript)
+    - Files analyzed per request (avg/median)
+    - Autofix adoption rate
+    - Error/timeout rates
+    
+    Note: Phase 2 metrics require the api_request_logs table.
+    If not available, Phase 2 sections will have empty/zero values.
+    
+    Args:
+        days: Number of days to aggregate (default: 30)
+    """
+    try:
+        metrics = await db.get_detailed_metrics(days)
+        
+        # Transform top_rules to typed model
+        top_rules = [
+            RuleTriggerStats(**rule) for rule in metrics.get("top_rules", [])
+        ]
+        
+        return DetailedMetrics(
+            # Phase 1A
+            total_requests=metrics["total_requests"],
+            active_keys=metrics["active_keys"],
+            total_keys=metrics["total_keys"],
+            daily_active_users=metrics["daily_active_users"],
+            weekly_active_users=metrics["weekly_active_users"],
+            monthly_active_users=metrics["monthly_active_users"],
+            total_alpha_users=metrics["total_alpha_users"],
+            dormant_users=metrics["dormant_users"],
+            avg_requests_per_user=metrics["avg_requests_per_user"],
+            
+            # Phase 2
+            top_rules=top_rules,
+            response_times=ResponseTimeStats(**metrics["response_times"]),
+            language_breakdown=metrics["language_breakdown"],
+            files_stats=FilesStats(**metrics["files_stats"]),
+            autofix_stats=AutofixStats(**metrics["autofix_stats"]),
+            error_stats=ErrorStats(**metrics["error_stats"]),
+        )
+    except Exception as e:
+        print(f"[admin] Error fetching detailed metrics: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch detailed metrics.",
         )

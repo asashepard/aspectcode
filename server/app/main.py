@@ -3,6 +3,7 @@ import sys
 import os
 import importlib.util
 import hashlib
+import asyncio
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Depends, Request, Body
@@ -163,7 +164,7 @@ def index_repository(
 
 @app.post("/validate", response_model=ValidateResponse)
 @limiter.limit(f"{settings.rate_limit}/minute")
-def validate_code(
+async def validate_code(
     request: Request,
     req: ValidateFullRequest = Body(...),
     user: UserContext = Depends(get_current_user)
@@ -174,17 +175,85 @@ def validate_code(
     This is the main validation endpoint that should be used going forward.
     The '/validate_tree_sitter' endpoint is maintained for backward compatibility.
     """
-    return validate_with_tree_sitter_internal(req)
+    return await validate_with_logging(req, user, "validate")
 
 @app.post("/validate_tree_sitter", response_model=ValidateResponse)
 @limiter.limit(f"{settings.rate_limit}/minute")
-def validate_with_tree_sitter(
+async def validate_with_tree_sitter(
     request: Request,
     req: ValidateFullRequest = Body(...),
     user: UserContext = Depends(get_current_user)
 ):
     """Validate using the tree-sitter engine."""
-    return validate_with_tree_sitter_internal(req)
+    return await validate_with_logging(req, user, "validate_tree_sitter")
+
+
+def _detect_language(req: ValidateFullRequest) -> str:
+    """Detect primary language from request."""
+    if req.languages:
+        if len(req.languages) == 1:
+            return req.languages[0]
+        else:
+            return "mixed"
+    return "unknown"
+
+
+def _estimate_files_count(req: ValidateFullRequest) -> int:
+    """Estimate files to be analyzed from request."""
+    if req.paths:
+        return len(req.paths)
+    return 0
+
+
+async def validate_with_logging(req: ValidateFullRequest, user: UserContext, endpoint: str) -> ValidateResponse:
+    """Validate with metrics logging."""
+    start_time = time.time()
+    status = "success"
+    error_type = None
+    response = None
+    
+    try:
+        response = validate_with_tree_sitter_internal(req)
+        if response.verdict == "unknown" and any("error" in v.rule for v in response.violations):
+            status = "error"
+            error_type = "validation_error"
+        return response
+    except asyncio.TimeoutError:
+        status = "timeout"
+        error_type = "timeout"
+        raise
+    except Exception as e:
+        status = "error"
+        error_type = type(e).__name__
+        raise
+    finally:
+        # Log request metrics (fire-and-forget)
+        if user.token_id and DATABASE_URL:
+            response_time_ms = int((time.time() - start_time) * 1000)
+            
+            # Extract rule_ids from violations
+            rule_ids = []
+            findings_count = 0
+            if response and hasattr(response, 'violations'):
+                rule_ids = [v.rule for v in response.violations]
+                findings_count = len(response.violations)
+            
+            asyncio.create_task(
+                db.log_api_request(
+                    token_id=user.token_id,
+                    endpoint=endpoint,
+                    repo_root=req.repo_root,
+                    language=_detect_language(req),
+                    files_count=_estimate_files_count(req),
+                    autofix_requested=req.autofix,
+                    response_time_ms=response_time_ms,
+                    findings_count=findings_count,
+                    rule_ids=rule_ids,
+                    status=status,
+                    error_type=error_type,
+                )
+            )
+
 
 def validate_with_tree_sitter_internal(req: ValidateFullRequest):
     """Internal validation logic."""

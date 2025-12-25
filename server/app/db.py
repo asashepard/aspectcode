@@ -480,7 +480,8 @@ async def get_platform_metrics() -> dict:
     
     Returns:
         Dict with total_requests, active_keys, total_keys, 
-        daily_active_users, weekly_active_users, total_alpha_users
+        daily_active_users, weekly_active_users, monthly_active_users,
+        total_alpha_users, dormant_users, avg_requests_per_user
     """
     async with get_connection() as conn:
         # Get token/request metrics
@@ -497,7 +498,17 @@ async def get_platform_metrics() -> dict:
                 COUNT(DISTINCT alpha_user_id) FILTER (
                     WHERE revoked_at IS NULL 
                     AND last_used_at >= NOW() - INTERVAL '7 days'
-                ) as weekly_active_users
+                ) as weekly_active_users,
+                COUNT(DISTINCT alpha_user_id) FILTER (
+                    WHERE revoked_at IS NULL 
+                    AND last_used_at >= NOW() - INTERVAL '30 days'
+                ) as monthly_active_users,
+                COUNT(DISTINCT alpha_user_id) FILTER (
+                    WHERE revoked_at IS NULL 
+                    AND alpha_user_id IS NOT NULL
+                    AND (last_used_at IS NULL 
+                         OR last_used_at < NOW() - INTERVAL '30 days')
+                ) as dormant_users
             FROM api_tokens
             """
         )
@@ -507,11 +518,281 @@ async def get_platform_metrics() -> dict:
             "SELECT COUNT(*) FROM alpha_users"
         )
         
+        # Calculate average requests per active user (30 days)
+        avg_requests = await conn.fetchval(
+            """
+            SELECT COALESCE(AVG(user_total), 0)
+            FROM (
+                SELECT alpha_user_id, SUM(request_count) as user_total
+                FROM api_tokens
+                WHERE revoked_at IS NULL
+                  AND last_used_at >= NOW() - INTERVAL '30 days'
+                GROUP BY alpha_user_id
+            ) as user_totals
+            """
+        )
+        
         return {
             "total_requests": int(token_stats["total_requests"]),
             "active_keys": int(token_stats["active_keys"]),
             "total_keys": int(token_stats["total_keys"]),
             "daily_active_users": int(token_stats["daily_active_users"]),
             "weekly_active_users": int(token_stats["weekly_active_users"]),
+            "monthly_active_users": int(token_stats["monthly_active_users"]),
             "total_alpha_users": int(alpha_count or 0),
+            "dormant_users": int(token_stats["dormant_users"]),
+            "avg_requests_per_user": round(float(avg_requests or 0), 1),
         }
+
+
+# --- API Request Logging (Phase 2 Metrics) ---
+
+
+async def log_api_request(
+    token_id: str,
+    endpoint: str,
+    repo_root: Optional[str],
+    language: Optional[str],
+    files_count: int,
+    autofix_requested: bool,
+    response_time_ms: int,
+    findings_count: int,
+    rule_ids: list[str],
+    status: str,
+    error_type: Optional[str] = None,
+) -> None:
+    """
+    Log an API request for metrics tracking.
+    
+    This is fire-and-forget - failures don't affect the request.
+    """
+    try:
+        async with get_connection() as conn:
+            await conn.execute(
+                """
+                INSERT INTO api_request_logs (
+                    token_id, endpoint, repo_root, language, files_count,
+                    autofix_requested, response_time_ms, findings_count,
+                    rule_ids, status, error_type, created_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+                """,
+                token_id,
+                endpoint,
+                repo_root[:500] if repo_root else None,
+                language,
+                files_count,
+                autofix_requested,
+                response_time_ms,
+                findings_count,
+                rule_ids,
+                status,
+                error_type,
+            )
+    except Exception as e:
+        # Log but don't fail - this is best-effort
+        print(f"[db] Failed to log API request: {e}")
+
+
+async def get_top_triggered_rules(days: int = 30, limit: int = 10) -> list[dict]:
+    """Get most frequently triggered rules in the last N days."""
+    async with get_connection() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT 
+                rule_id,
+                COUNT(*) as trigger_count
+            FROM api_request_logs,
+            LATERAL unnest(rule_ids) as rule_id
+            WHERE created_at >= NOW() - ($1 * INTERVAL '1 day')
+              AND status = 'success'
+            GROUP BY rule_id
+            ORDER BY trigger_count DESC
+            LIMIT $2
+            """,
+            days,
+            limit,
+        )
+        
+        total = sum(row["trigger_count"] for row in rows)
+        return [
+            {
+                "rule_id": row["rule_id"],
+                "count": row["trigger_count"],
+                "percentage": round(100.0 * row["trigger_count"] / total, 1) if total > 0 else 0,
+            }
+            for row in rows
+        ]
+
+
+async def get_response_time_stats(days: int = 30) -> dict:
+    """Get response time statistics for the last N days."""
+    async with get_connection() as conn:
+        stats = await conn.fetchrow(
+            """
+            SELECT 
+                COALESCE(AVG(response_time_ms), 0) as avg_ms,
+                COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY response_time_ms), 0) as p50_ms,
+                COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY response_time_ms), 0) as p95_ms,
+                COALESCE(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY response_time_ms), 0) as p99_ms,
+                COUNT(*) as sample_count
+            FROM api_request_logs
+            WHERE created_at >= NOW() - ($1 * INTERVAL '1 day')
+              AND status = 'success'
+            """,
+            days,
+        )
+        
+        return {
+            "avg_ms": round(float(stats["avg_ms"]), 1),
+            "p50_ms": round(float(stats["p50_ms"]), 1),
+            "p95_ms": round(float(stats["p95_ms"]), 1),
+            "p99_ms": round(float(stats["p99_ms"]), 1),
+            "sample_count": int(stats["sample_count"]),
+        }
+
+
+async def get_language_breakdown(days: int = 30) -> dict:
+    """Get request count by language for the last N days."""
+    async with get_connection() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT 
+                COALESCE(language, 'unknown') as language,
+                COUNT(*) as request_count
+            FROM api_request_logs
+            WHERE created_at >= NOW() - ($1 * INTERVAL '1 day')
+            GROUP BY language
+            ORDER BY request_count DESC
+            """,
+            days,
+        )
+        
+        total = sum(row["request_count"] for row in rows)
+        return {
+            row["language"]: {
+                "count": row["request_count"],
+                "percentage": round(100.0 * row["request_count"] / total, 1) if total > 0 else 0,
+            }
+            for row in rows
+        }
+
+
+async def get_files_analyzed_stats(days: int = 30) -> dict:
+    """Get statistics on files analyzed per request."""
+    async with get_connection() as conn:
+        stats = await conn.fetchrow(
+            """
+            SELECT 
+                COALESCE(AVG(files_count), 0) as avg_files,
+                COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY files_count), 0) as median_files,
+                COALESCE(MAX(files_count), 0) as max_files,
+                COUNT(*) as sample_count
+            FROM api_request_logs
+            WHERE created_at >= NOW() - ($1 * INTERVAL '1 day')
+              AND files_count > 0
+            """,
+            days,
+        )
+        
+        return {
+            "avg_files": round(float(stats["avg_files"]), 1),
+            "median_files": int(stats["median_files"]),
+            "max_files": int(stats["max_files"]),
+            "sample_count": int(stats["sample_count"]),
+        }
+
+
+async def get_autofix_adoption_rate(days: int = 30) -> dict:
+    """Get autofix usage statistics."""
+    async with get_connection() as conn:
+        stats = await conn.fetchrow(
+            """
+            SELECT 
+                COUNT(*) as total_requests,
+                SUM(CASE WHEN autofix_requested THEN 1 ELSE 0 END) as autofix_requests
+            FROM api_request_logs
+            WHERE created_at >= NOW() - ($1 * INTERVAL '1 day')
+              AND endpoint = 'validate'
+            """,
+            days,
+        )
+        
+        total = int(stats["total_requests"])
+        autofix = int(stats["autofix_requests"])
+        
+        return {
+            "total_requests": total,
+            "autofix_requests": autofix,
+            "adoption_rate": round(100.0 * autofix / total, 1) if total > 0 else 0,
+        }
+
+
+async def get_error_timeout_rates(days: int = 30) -> dict:
+    """Get error and timeout rate statistics."""
+    async with get_connection() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT 
+                status,
+                COUNT(*) as count
+            FROM api_request_logs
+            WHERE created_at >= NOW() - ($1 * INTERVAL '1 day')
+            GROUP BY status
+            """,
+            days,
+        )
+        
+        by_status = {row["status"]: row["count"] for row in rows}
+        total = sum(by_status.values())
+        
+        success = by_status.get("success", 0)
+        error = by_status.get("error", 0)
+        timeout = by_status.get("timeout", 0)
+        
+        return {
+            "total_requests": total,
+            "success_count": success,
+            "error_count": error,
+            "timeout_count": timeout,
+            "success_rate": round(100.0 * success / total, 1) if total > 0 else 0,
+            "error_rate": round(100.0 * error / total, 1) if total > 0 else 0,
+            "timeout_rate": round(100.0 * timeout / total, 1) if total > 0 else 0,
+        }
+
+
+async def get_detailed_metrics(days: int = 30) -> dict:
+    """Get all detailed metrics for admin dashboard."""
+    # Get Phase 1A metrics (from api_tokens)
+    basic = await get_platform_metrics()
+    
+    # Get Phase 2 metrics (from api_request_logs)
+    try:
+        top_rules = await get_top_triggered_rules(days)
+        response_times = await get_response_time_stats(days)
+        language_breakdown = await get_language_breakdown(days)
+        files_stats = await get_files_analyzed_stats(days)
+        autofix_stats = await get_autofix_adoption_rate(days)
+        error_stats = await get_error_timeout_rates(days)
+    except Exception as e:
+        # Table may not exist yet - return empty Phase 2 data
+        print(f"[db] Phase 2 metrics unavailable: {e}")
+        top_rules = []
+        response_times = {"avg_ms": 0, "p50_ms": 0, "p95_ms": 0, "p99_ms": 0, "sample_count": 0}
+        language_breakdown = {}
+        files_stats = {"avg_files": 0, "median_files": 0, "max_files": 0, "sample_count": 0}
+        autofix_stats = {"total_requests": 0, "autofix_requests": 0, "adoption_rate": 0}
+        error_stats = {"total_requests": 0, "success_count": 0, "error_count": 0, "timeout_count": 0, 
+                      "success_rate": 0, "error_rate": 0, "timeout_rate": 0}
+    
+    return {
+        # Phase 1A
+        **basic,
+        
+        # Phase 2
+        "top_rules": top_rules,
+        "response_times": response_times,
+        "language_breakdown": language_breakdown,
+        "files_stats": files_stats,
+        "autofix_stats": autofix_stats,
+        "error_stats": error_stats,
+    }
