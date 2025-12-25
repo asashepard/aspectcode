@@ -50,27 +50,17 @@ class RepositorySnapshot:
     
     def get_info(self) -> SnapshotInfo:
         """Get summary information about this snapshot."""
-        languages = {}
         total_bytes = 0
         
         for file_snap in self.files.values():
-            lang = file_snap.language
-            languages[lang] = languages.get(lang, 0) + 1
             total_bytes += file_snap.size
-        
-        # Calculate dependency count
-        dependency_count = sum(len(deps) for deps in self.dependency_graph.values())
         
         return SnapshotInfo(
             snapshot_id=self.snapshot_id,
             root_path=self.root_path,
-            repo_root=self.root_path,  # Alias for extension compatibility
             created_at=self.created_at,
             file_count=len(self.files),
-            total_bytes=total_bytes,
-            dependency_count=dependency_count,
-            languages=languages,
-            last_updated=self.last_updated
+            bytes_indexed=total_bytes
         )
     
     def get_files_by_language(self, language: str) -> List[FileSnapshot]:

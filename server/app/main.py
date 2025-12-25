@@ -157,9 +157,28 @@ def index_repository(
     req: IndexRequest = Body(...),
     user: UserContext = Depends(get_current_user)
 ):
-    """Index a repository for analysis."""
-    from .services.indexing import index_repository as index_repo_service
-    return index_repo_service(req)
+    """
+    Index a repository for analysis.
+    
+    Note: This endpoint requires the repository to exist on the server filesystem.
+    In cloud deployments, this will return an error for local paths.
+    Use /validate directly with paths that exist on the server.
+    """
+    try:
+        from .services.indexing import index_repository as index_repo_service
+        return index_repo_service(req)
+    except Exception as e:
+        # Return a valid IndexResult with error information
+        return IndexResult(
+            snapshot_id="error-indexing-failed",
+            file_count=0,
+            bytes_indexed=0,
+            took_ms=0,
+            processing_time_ms=0,
+            dependency_count=0,
+            skipped_files=0,
+            parse_errors=1
+        )
 
 @app.post("/validate", response_model=ValidateResponse)
 @limiter.limit(f"{settings.rate_limit}/minute")
@@ -265,104 +284,111 @@ def validate_with_tree_sitter_internal(req: ValidateFullRequest):
                 "rule": "system_error",
                 "severity": "high", 
                 "explain": "Tree-sitter engine not available",
-                "locations": [],
-                "fixable": False
+                "locations": []
             }],
             metrics={"check_ms": int((time.time() - start_time) * 1000)}
         )
     
+    original_cwd = None
     try:
-        # Import validation service
-        from engine.validation import validate_paths
-        
         # Add server directory to Python path
         server_dir = os.path.dirname(os.path.dirname(__file__))
         if server_dir not in sys.path:
             sys.path.insert(0, server_dir)
         
-        # Determine paths to validate
-        if req.paths:
-            paths_to_validate = req.paths
-        elif req.repo_root:
-            paths_to_validate = [req.repo_root]
-        else:
-            return ValidateResponse(
-                verdict="unknown",
-                violations=[{
-                    "id": "request-error-001",
-                    "rule": "system_error", 
-                    "severity": "high",
-                    "explain": "Either paths or repo_root must be provided",
-                    "locations": [],
-                    "fixable": False
-                }],
-                metrics={"check_ms": int((time.time() - start_time) * 1000)}
+        # Check if files content was provided (remote validation mode)
+        if req.files:
+            from engine.validation import validate_files_content
+            
+            # Convert FileContent models to dicts for the engine
+            files_data = [
+                {
+                    'path': f.path,
+                    'content': f.content,
+                    'language': f.language
+                }
+                for f in req.files
+            ]
+            
+            result = validate_files_content(
+                files_data,
+                profile=req.profile,
+                enable_project_graph=req.enable_project_graph
             )
-        
-        # Change to project root for validation
-        original_cwd = os.getcwd()
-        root_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-        os.chdir(root_dir)
-        
-        try:
-            # Run validation using the clean service
+        else:
+            # Local validation mode - read files from disk
+            from engine.validation import validate_paths
+            
+            # Determine paths to validate
+            if req.paths:
+                paths_to_validate = req.paths
+            elif req.repo_root:
+                paths_to_validate = [req.repo_root]
+            else:
+                return ValidateResponse(
+                    verdict="unknown",
+                    violations=[{
+                        "id": "request-error-001",
+                        "rule": "system_error", 
+                        "severity": "high",
+                        "explain": "Either paths, repo_root, or files must be provided",
+                        "locations": []
+                    }],
+                    metrics={"check_ms": int((time.time() - start_time) * 1000)}
+                )
+            
+            # Change to project root for validation
+            original_cwd = os.getcwd()
+            root_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+            os.chdir(root_dir)
+            
             result = validate_paths(
                 paths_to_validate, 
                 req.languages, 
                 req.profile,
                 req.enable_project_graph
             )
+        
+        # Convert findings to violations format for extension compatibility
+        violations = []
+        for finding in result.get("findings", []):
+            violation = {
+                "id": f"ts-{abs(hash(finding['rule_id'] + finding['file_path'] + str(finding['start_byte'])))}",
+                "rule": finding["rule_id"],
+                "severity": "high" if finding["severity"] == "error" else "medium",
+                "explain": finding["message"],
+                "locations": [f"{finding['file_path']}:{finding['range']['startLine']}:{finding['range']['startCol']}-{finding['range']['endLine']}:{finding['range']['endCol']}"],
+                "priority": finding.get("priority", "P1")  # Include priority for UI categorization
+            }
             
-            # Convert findings to violations format for extension compatibility
-            violations = []
-            for finding in result.get("findings", []):
-                violation = {
-                    "id": f"ts-{abs(hash(finding['rule_id'] + finding['file_path'] + str(finding['start_byte'])))}",
-                    "rule": finding["rule_id"],
-                    "severity": "high" if finding["severity"] == "error" else "medium",
-                    "explain": finding["message"],
-                    "locations": [f"{finding['file_path']}:{finding['range']['startLine']}:{finding['range']['startCol']}-{finding['range']['endLine']}:{finding['range']['endCol']}"],
-                    "priority": finding.get("priority", "P1")  # Include priority for UI categorization
-                }
-                
-                violations.append(violation)
-            
-            # Determine verdict
-            if not violations:
-                verdict = "safe"
-            elif any(v["severity"] == "high" for v in violations):
-                verdict = "risky"
-            else:
-                verdict = "risky"
-            
-            # Create response
-            return ValidateResponse(
-                verdict=verdict,
-                violations=violations,
-                metrics={
-                    "check_ms": int((time.time() - start_time) * 1000),
-                    "files_checked": result.get("files_scanned", 0),
-                    "total_files": result.get("files_scanned", 0),
-                    "detectors_ms": int(result.get("metrics", {}).get("rules_ms", 0)),
-                    "detectors_count": len(violations),
-                    "snapshot_id": req.snapshot_id or "tree-sitter-direct",
-                    "whole_repo_mode": True,
-                    "debug_detector_findings_count": len(result.get("findings", [])),
-                    "debug_violations_count": len(violations)
-                }
-            )
-            
-        finally:
-            # Always restore original directory
-            os.chdir(original_cwd)
+            violations.append(violation)
+        
+        # Determine verdict
+        if not violations:
+            verdict = "safe"
+        elif any(v["severity"] == "high" for v in violations):
+            verdict = "risky"
+        else:
+            verdict = "risky"
+        
+        # Create response
+        return ValidateResponse(
+            verdict=verdict,
+            violations=violations,
+            metrics={
+                "check_ms": int((time.time() - start_time) * 1000),
+                "files_checked": result.get("files_scanned", 0),
+                "total_files": result.get("files_scanned", 0),
+                "detectors_ms": int(result.get("metrics", {}).get("rules_ms", 0)),
+                "detectors_count": len(violations),
+                "snapshot_id": req.snapshot_id or "tree-sitter-direct",
+                "whole_repo_mode": True,
+                "debug_detector_findings_count": len(result.get("findings", [])),
+                "debug_violations_count": len(violations)
+            }
+        )
         
     except Exception as e:
-        # Restore directory on error
-        try:
-            os.chdir(original_cwd)
-        except:
-            pass
-            
         return ValidateResponse(
             verdict="unknown", 
             violations=[{
@@ -370,11 +396,17 @@ def validate_with_tree_sitter_internal(req: ValidateFullRequest):
                 "rule": "system_error",
                 "severity": "high",
                 "explain": f"Tree-sitter engine error: {str(e)}",
-                "locations": [],
-                "fixable": False
+                "locations": []
             }],
             metrics={"check_ms": int((time.time() - start_time) * 1000)}
         )
+    finally:
+        # Restore original directory if it was changed
+        if original_cwd:
+            try:
+                os.chdir(original_cwd)
+            except:
+                pass
 
 @app.get("/snapshots", response_model=List[SnapshotInfo])
 @limiter.limit(f"{settings.rate_limit}/minute")

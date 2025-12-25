@@ -9,6 +9,17 @@ from typing import Iterator
 from engine.types import RuleMeta, Rule, RuleContext, Finding, Requires
 
 
+# Test file patterns to skip (these often contain SQL fixtures/mocks)
+TEST_FILE_PATTERNS = (
+    '/test/', '/tests/', '/__tests__/', '/spec/', '/specs/',
+    '_test.py', '_test.ts', '_test.js', '_test.go',
+    '.test.ts', '.test.js', '.test.tsx', '.test.jsx',
+    '.spec.ts', '.spec.js', '.spec.tsx', '.spec.jsx',
+    'test_', 'spec_', 'conftest.py', 'fixtures/', '/mock/', '/mocks/',
+    '/e2e/', '/integration/', '/unit/',
+)
+
+
 class SecSqlInjectionConcatRule:
     """Detect SQL injection vulnerabilities from string concatenation."""
     
@@ -85,21 +96,58 @@ class SecSqlInjectionConcatRule:
     # ORM methods that don't take raw SQL (false positive prevention)
     ORM_SAFE_METHODS = {
         "python": {"delete", "add", "commit", "refresh", "get", "merge", "expunge", "close", 
-                   "select", "insert", "update", "exec", "execute"},  # SQLModel/SQLAlchemy ORM functions
+                   "select", "insert", "update", "exec", "execute",  # SQLModel/SQLAlchemy ORM functions
+                   "scalars", "scalar", "all", "first", "one", "one_or_none",  # SQLAlchemy result methods
+                   "options", "joinedload", "selectinload", "subqueryload"},  # SQLAlchemy loading
         "javascript": {"save", "remove", "create", "update", "delete", "findOne", "findMany",
-                       "queryparse", "querystring"},  # URL query string parsing, not SQL
+                       "queryparse", "querystring",  # URL query string parsing, not SQL
+                       "insertOne", "insertMany", "updateOne", "updateMany", "deleteOne", "deleteMany",  # MongoDB
+                       "search", "index", "bulk"},  # Elasticsearch
         "typescript": {"save", "remove", "create", "update", "delete", "findOne", "findMany",
-                       "queryparse", "querystring"},  # URL query string parsing, not SQL
-        "java": {"save", "delete", "persist", "merge", "find", "getReference"},
-        "csharp": {"Add", "Remove", "Update", "Find", "SaveChanges", "SaveChangesAsync"},
-        "ruby": {"save", "destroy", "create", "update", "delete"},
+                       "queryparse", "querystring",  # URL query string parsing, not SQL
+                       "insertOne", "insertMany", "updateOne", "updateMany", "deleteOne", "deleteMany",  # MongoDB
+                       "search", "index", "bulk"},  # Elasticsearch
+        "java": {"save", "delete", "persist", "merge", "find", "getReference",
+                 "findById", "findAll", "findAllById", "saveAll", "deleteAll", "deleteById"},  # Spring Data
+        "csharp": {"Add", "Remove", "Update", "Find", "SaveChanges", "SaveChangesAsync",
+                   "AddRange", "RemoveRange", "UpdateRange", "FindAsync"},  # Entity Framework
+        "ruby": {"save", "destroy", "create", "update", "delete",
+                 "create!", "save!", "update!", "destroy_all", "delete_all"},  # ActiveRecord
+        "go": {"Create", "Save", "Delete", "First", "Find", "Take", "Last",  # GORM
+               "Updates", "Preload", "Joins", "Model", "Table"},
     }
     
     # ORM/Query builder patterns that use method chaining (safe SQL construction)
     ORM_CHAIN_PATTERNS = {
-        "python": {".where(", ".filter(", ".order_by(", ".group_by(", ".join(", ".select_from("},
-        "javascript": {".where(", ".orderBy(", ".groupBy(", ".leftJoin(", ".innerJoin("},
-        "typescript": {".where(", ".orderBy(", ".groupBy(", ".leftJoin(", ".innerJoin("},
+        "python": {".where(", ".filter(", ".order_by(", ".group_by(", ".join(", ".select_from(",
+                   ".filter_by(", ".having(", ".limit(", ".offset(", ".distinct(",
+                   ".options(", ".outerjoin(", ".subquery("},  # More SQLAlchemy patterns
+        "javascript": {".where(", ".orderBy(", ".groupBy(", ".leftJoin(", ".innerJoin(",
+                       ".select(", ".from(", ".limit(", ".offset(", ".having(",
+                       ".match(", ".should(", ".must(", ".filter("},  # Knex.js + Elasticsearch
+        "typescript": {".where(", ".orderBy(", ".groupBy(", ".leftJoin(", ".innerJoin(",
+                       ".select(", ".from(", ".limit(", ".offset(", ".having(",
+                       ".match(", ".should(", ".must(", ".filter("},  # TypeORM + Elasticsearch
+        "java": {".where(", ".orderBy(", ".groupBy(", ".join(", ".fetch(",
+                 ".createQuery(", ".setParameter("},  # JPA/Hibernate
+        "csharp": {".Where(", ".OrderBy(", ".GroupBy(", ".Join(", ".Include(",
+                   ".ThenInclude(", ".AsNoTracking(", ".Select("},  # Entity Framework LINQ
+        "go": {".Where(", ".Order(", ".Group(", ".Joins(", ".Preload(",
+               ".Model(", ".Select(", ".Omit(", ".Limit(", ".Offset("},  # GORM
+    }
+    
+    # NoSQL and non-SQL query patterns to skip (false positive prevention)
+    NOSQL_PATTERNS = {
+        # MongoDB
+        "$match", "$group", "$project", "$lookup", "$unwind", "$sort", "$limit", "$skip",
+        "aggregate(", "collection.", "db.collection",
+        # Elasticsearch  
+        "bool:", "must:", "should:", "filter:", "match:", "term:", "range:",
+        "_search", "_doc", "_index",
+        # GraphQL
+        "query {", "mutation {", "subscription {", "fragment ",
+        # Redis
+        "redis.", "jedis.", "GET ", "SET ", "HGET", "HSET", "LPUSH", "RPUSH",
     }
     
     # SQL constructor classes/methods that take SQL as first argument
@@ -118,6 +166,11 @@ class SecSqlInjectionConcatRule:
     def visit(self, ctx: RuleContext) -> Iterator[Finding]:
         """Check for SQL injection via string concatenation."""
         if not ctx.syntax:
+            return
+            
+        # Skip test files - they often contain SQL fixtures/mocks
+        file_path_lower = ctx.file_path.lower().replace('\\', '/')
+        if any(pattern in file_path_lower for pattern in TEST_FILE_PATTERNS):
             return
             
         # Get language from adapter
@@ -328,6 +381,10 @@ class SecSqlInjectionConcatRule:
         if self._looks_like_css_selector(node_text):
             return False
         
+        # Skip NoSQL queries (MongoDB, Elasticsearch, GraphQL, Redis)
+        if self._looks_like_nosql(node_text):
+            return False
+        
         # Check if this is part of an ORM query builder chain (safe)
         # e.g., delete(Item).where(col(Item.owner_id) == user_id)
         chain_patterns = self.ORM_CHAIN_PATTERNS.get(language, set())
@@ -374,11 +431,26 @@ class SecSqlInjectionConcatRule:
                                    'routerquery', 'router_query', 'queryparams', 'searchquery',
                                    'urlparams', 'url_params', 'getquery', 'validatedquery',
                                    'queryschema', 'query_schema',  # Zod/validation schemas
-                                   'zodquery', 'parsequery', 'parsedquery']
+                                   'zodquery', 'parsequery', 'parsedquery',
+                                   # GraphQL patterns
+                                   'graphqlquery', 'graphql_query', 'gqlquery', 'gql_query',
+                                   'querydocument', 'query_document',
+                                   # React Query / TanStack
+                                   'usequery', 'usemutation', 'querykey', 'query_key',
+                                   'queryclient', 'query_client', 'queryoptions',
+                                   # Other non-SQL
+                                   'searchquery', 'search_query', 'filterquery', 'filter_query',
+                                   'esquery', 'mongoquery', 'dbquery']
             if any(pattern in var_name for pattern in url_query_patterns):
                 return False
             
-            if any(sql_word in var_name for sql_word in ['sql', 'query', 'statement']):
+            # Only flag if it looks like an actual SQL variable name
+            # Must have 'sql' in name, or 'query' with a SQL-ish prefix/suffix
+            sql_var_patterns = ['sql', 'sqlquery', 'sql_query', 'rawquery', 'raw_query',
+                                'sqlstatement', 'sql_statement', 'sqlstring', 'sql_string',
+                                'selectquery', 'select_query', 'insertquery', 'insert_query',
+                                'updatequery', 'update_query', 'deletequery', 'delete_query']
+            if any(pattern in var_name for pattern in sql_var_patterns):
                 return True  # Assume variables with SQL-like names are dynamic
                 
         # 5) String literal that looks like SQL and might be in dynamic context
@@ -520,6 +592,28 @@ class SecSqlInjectionConcatRule:
         ]
         text_lower = text.lower()
         return any(pattern in text_lower for pattern in css_patterns)
+
+    def _looks_like_nosql(self, text: str) -> bool:
+        """Check if text looks like a NoSQL/non-SQL query (MongoDB, Elasticsearch, GraphQL, Redis)."""
+        if not text:
+            return False
+        
+        text_lower = text.lower()
+        
+        # Check for NoSQL patterns
+        for pattern in self.NOSQL_PATTERNS:
+            if pattern.lower() in text_lower:
+                return True
+        
+        # MongoDB aggregation pipeline style
+        if text_lower.startswith('[{') or '{"$' in text_lower:
+            return True
+        
+        # GraphQL query structure
+        if re.search(r'\{\s*\w+\s*\{', text):
+            return True
+        
+        return False
 
 
 # Export rule for registration

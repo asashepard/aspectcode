@@ -1,4 +1,9 @@
-"""Detect direct use of global/singleton mutable state or static service locators."""
+"""Detect direct use of global/singleton mutable state or static service locators.
+
+PURPOSE: This is a KB-enriching rule. It maps shared state locations to help
+AI coding agents understand stateful dependencies in the codebase.
+Contributes to .aspect/architecture.md "Shared State" section.
+"""
 
 from typing import Iterator
 
@@ -13,15 +18,16 @@ except ImportError:
 
 
 class ArchGlobalStateUsageRule:
-    """Warn on direct use of global/singleton mutable state or static service locators."""
+    """Map global/singleton mutable state locations for KB enrichment."""
     
     meta = RuleMeta(
         id="arch.global_state_usage",
         category="arch",
         tier=1,
-        priority="P3",  # Lowered from P1 - architectural suggestion, not critical
+        priority="P3",
         autofix_safety="suggest-only",
-        description="Warn on direct use of global/singleton mutable state or static service locators",
+        display_mode="kb-only",  # KB-enriching: not shown in Problems panel
+        description="Map global/singleton mutable state locations for architectural context",
         langs=["python", "typescript", "javascript", "go", "java", "cpp", "c", "csharp", "ruby", "rust", "swift"]
     )
     requires = Requires(syntax=True, scopes=True, raw_text=True)

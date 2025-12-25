@@ -15,13 +15,15 @@ const INTRO_BLOCK = `
 
 | File | Purpose |
 |------|---------|  
-| \`architecture.md\` | **Read first.** High-risk hubs, directory layout, entry points—the "Do Not Break" zones |
+| \`architecture.md\` | **Read first.** High-risk hubs, circular deps, shared state, entry points—the "Do Not Break" zones |
 | \`map.md\` | Data models with signatures, symbol index, naming conventions |
 | \`context.md\` | Module clusters (co-edited files), external integrations, data flow paths |
 
 **Key architectural intelligence:**
 - **High-Risk Hubs** in \`architecture.md\`: Files with many dependents—changes here ripple widely
 - **Entry Points** in \`architecture.md\`: HTTP handlers, CLI commands, event listeners
+- **Circular Dependencies** in \`architecture.md\`: Bidirectional imports creating tight coupling
+- **Shared State** in \`architecture.md\`: Global/singleton state locations
 - **External Integrations** in \`context.md\`: API clients, database connections, message queues
 - **Data Models** in \`map.md\`: ORM models, dataclasses, TypeScript interfaces with signatures
 

@@ -50,6 +50,14 @@ class IndexResult(BaseModel):
     skipped_files: int = 0  # Files skipped (too large, binary, etc.)
     parse_errors: int = 0  # Files that failed parsing
 
+
+class FileContent(BaseModel):
+    """File content for remote validation."""
+    path: str  # Relative path from repo root
+    content: str  # File content as string
+    language: Optional[str] = None  # Optional language hint (python, typescript, javascript)
+
+
 class ValidateFullRequest(BaseModel):
     """Request for full repository validation using tree-sitter."""
     snapshot_id: Optional[str] = None  # Snapshot to validate against
@@ -59,6 +67,9 @@ class ValidateFullRequest(BaseModel):
     modes: Optional[List[str]] = None  # Validation modes (deprecated)
     profile: Optional[str] = None  # Rule profile to use (default: alpha_default)
     enable_project_graph: bool = True  # Enable dependency graph for Tier 2 rules (default: True)
+    
+    # Remote validation: send file contents instead of paths
+    files: Optional[List[FileContent]] = None  # File contents for remote validation
 
 class DeltaRequest(BaseModel):
     """Request to apply file changes to existing snapshot."""

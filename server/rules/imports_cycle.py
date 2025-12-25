@@ -330,15 +330,16 @@ class ImportsCycleSimpleRule:
         return start_byte, end_byte
 
 class ImportsCycleAdvancedRule:
-    """Find circular imports involving this file."""
+    """Find circular imports involving this file for KB architectural mapping."""
     
     meta = RuleMeta(
         id="imports.cycle.advanced",
         category="imports", 
         tier=2,
-        priority="P0",
+        priority="P2",  # KB-enriching, not critical
         autofix_safety="suggest-only",
-        description="Advanced circular import detection using project graph analysis",
+        display_mode="kb-only",  # KB-enriching: maps circular dependencies for architecture.md
+        description="Map circular import dependencies for architectural context",
         # Only support languages with iter_imports in their adapter
         langs=["python", "typescript", "javascript"]
     )

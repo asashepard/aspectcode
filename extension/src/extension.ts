@@ -1322,15 +1322,72 @@ async function examineFullRepository(state?: AspectCodeState, context?: vscode.E
       
       await new Promise(resolve => setTimeout(resolve, 200));
       
-      // Phase 2: Setting up request (20%)
-      progress.report({ increment: 10, message: 'Setting up examination request...' });
-      sendProgressToPanel(state, 'examination', 20, 'Setting up examination request...');
+      // Phase 2: Collecting files (20%)
+      progress.report({ increment: 10, message: 'Collecting source files...' });
+      sendProgressToPanel(state, 'examination', 20, 'Collecting source files...');
 
+      // Collect all source files and read their contents for remote validation
+      const sourceFiles = await discoverWorkspaceSourceFiles();
+      outputChannel?.appendLine(`[examineFullRepository] Discovered ${sourceFiles.length} source files`);
+      
+      // Read file contents (with size limit to prevent memory issues)
+      const maxFileSize = 100 * 1024; // 100KB per file
+      const maxTotalSize = 10 * 1024 * 1024; // 10MB total
+      const filesData: { path: string; content: string; language?: string }[] = [];
+      let totalSize = 0;
+      
+      for (const filePath of sourceFiles) {
+        try {
+          const uri = vscode.Uri.file(filePath);
+          const stat = await vscode.workspace.fs.stat(uri);
+          
+          // Skip files that are too large
+          if (stat.size > maxFileSize) {
+            outputChannel?.appendLine(`[examineFullRepository] Skipping large file: ${filePath} (${stat.size} bytes)`);
+            continue;
+          }
+          
+          // Check total size limit
+          if (totalSize + stat.size > maxTotalSize) {
+            outputChannel?.appendLine(`[examineFullRepository] Reached total size limit, skipping remaining files`);
+            break;
+          }
+          
+          const content = await vscode.workspace.fs.readFile(uri);
+          const text = new TextDecoder().decode(content);
+          
+          // Determine relative path from root
+          const relativePath = path.relative(root, filePath);
+          
+          // Detect language from extension
+          let language: string | undefined;
+          if (filePath.endsWith('.py')) language = 'python';
+          else if (filePath.endsWith('.ts') || filePath.endsWith('.tsx')) language = 'typescript';
+          else if (filePath.endsWith('.js') || filePath.endsWith('.jsx') || filePath.endsWith('.mjs') || filePath.endsWith('.cjs')) language = 'javascript';
+          else if (filePath.endsWith('.java')) language = 'java';
+          else if (filePath.endsWith('.cs')) language = 'csharp';
+          
+          filesData.push({
+            path: relativePath,
+            content: text,
+            language
+          });
+          
+          totalSize += stat.size;
+        } catch (err) {
+          // Skip files that can't be read
+          outputChannel?.appendLine(`[examineFullRepository] Error reading file ${filePath}: ${err}`);
+        }
+      }
+      
+      outputChannel?.appendLine(`[examineFullRepository] Prepared ${filesData.length} files (${(totalSize / 1024).toFixed(1)} KB) for remote validation`);
+
+      // Build payload with file contents for remote validation
       const payload = {
         repo_root: root,
         modes: ['structure', 'types'],
-        autofix: false,
-        enable_project_graph: true  // Enable Tier 2 architectural rules
+        enable_project_graph: false, // Disabled for remote validation (no cross-file analysis yet)
+        files: filesData  // Send file contents for remote validation
       };
 
       // Phase 3: Sending to server (30%)

@@ -91,13 +91,23 @@ ${agentsEntry}
  * - arch.entry_point: HTTP handlers, CLI commands, main functions, event listeners
  * - arch.external_integration: HTTP clients, DB connections, message queues, SDKs
  * - arch.data_model: ORM models, dataclasses, interfaces, schemas
+ * - arch.global_state_usage: Mutable global state, singletons, service locators
+ * - imports.cycle.advanced: Circular import dependencies
+ * - architecture.critical_dependency: High-impact hub files
+ * - analysis.change_impact: Change blast radius analysis
  */
 
 // KB-enriching rule IDs
 const KB_ENRICHING_RULES = {
+  // Core KB rules (used in context.md and map.md)
   ENTRY_POINT: 'arch.entry_point',
   EXTERNAL_INTEGRATION: 'arch.external_integration',
   DATA_MODEL: 'arch.data_model',
+  // Extended KB rules (used in architecture.md)
+  GLOBAL_STATE: 'arch.global_state_usage',
+  IMPORT_CYCLE: 'imports.cycle.advanced',
+  CRITICAL_DEPENDENCY: 'architecture.critical_dependency',
+  CHANGE_IMPACT: 'analysis.change_impact',
 };
 
 interface KBEnrichingFinding {
@@ -421,7 +431,11 @@ async function generateArchitectureFile(
       isStructuralAppFile(l.source, workspaceRoot.fsPath) &&
       isStructuralAppFile(l.target, workspaceRoot.fsPath)
     );
-    if (appCircularLinks.length > 0) {
+    
+    // Also get cycle findings from the rule for additional context
+    const cycleFindings = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.IMPORT_CYCLE);
+    
+    if (appCircularLinks.length > 0 || cycleFindings.length > 0) {
       content += '## ⚠️ Circular Dependencies\n\n';
       content += '_Bidirectional imports that create tight coupling._\n\n';
       
@@ -440,6 +454,66 @@ async function generateArchitectureFile(
         
         content += `- \`${sourceRel}\` ↔ \`${targetRel}\`\n`;
         cycleIndex++;
+      }
+      content += '\n';
+    }
+
+    // ============================================================
+    // GLOBAL STATE (from arch.global_state_usage rule)
+    // ============================================================
+    const globalStateFindings = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.GLOBAL_STATE)
+      .filter(f => classifyFile(f.file, workspaceRoot.fsPath) === 'app');
+    
+    if (globalStateFindings.length > 0) {
+      content += '## Shared State\n\n';
+      content += '_Global/singleton state locations. Consider thread-safety and testability._\n\n';
+      
+      for (const finding of globalStateFindings.slice(0, 8)) {
+        const relPath = makeRelativePath(finding.file, workspaceRoot.fsPath);
+        content += `- \`${relPath}\`: ${finding.message}\n`;
+      }
+      if (globalStateFindings.length > 8) {
+        content += `- _...and ${globalStateFindings.length - 8} more_\n`;
+      }
+      content += '\n';
+    }
+
+    // ============================================================
+    // CRITICAL DEPENDENCIES (from architecture.critical_dependency rule)
+    // ============================================================
+    const criticalDepFindings = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.CRITICAL_DEPENDENCY)
+      .filter(f => classifyFile(f.file, workspaceRoot.fsPath) === 'app');
+    
+    if (criticalDepFindings.length > 0) {
+      content += '## Critical Dependencies\n\n';
+      content += '_Symbols with many dependents. Changes here have wide blast radius._\n\n';
+      
+      for (const finding of criticalDepFindings.slice(0, 6)) {
+        const relPath = makeRelativePath(finding.file, workspaceRoot.fsPath);
+        content += `- \`${relPath}\`: ${finding.message}\n`;
+      }
+      if (criticalDepFindings.length > 6) {
+        content += `- _...and ${criticalDepFindings.length - 6} more_\n`;
+      }
+      content += '\n';
+    }
+
+    // ============================================================
+    // CHANGE IMPACT ANALYSIS (from analysis.change_impact rule)
+    // ============================================================
+    const changeImpactFindings = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.CHANGE_IMPACT)
+      .filter(f => classifyFile(f.file, workspaceRoot.fsPath) === 'app');
+    
+    if (changeImpactFindings.length > 0) {
+      content += '## Change Impact\n\n';
+      content += '_High-impact symbols. Review carefully before modifying._\n\n';
+      
+      for (const finding of changeImpactFindings.slice(0, 6)) {
+        const relPath = makeRelativePath(finding.file, workspaceRoot.fsPath);
+        content += `- \`${relPath}\`: ${finding.message}\n`;
+      }
+      if (changeImpactFindings.length > 6) {
+        content += `- _...and ${changeImpactFindings.length - 6} more_\n`;
       }
       content += '\n';
     }

@@ -425,6 +425,162 @@ class ValidationService:
     def validate_files(self, file_paths: List[str], profile: Optional[str] = None) -> Dict[str, Any]:
         """Validate specific files."""
         return self.validate_paths(file_paths, profile=profile)
+    
+    def validate_files_content(self, files: List[Dict[str, str]], profile: Optional[str] = None,
+                               enable_project_graph: bool = False) -> Dict[str, Any]:
+        """
+        Validate files from their content (for remote validation).
+        
+        Args:
+            files: List of dicts with 'path', 'content', and optional 'language' keys
+            profile: Rule profile to use (default: alpha_default)
+            enable_project_graph: Enable dependency graph (disabled by default for remote)
+            
+        Returns:
+            Validation result dictionary with findings and metrics
+        """
+        import time
+        start_time = time.time()
+        
+        # Ensure everything is loaded
+        self.ensure_adapters_loaded()
+        self.ensure_rules_loaded()
+        
+        # Validate and set profile
+        if profile is None:
+            rule_profile = get_default_profile()
+        else:
+            rule_profile = validate_profile(profile)
+        
+        # Load default configuration
+        from .config import load_config
+        config = load_config(None)
+        
+        # Determine languages to process
+        languages = ["python", "javascript", "typescript", "java", "csharp"]
+        
+        # Group files by language
+        files_by_language: Dict[str, List[Dict[str, str]]] = {}
+        
+        for file_info in files:
+            file_path = file_info.get('path', '')
+            content = file_info.get('content', '')
+            language = file_info.get('language')
+            
+            # Auto-detect language from extension if not provided
+            if not language:
+                if file_path.endswith('.py'):
+                    language = 'python'
+                elif file_path.endswith('.ts') or file_path.endswith('.tsx'):
+                    language = 'typescript'
+                elif file_path.endswith('.js') or file_path.endswith('.jsx'):
+                    language = 'javascript'
+                elif file_path.endswith('.java'):
+                    language = 'java'
+                elif file_path.endswith('.cs'):
+                    language = 'csharp'
+                else:
+                    continue  # Skip unsupported files
+            
+            if language not in files_by_language:
+                files_by_language[language] = []
+            files_by_language[language].append({'path': file_path, 'content': content})
+        
+        all_findings = []
+        language_stats = {}
+        profile_rule_ids_used = set()
+        
+        # Process each language
+        for language, lang_files in files_by_language.items():
+            if language not in languages:
+                continue
+            
+            adapter = get_adapter(language)
+            if not adapter:
+                continue
+            
+            # Get enabled rules for this language
+            rules = get_enabled_rules(["*"], language, rule_profile)
+            if not rules:
+                continue
+            
+            # Track rules used
+            for rule in rules:
+                profile_rule_ids_used.add(getattr(rule.meta, 'id', 'unknown'))
+            
+            # Analyze each file
+            language_findings = []
+            language_parse_time = 0.0
+            
+            for file_info in lang_files:
+                from .runner import analyze_file
+                findings, parse_time = analyze_file(
+                    file_info['path'], language, rules, config,
+                    debug_adapter=False, debug_output=[],
+                    debug_scopes=False, project_graph=None,
+                    content=file_info['content']  # Pass content directly
+                )
+                language_findings.extend(findings)
+                language_parse_time += parse_time
+            
+            # Store language statistics
+            language_stats[language] = {
+                "files_processed": len(lang_files),
+                "rules_run": len(rules),
+                "findings_count": len(language_findings),
+                "parse_time_ms": language_parse_time
+            }
+            
+            all_findings.extend(language_findings)
+        
+        # Calculate metrics
+        total_time_ms = (time.time() - start_time) * 1000
+        
+        # Convert findings to standard format
+        findings_data = []
+        for finding in all_findings:
+            try:
+                # Create range from bytes using provided content
+                file_content = None
+                for file_info in files:
+                    if file_info.get('path') == finding.file:
+                        file_content = file_info.get('content', '')
+                        break
+                
+                if file_content:
+                    from .schema import create_range_from_bytes
+                    range_info = create_range_from_bytes(file_content, finding.start_byte, finding.end_byte)
+                else:
+                    range_info = {"startLine": 1, "startCol": 1, "endLine": 1, "endCol": 1}
+                
+                finding_dict = {
+                    "rule_id": finding.rule,
+                    "severity": finding.severity,
+                    "message": finding.message,
+                    "file_path": finding.file,
+                    "start_byte": finding.start_byte,
+                    "end_byte": finding.end_byte,
+                    "range": range_info,
+                    "priority": getattr(finding, 'priority', 'P1')
+                }
+                findings_data.append(finding_dict)
+            except Exception as e:
+                print(f"Warning: Failed to convert finding: {e}")
+        
+        total_files = sum(len(f) for f in files_by_language.values())
+        
+        return {
+            "findings": findings_data,
+            "files_scanned": total_files,
+            "total_findings": len(findings_data),
+            "profile": rule_profile.value,
+            "metrics": {
+                "total_ms": total_time_ms,
+                "parse_ms": sum(s.get("parse_time_ms", 0) for s in language_stats.values()),
+                "rules_ms": total_time_ms,
+                "languages": language_stats
+            }
+        }
 
 
 # Global service instance
@@ -457,5 +613,12 @@ def validate_paths(paths: List[str], languages: Optional[List[str]] = None,
     """Convenience function to validate paths."""
     service = get_validation_service()
     return service.validate_paths(paths, languages, profile, enable_project_graph, collect_rule_timing)
+
+
+def validate_files_content(files: List[Dict[str, str]], profile: Optional[str] = None,
+                          enable_project_graph: bool = False) -> Dict[str, Any]:
+    """Convenience function to validate files from content."""
+    service = get_validation_service()
+    return service.validate_files_content(files, profile, enable_project_graph)
 
 

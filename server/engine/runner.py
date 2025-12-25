@@ -11,7 +11,7 @@ import sys
 import os
 import time
 import concurrent.futures
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from pathlib import Path
 
 from .types import RuleContext, Finding
@@ -244,8 +244,20 @@ def debug_adapter_for_file(file_path: str, content: str, adapter, debug_output: 
 
 def analyze_file(file_path: str, language: str, rules: List, config: EngineConfig, 
                 debug_adapter: bool, debug_output: List[str], debug_scopes: bool = False,
-                project_graph: Any = None) -> Tuple[List[Finding], float]:
-    """Analyze a single file and return findings and parse time."""
+                project_graph: Any = None, content: Optional[str] = None) -> Tuple[List[Finding], float]:
+    """Analyze a single file and return findings and parse time.
+    
+    Args:
+        file_path: Path to the file (used for context even if content is provided)
+        language: Language to analyze
+        rules: List of rules to run
+        config: Engine configuration
+        debug_adapter: Whether to debug adapter capabilities
+        debug_output: List to collect debug output
+        debug_scopes: Whether to debug scopes
+        project_graph: Optional project graph for Tier 2 rules
+        content: Optional file content (if None, reads from disk)
+    """
     adapter = get_adapter(language)
     if not adapter:
         return [], 0.0
@@ -253,9 +265,10 @@ def analyze_file(file_path: str, language: str, rules: List, config: EngineConfi
     start_time = time.time()
     
     try:
-        # Read file content
-        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
+        # Use provided content or read from disk
+        if content is None:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
         
         # Parse the file - pass file_path for language-specific parsing (e.g., TSX vs TS)
         parse_start = time.time()

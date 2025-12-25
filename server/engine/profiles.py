@@ -20,100 +20,34 @@ class RuleProfile(str, Enum):
 # ALPHA PROFILE RULE REGISTRY
 # ============================================================================
 # 
-# This is the SINGLE SOURCE OF TRUTH for rules included in the alpha profile.
+# ALPHA PROFILE PURPOSE: KB-enriching rules ONLY
 # 
-# To DISABLE a rule for alpha:
-#   1. Set enabled=False in the tuple below
-#   2. Add a comment explaining why (e.g., "# Too noisy - needs precision work")
+# These rules provide architectural intelligence for AI coding agents.
+# They populate the .aspect/ knowledge base files (architecture.md, map.md, context.md).
+# They do NOT report issues/warnings - they map "what exists" not "what's wrong."
 #
-# To ADD a rule:
-#   1. Add a new tuple with (rule_id, enabled, notes)
-#   2. Ensure the rule exists in server/rules/
+# Characteristics of KB-enriching rules:
+#   - display_mode: "kb-only" (not shown in Problems panel)
+#   - severity: "info" (informational, not actionable)
+#   - Purpose: Structural annotations for AI context
 #
 # Format: (rule_id, enabled, notes)
-#   - rule_id: The rule's unique identifier
-#   - enabled: True = active in alpha, False = disabled for alpha
-#   - notes: Brief description for maintainers
 #
 ALPHA_RULES_REGISTRY: List[tuple] = [
     # -------------------------------------------------------------------------
-    # IMPORTS & DEPENDENCIES
+    # CORE KB-ENRICHING RULES (used directly in kb.ts)
     # -------------------------------------------------------------------------
-    ("imports.cycle.advanced", True, "Tier 2: Cross-file import cycles"),
-    ("imports.unused", True, "Tier 1: Unused import detection - KB-only (noisy for user display)"),
+    ("arch.entry_point", True, "KB: HTTP handlers, CLI commands, main functions → context.md"),
+    ("arch.external_integration", True, "KB: HTTP clients, databases, message queues → context.md"),
+    ("arch.data_model", True, "KB: ORM models, dataclasses, interfaces → map.md"),
     
     # -------------------------------------------------------------------------
-    # ARCHITECTURE & CODE QUALITY (Tier 1)
+    # EXTENDED KB-ENRICHING (architectural intelligence)
     # -------------------------------------------------------------------------
-    ("arch.global_state_usage", True, "Detects mutable global state"),
-    ("deadcode.unused_variable", True, "Tier 1: Unused variable detection"),
-    ("ident.shadowing", False, "Disabled: too noisy on 'id' in data models - common pattern"),
-    
-    # -------------------------------------------------------------------------
-    # KB-ENRICHING RULES (info severity - for AI agent context)
-    # -------------------------------------------------------------------------
-    ("arch.entry_point", True, "HTTP handlers, CLI commands, main functions"),
-    ("arch.external_integration", True, "HTTP clients, databases, message queues"),
-    ("arch.data_model", True, "ORM models, dataclasses, interfaces"),
-    
-    # -------------------------------------------------------------------------
-    # ADVANCED ARCHITECTURAL ANALYSIS (Tier 2 - requires project_graph)
-    # -------------------------------------------------------------------------
-    ("analysis.change_impact", True, "Tier 2: Change impact analysis"),
-    ("architecture.dependency_cycle_impact", True, "Tier 2: Cycle impact scoring"),
-    ("architecture.critical_dependency", True, "Tier 2: Critical dependency detection"),
-    ("deadcode.unused_public", True, "Tier 2: Unused public API detection"),
-    
-    # -------------------------------------------------------------------------
-    # SECURITY - Cross-language vulnerabilities
-    # -------------------------------------------------------------------------
-    ("sec.sql_injection_concat", True, "SQL injection via string concat"),
-    ("sec.hardcoded_secret", True, "Hardcoded passwords/API keys"),
-    ("sec.path_traversal", True, "Path traversal vulnerabilities"),
-    ("sec.open_redirect", True, "Open redirect vulnerabilities"),
-    ("sec.insecure_random", True, "Insecure random number generation"),
-    ("security.jwt_without_exp", True, "JWT tokens without expiration"),
-    
-    # -------------------------------------------------------------------------
-    # HIGH-IMPACT BUGS
-    # -------------------------------------------------------------------------
-    ("bug.incompatible_comparison", False, "Disabled: false positives on len(x) > 0 and similar"),
-    ("bug.float_equality", True, "Floating point equality checks"),
-    ("bug.iteration_modification", True, "Modifying collection during iteration"),
-    ("bug.boolean_bitwise_misuse", True, "Boolean vs bitwise operator misuse"),
-    ("bug.recursion_no_base_case", False, "Disabled: false positives on super() delegation patterns"),
-    
-    # -------------------------------------------------------------------------
-    # CONCURRENCY ISSUES
-    # -------------------------------------------------------------------------
-    ("concurrency.lock_not_released", True, "Lock acquired but not released"),
-    ("concurrency.blocking_in_async", True, "Blocking calls in async context"),
-    
-    # -------------------------------------------------------------------------
-    # ERROR HANDLING
-    # -------------------------------------------------------------------------
-    ("errors.swallowed_exception", True, "Caught exceptions that are ignored"),
-    ("errors.broad_catch", True, "Overly broad exception catching"),
-    ("errors.partial_function_implementation", True, "NotImplementedError patterns"),
-    
-    # -------------------------------------------------------------------------
-    # COMPLEXITY & MAINTAINABILITY
-    # -------------------------------------------------------------------------
-    ("complexity.high_cyclomatic", True, "High cyclomatic complexity"),
-    ("complexity.long_function", True, "Functions exceeding line threshold"),
-    ("style.mixed_indentation", True, "Mixed tabs and spaces"),
-    
-    # -------------------------------------------------------------------------
-    # TESTING QUALITY
-    # -------------------------------------------------------------------------
-    ("test.flaky_sleep", True, "time.sleep in tests (flaky)"),
-    ("test.no_assertions", False, "Disabled: false positives on fixture/side-effect tests"),
-    
-    # -------------------------------------------------------------------------
-    # NAMING & DUPLICATE DETECTION
-    # -------------------------------------------------------------------------
-    ("naming.project_term_inconsistency", True, "Inconsistent terminology - KB-only (stylistic, not bugs)"),
-    ("ident.duplicate_definition", True, "Duplicate function/class definitions"),
+    ("arch.global_state_usage", True, "KB: Mutable global state locations → architecture.md"),
+    ("imports.cycle.advanced", True, "KB: Circular dependency mapping → architecture.md"),
+    ("architecture.critical_dependency", True, "KB: High-impact hub files → architecture.md"),
+    ("analysis.change_impact", True, "KB: Change blast radius analysis → architecture.md"),
 ]
 
 
