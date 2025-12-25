@@ -14,8 +14,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from .models import (
-    ValidateResponse, IndexRequest, IndexResult, ValidateFullRequest, SnapshotInfo,
-    AutofixRequest, AutofixResponse
+    ValidateResponse, IndexRequest, IndexResult, ValidateFullRequest, SnapshotInfo
 )
 from .storage import get_storage
 from .settings import settings, DATABASE_URL
@@ -245,7 +244,6 @@ async def validate_with_logging(req: ValidateFullRequest, user: UserContext, end
                     repo_root=req.repo_root,
                     language=_detect_language(req),
                     files_count=_estimate_files_count(req),
-                    autofix_requested=req.autofix,
                     response_time_ms=response_time_ms,
                     findings_count=findings_count,
                     rule_ids=rule_ids,
@@ -324,20 +322,8 @@ def validate_with_tree_sitter_internal(req: ValidateFullRequest):
                     "severity": "high" if finding["severity"] == "error" else "medium",
                     "explain": finding["message"],
                     "locations": [f"{finding['file_path']}:{finding['range']['startLine']}:{finding['range']['startCol']}-{finding['range']['endLine']}:{finding['range']['endCol']}"],
-                    "fixable": bool(finding.get("autofix")),
                     "priority": finding.get("priority", "P1")  # Include priority for UI categorization
                 }
-                
-                # Add suggested patchlet if autofix available
-                if finding.get("autofix"):
-                    patchlet_mapping = {
-                        "mut.default_mutable_arg": "none_guard",
-                        "lang.ts_loose_equality": "strict_equality",
-                        "func.async_mismatch.await_in_sync": "manual_async_fix"
-                    }
-                    violation["suggested_patchlet"] = patchlet_mapping.get(
-                        finding["rule_id"], "generic_fix"
-                    )
                 
                 violations.append(violation)
             
@@ -425,31 +411,6 @@ def get_storage_stats(
         return storage.get_stats()
     except Exception:
         return {"error": "Storage not available"}
-
-@app.post("/autofix", response_model=AutofixResponse)
-@limiter.limit(f"{settings.rate_limit}/minute")
-def apply_autofixes(
-    request: Request,
-    req: AutofixRequest = Body(...),
-    user: UserContext = Depends(get_current_user)
-):
-    """Apply automatic fixes to findings."""
-    print(f"[DEBUG] Autofix endpoint hit! repo_root={req.repo_root}")
-    
-    from .services.autofix import get_autofix_service
-    autofix_service = get_autofix_service()
-    
-    try:
-        return autofix_service.apply_autofixes(req)
-    except Exception as e:
-        print(f"[ERROR] Autofix failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return AutofixResponse(
-            fixes_applied=0,
-            files_changed=0,
-            took_ms=0
-        )
 
 def cli():
     import uvicorn

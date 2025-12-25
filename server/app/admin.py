@@ -93,13 +93,6 @@ class FilesStats(BaseModel):
     sample_count: int = Field(..., description="Number of requests sampled")
 
 
-class AutofixStats(BaseModel):
-    """Autofix adoption statistics."""
-    total_requests: int = Field(..., description="Total validation requests")
-    autofix_requests: int = Field(..., description="Requests with autofix enabled")
-    adoption_rate: float = Field(..., description="Adoption rate percentage")
-
-
 class ErrorStats(BaseModel):
     """Error and timeout rate statistics."""
     total_requests: int = Field(..., description="Total requests")
@@ -129,7 +122,6 @@ class DetailedMetrics(BaseModel):
     response_times: ResponseTimeStats
     language_breakdown: dict = Field(default_factory=dict)
     files_stats: FilesStats
-    autofix_stats: AutofixStats
     error_stats: ErrorStats
 
 
@@ -316,7 +308,6 @@ async def get_detailed_metrics(
     - Response time statistics (avg, P50, P95, P99)
     - Language breakdown (Python/TypeScript/JavaScript)
     - Files analyzed per request (avg/median)
-    - Autofix adoption rate
     - Error/timeout rates
     
     Note: Phase 2 metrics require the api_request_logs table.
@@ -350,7 +341,6 @@ async def get_detailed_metrics(
             response_times=ResponseTimeStats(**metrics["response_times"]),
             language_breakdown=metrics["language_breakdown"],
             files_stats=FilesStats(**metrics["files_stats"]),
-            autofix_stats=AutofixStats(**metrics["autofix_stats"]),
             error_stats=ErrorStats(**metrics["error_stats"]),
         )
     except Exception as e:

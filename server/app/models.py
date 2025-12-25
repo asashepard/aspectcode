@@ -9,8 +9,6 @@ class Violation(BaseModel):
     severity: Literal["low","medium","high"] = "medium"
     explain: str
     locations: List[str] = []
-    fixable: bool = False
-    suggested_patchlet: Optional[str] = None
 
 class ValidateResponse(BaseModel):
     verdict: Literal["safe","risky","unknown"]
@@ -59,7 +57,6 @@ class ValidateFullRequest(BaseModel):
     paths: Optional[List[str]] = None  # Optional scope filter (files or directories)
     languages: Optional[List[str]] = None  # Languages to process (default: all)
     modes: Optional[List[str]] = None  # Validation modes (deprecated)
-    autofix: bool = False  # Whether to return autofix suggestions
     profile: Optional[str] = None  # Rule profile to use (default: alpha_default)
     enable_project_graph: bool = True  # Enable dependency graph for Tier 2 rules (default: True)
 
@@ -77,50 +74,4 @@ class SnapshotInfo(BaseModel):
     created_at: str  # ISO timestamp
     file_count: int
     bytes_indexed: int
-
-# ---- Autofix Models ----
-
-class AutofixRequest(BaseModel):
-    """Request to apply automatic fixes."""
-    repo_root: str  # Repository root path
-    
-    # Core autofix parameters
-    rule_id: Optional[str] = None  # Specific rule to fix (must be in AUTO_FIX_V1_RULE_IDS)
-    finding_id: Optional[str] = None  # Specific finding ID to fix
-    file_path: Optional[str] = None  # Specific file to fix
-    start_byte: Optional[int] = None  # Finding location (for single finding)
-    end_byte: Optional[int] = None    # Finding location (for single finding)
-    
-    # Batch parameters 
-    select_ids: Optional[List[str]] = None  # Specific finding IDs to fix
-    violation_files: Optional[List[str]] = None  # Files containing violations to fix
-    max_fixes: int = 200  # Maximum number of fixes to apply (safety limit)
-    
-    # Optional parameters
-    snapshot_id: Optional[str] = None  # Snapshot to apply fixes to
-    
-    # Legacy fields for compatibility with existing extension
-    diff: Optional[str] = None  # Git diff (for compatibility)
-    ir: Optional[Dict[str, Any]] = None  # Import resolution data (for compatibility)
-    type_facts: Optional[Dict[str, Any]] = None  # Type facts (for compatibility)
-    select: Optional[List[str]] = None  # Alternative to select_ids
-
-class AutofixSkipped(BaseModel):
-    """Information about a skipped autofix."""
-    finding_id: str
-    reason: str
-
-class AutofixFile(BaseModel):
-    """Fixed file content."""
-    relpath: str  # Relative path from repo root
-    content: str  # Fixed file content
-
-class AutofixResponse(BaseModel):
-    """Response from autofix operation."""
-    fixes_applied: int
-    files_changed: int
-    patched_diff: Optional[str] = None  # Unified diff of changes
-    files: Optional[List[AutofixFile]] = None  # Fixed file contents
-    skipped: Optional[List[AutofixSkipped]] = None  # Fixes that couldn't be applied
-    took_ms: int
 

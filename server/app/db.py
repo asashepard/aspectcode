@@ -554,7 +554,6 @@ async def log_api_request(
     repo_root: Optional[str],
     language: Optional[str],
     files_count: int,
-    autofix_requested: bool,
     response_time_ms: int,
     findings_count: int,
     rule_ids: list[str],
@@ -572,16 +571,15 @@ async def log_api_request(
                 """
                 INSERT INTO api_request_logs (
                     token_id, endpoint, repo_root, language, files_count,
-                    autofix_requested, response_time_ms, findings_count,
+                    response_time_ms, findings_count,
                     rule_ids, status, error_type, created_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
                 """,
                 token_id,
                 endpoint,
                 repo_root[:500] if repo_root else None,
                 language,
                 files_count,
-                autofix_requested,
                 response_time_ms,
                 findings_count,
                 rule_ids,
@@ -702,31 +700,6 @@ async def get_files_analyzed_stats(days: int = 30) -> dict:
         }
 
 
-async def get_autofix_adoption_rate(days: int = 30) -> dict:
-    """Get autofix usage statistics."""
-    async with get_connection() as conn:
-        stats = await conn.fetchrow(
-            """
-            SELECT 
-                COUNT(*) as total_requests,
-                SUM(CASE WHEN autofix_requested THEN 1 ELSE 0 END) as autofix_requests
-            FROM api_request_logs
-            WHERE created_at >= NOW() - ($1 * INTERVAL '1 day')
-              AND endpoint = 'validate'
-            """,
-            days,
-        )
-        
-        total = int(stats["total_requests"])
-        autofix = int(stats["autofix_requests"])
-        
-        return {
-            "total_requests": total,
-            "autofix_requests": autofix,
-            "adoption_rate": round(100.0 * autofix / total, 1) if total > 0 else 0,
-        }
-
-
 async def get_error_timeout_rates(days: int = 30) -> dict:
     """Get error and timeout rate statistics."""
     async with get_connection() as conn:
@@ -771,7 +744,6 @@ async def get_detailed_metrics(days: int = 30) -> dict:
         response_times = await get_response_time_stats(days)
         language_breakdown = await get_language_breakdown(days)
         files_stats = await get_files_analyzed_stats(days)
-        autofix_stats = await get_autofix_adoption_rate(days)
         error_stats = await get_error_timeout_rates(days)
     except Exception as e:
         # Table may not exist yet - return empty Phase 2 data
@@ -780,7 +752,6 @@ async def get_detailed_metrics(days: int = 30) -> dict:
         response_times = {"avg_ms": 0, "p50_ms": 0, "p95_ms": 0, "p99_ms": 0, "sample_count": 0}
         language_breakdown = {}
         files_stats = {"avg_files": 0, "median_files": 0, "max_files": 0, "sample_count": 0}
-        autofix_stats = {"total_requests": 0, "autofix_requests": 0, "adoption_rate": 0}
         error_stats = {"total_requests": 0, "success_count": 0, "error_count": 0, "timeout_count": 0, 
                       "success_rate": 0, "error_rate": 0, "timeout_rate": 0}
     
@@ -793,6 +764,5 @@ async def get_detailed_metrics(days: int = 30) -> dict:
         "response_times": response_times,
         "language_breakdown": language_breakdown,
         "files_stats": files_stats,
-        "autofix_stats": autofix_stats,
         "error_stats": error_stats,
     }
