@@ -1503,11 +1503,11 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         }
         
         .view-toggle-btn {
+            display: none !important; /* Hidden - graph-only mode */
             background: none;
             border: none;
             color: var(--vscode-charts-orange);
             cursor: pointer;
-            display: flex;
             align-items: center;
             gap: 4px;
             font-size: 13px;
@@ -2869,7 +2869,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             </div>
             
             <!-- Dependency Graph View -->
-            <div class="view-content" id="graph-view">
+            <div class="view-content active" id="graph-view">
                 <div class="graph-view-content">
                     <div class="empty-graph" id="empty-graph">
                         <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -2883,7 +2883,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                             <line x1="9.5" y1="13.5" x2="5.5" y2="15.5"></line>
                             <line x1="14.5" y1="13.5" x2="18.5" y2="15.5"></line>
                         </svg>
-                        <div>Open a file to see its dependency graph</div>
+                        <div>Dependency Graph</div>
+                        <div style="font-size: 11px; opacity: 0.7;">Open a file to visualize imports & connections</div>
                     </div>
                     <svg class="dependency-graph-svg" id="dependency-graph" viewBox="0 0 800 300" preserveAspectRatio="xMidYMid meet">
                         <g id="graph-links"></g>
@@ -2896,8 +2897,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 </div>
             </div>
             
-            <!-- Findings View (default) -->
-            <div class="view-content active" id="findings-view">
+            <!-- Findings View (hidden - graph-only mode) -->
+            <div class="view-content" id="findings-view" style="display: none !important;">
                 <div class="findings-view-content">
                     <div class="findings-list" id="findings-list">
                         <div class="empty-findings">No findings to display</div>
@@ -3033,7 +3034,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         */
         
         // View toggle functionality
-        let currentView = 'findings'; // Default to findings view
+        let currentView = 'graph'; // Default to dependency graph (graph-only mode)
         
         // Settings container is always visible now
         // document.querySelector('.graph-settings-container').style.display = currentView === 'graph' ? '' : 'none';
