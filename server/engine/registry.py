@@ -32,9 +32,10 @@ class Registry:
         self._rule_index[rule.meta.id] = rule
         
     def register_adapter(self, language: str, adapter: LanguageAdapter) -> None:
-        """Register a language adapter."""
+        """Register a language adapter. Silently skips if already registered."""
         if language in self._adapters:
-            raise ValueError(f"Adapter for language '{language}' already registered")
+            # Skip duplicate registration silently (like register_rule)
+            return
         
         self._adapters[language] = adapter
         

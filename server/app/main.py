@@ -118,50 +118,6 @@ def health():
     }
 
 
-@app.get("/debug/token-lookup")
-async def debug_token_lookup(request: Request):
-    """
-    Debug endpoint to trace token lookup (TEMPORARY).
-    Returns diagnostic info without revealing secrets.
-    """
-    api_key = request.headers.get("X-API-Key")
-    authz = request.headers.get("Authorization")
-    
-    bearer_token: Optional[str] = None
-    if authz and authz.lower().startswith("bearer "):
-        bearer_token = authz.split(" ", 1)[1].strip() or None
-    
-    raw_key = api_key or bearer_token
-    
-    if not raw_key:
-        return {"error": "No API key provided", "headers_present": list(request.headers.keys())}
-    
-    token_hash = db.hash_token(raw_key)
-    result = {
-        "token_prefix": raw_key[:10] + "..." if len(raw_key) > 10 else raw_key,
-        "token_length": len(raw_key),
-        "hash_prefix": token_hash[:16] + "...",
-        "mode": settings.mode,
-        "database_url_set": bool(DATABASE_URL),
-    }
-    
-    # Try DB lookup
-    if DATABASE_URL:
-        try:
-            alpha_result = await db.get_alpha_user_by_token_hash(token_hash)
-            result["alpha_lookup"] = {"found": bool(alpha_result), "email": alpha_result.get("email") if alpha_result else None}
-        except Exception as e:
-            result["alpha_lookup"] = {"error": str(e)}
-        
-        try:
-            prod_result = await db.get_user_by_token_hash(token_hash)
-            result["prod_lookup"] = {"found": bool(prod_result), "email": prod_result.get("email") if prod_result else None}
-        except Exception as e:
-            result["prod_lookup"] = {"error": str(e)}
-    
-    return result
-
-
 # --- Alpha Registration (disabled in production mode) ---
 # API keys must be created manually via database.
 # See server/scripts/ for admin tooling.

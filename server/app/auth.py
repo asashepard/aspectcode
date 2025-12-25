@@ -58,40 +58,32 @@ async def _lookup_db_token(api_key: str) -> Optional[dict]:
     Respects the mode setting (alpha/prod/both).
     """
     if not DATABASE_URL:
-        print(f"[auth] No DATABASE_URL configured, skipping DB lookup")
         return None
     
     try:
         token_hash = db.hash_token(api_key)
-        print(f"[auth] Looking up token hash: {token_hash[:16]}... (mode={settings.mode})")
         
         # Try alpha users first in alpha or both mode
         if settings.mode in ("alpha", "both"):
             result = await db.get_alpha_user_by_token_hash(token_hash)
             if result:
-                print(f"[auth] Found alpha user: {result.get('email')}")
                 return {
                     "user_id": result["user_id"],
                     "email": result["email"],
                     "token_id": result["token_id"],
                     "is_alpha": True,
                 }
-            else:
-                print(f"[auth] No alpha user found for hash")
         
         # Try paid users in prod or both mode
         if settings.mode in ("prod", "both"):
             result = await db.get_user_by_token_hash(token_hash)
             if result:
-                print(f"[auth] Found paid user: {result.get('email')}")
                 return {
                     "user_id": result["user_id"],
                     "email": result["email"],
                     "token_id": result["token_id"],
                     "is_alpha": False,
                 }
-            else:
-                print(f"[auth] No paid user found for hash")
     except RuntimeError as e:
         # Database pool not initialized - fall through to env-based keys
         print(f"[auth] Database lookup skipped (pool not ready): {e}")
