@@ -113,13 +113,21 @@ class ArchEntryPointRule:
     # Main function patterns
     MAIN_PATTERNS: Dict[str, List[str]] = {
         "python": ["if __name__ == '__main__'", "def main(", "@app.command", "cli.add_command"],
-        "javascript": ["main()", "export default", "module.exports"],
-        "typescript": ["main()", "export default"],
+        "javascript": ["module.exports"],  # CommonJS entry
+        "typescript": [],  # TS entry points detected via decorators/handlers
+        # Note: "export default" is detected separately with path filtering
         "java": ["public static void main(String"],
         "csharp": ["static void Main(", "static async Task Main(", "static int Main("],
         "go": ["func main()"],
         "ruby": ["if __FILE__ == $0", "if __FILE__ == $PROGRAM_NAME"],
         "rust": ["fn main()"],
+    }
+
+    # Paths that indicate a file with "export default" is an entry point
+    ENTRY_POINT_PATHS = {
+        "/pages/", "/app/", "/routes/", "/api/",  # Next.js, Remix, etc.
+        "/views/", "/screens/",  # Mobile/SPA
+        "/endpoints/", "/handlers/",
     }
 
     # Event listener patterns
@@ -441,6 +449,25 @@ class ArchEntryPointRule:
                         'span': span,
                         'name': 'main',
                     }
+        
+        # For JS/TS: Check "export default" only in entry-point paths
+        if lang in ("javascript", "typescript"):
+            file_path_lower = ctx.file_path.lower().replace('\\', '/')
+            is_entry_path = any(p in file_path_lower for p in self.ENTRY_POINT_PATHS)
+            
+            if is_entry_path and "export default" in text:
+                idx = text.find("export default")
+                span = (idx, idx + len("export default"))
+                if span not in found_spans:
+                    found_spans.add(span)
+                    # Try to extract the component/function name
+                    name = self._extract_export_name(text, idx)
+                    yield {
+                        'type': 'page_entry',
+                        'pattern': 'export default',
+                        'span': span,
+                        'name': name or 'page',
+                    }
 
     def _make_finding(self, ctx: RuleContext, entry_info: dict) -> Finding:
         """Create a Finding for the entry point."""
@@ -461,6 +488,8 @@ class ArchEntryPointRule:
             message = f"CLI command: {cmd} → {name}"
         elif entry_type == 'main_function':
             message = f"Main entry point: {name}"
+        elif entry_type == 'page_entry':
+            message = f"Page entry point: {name}"
         else:
             message = f"Entry point: {name}"
 
@@ -524,6 +553,24 @@ class ArchEntryPointRule:
                         if getattr(name_child, 'type', '') in ('identifier', 'name'):
                             return self._get_node_text(ctx, name_child) or 'handler'
         return 'handler'
+
+    def _extract_export_name(self, text: str, idx: int) -> str | None:
+        """Extract the name from an export default statement."""
+        import re
+        # Get context after "export default"
+        context = text[idx:idx + 100]
+        
+        # "export default function Name" or "export default class Name"
+        match = re.search(r'export\s+default\s+(?:function|class)\s+(\w+)', context)
+        if match:
+            return match.group(1)
+        
+        # "export default Name" (identifier)
+        match = re.search(r'export\s+default\s+(\w+)', context)
+        if match and match.group(1) not in ('function', 'class', 'async'):
+            return match.group(1)
+        
+        return None
 
 
 # Module-level instance for rule registration

@@ -50,7 +50,8 @@ export class DependencyAnalyzer {
       for (const imp of fileDependencies) {
         const resolvedTarget = this.resolveModulePath(imp.module, file, files);
         
-        if (resolvedTarget) {
+        // Skip self-references (file importing itself)
+        if (resolvedTarget && resolvedTarget !== file) {
           links.push({
             source: file,
             target: resolvedTarget,
@@ -67,7 +68,8 @@ export class DependencyAnalyzer {
       for (const call of fileCalls) {
         if (call.isExternal) {
           const resolvedTarget = this.resolveCallTarget(call.callee, file, files);
-          if (resolvedTarget) {
+          // Skip self-references
+          if (resolvedTarget && resolvedTarget !== file) {
             const existing = links.find(l => 
               l.source === file && l.target === resolvedTarget && l.type === 'call'
             );

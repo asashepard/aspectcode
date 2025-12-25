@@ -123,12 +123,19 @@ function extractKBEnrichingFindings(
   state: AspectCodeState,
   ruleId: string
 ): KBEnrichingFinding[] {
+  const seen = new Set<string>();
   return state.s.findings
     .filter(f => f.code === ruleId)
     .map(f => ({
       file: f.file,
       message: f.message,
-    }));
+    }))
+    .filter(f => {
+      const key = `${f.file}|${f.message}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 }
 
 /**
@@ -263,7 +270,8 @@ async function generateArchitectureFile(
   } else {
     // Quick stats
     const totalEdges = allLinks.length;
-    const circularLinks = allLinks.filter(l => l.type === 'circular');
+    // Filter out self-references (source === target) which are bugs in dependency detection
+    const circularLinks = allLinks.filter(l => l.type === 'circular' && l.source !== l.target);
     const cycleCount = Math.ceil(circularLinks.length / 2);
     
     content += `**Files:** ${files.length} | **Dependencies:** ${totalEdges} | **Cycles:** ${cycleCount}\n\n`;
@@ -429,7 +437,8 @@ async function generateArchitectureFile(
     // ============================================================
     const appCircularLinks = circularLinks.filter(l => 
       isStructuralAppFile(l.source, workspaceRoot.fsPath) &&
-      isStructuralAppFile(l.target, workspaceRoot.fsPath)
+      isStructuralAppFile(l.target, workspaceRoot.fsPath) &&
+      l.source !== l.target  // Filter out self-references (bug in dependency detection)
     );
     
     // Also get cycle findings from the rule for additional context
@@ -444,6 +453,9 @@ async function generateArchitectureFile(
       
       for (const link of appCircularLinks) {
         if (cycleIndex >= 5) break;
+        
+        // Skip self-references and already processed pairs
+        if (link.source === link.target) continue;
         
         const pairKey = [link.source, link.target].sort().join('::');
         if (processedPairs.has(pairKey)) continue;
@@ -1180,7 +1192,7 @@ async function generateContextFile(
       content += '_Most central modules by connectivity. Changes here propagate widely._\n\n';
       
       content += '| Module | Callers | Dependencies |\n';
-      content += '|--------|---------|--------------|n';
+      content += '|--------|---------|--------------|\n';
       for (const [file, stats] of topModules) {
         const relPath = makeRelativePath(file, workspaceRoot.fsPath);
         content += `| \`${relPath}\` | ${stats.inDegree} | ${stats.outDegree} |\n`;
@@ -2259,9 +2271,24 @@ function getSymbolDependencies(filePath: string, allLinks: DependencyLink[], wor
 }
 
 function getSymbolCallers(symbolName: string, filePath: string, allLinks: DependencyLink[], workspaceRoot?: string): string[] {
+  // Normalize the file path for comparison
+  const normalizedFilePath = filePath.replace(/\\/g, '/');
+  
   return allLinks
     .filter(l => {
-      if (l.target !== filePath || !l.symbols.includes(symbolName)) return false;
+      // Normalize target path for comparison
+      const normalizedTarget = l.target.replace(/\\/g, '/');
+      if (normalizedTarget !== normalizedFilePath) return false;
+      
+      // Check if this import references the symbol:
+      // 1. Explicit symbol import (import { symbolName } from ...)
+      // 2. Wildcard import (import * as X from ...) - counts as importing all
+      // 3. Default/namespace import - check if symbols array is empty or matches
+      const hasSymbol = l.symbols.includes(symbolName) || 
+                       l.symbols.includes('*') ||
+                       (l.symbols.length === 0 && l.type === 'import');
+      if (!hasSymbol) return false;
+      
       // Filter out third-party and test files from callers
       if (workspaceRoot && classifyFile(l.source, workspaceRoot) !== 'app') return false;
       return true;

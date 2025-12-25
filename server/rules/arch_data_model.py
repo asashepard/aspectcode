@@ -76,12 +76,12 @@ class ArchDataModelRule:
             "(SQLModel,": "ORM Model (SQLModel)",  # Multiple inheritance
         },
         "typescript": {
-            # TypeORM
+            # TypeORM - only detect @Entity, not @Column (too noisy)
             "@Entity": "ORM Model (TypeORM)",
             "Entity(": "ORM Model (TypeORM)",
-            "@Column": "ORM Model (TypeORM)",
-            # Prisma generates types
-            "Prisma": "Data Model (Prisma)",
+            # Prisma - detect PrismaClient instantiation and model access
+            "new PrismaClient": "Data Model (Prisma)",
+            "prisma.": "Data Model (Prisma)",  # prisma.user, prisma.post, etc.
             # Sequelize
             "Model.init": "ORM Model (Sequelize)",
             "@Table": "ORM Model (Sequelize)",
@@ -201,55 +201,35 @@ class ArchDataModelRule:
     # Validation/Schema patterns
     SCHEMA_PATTERNS: Dict[str, Dict[str, str]] = {
         "python": {
-            # Marshmallow
-            "Schema": "Schema (Marshmallow)",
-            "marshmallow.Schema": "Schema (Marshmallow)",
-            "fields.": "Schema (Marshmallow)",
-            # Cerberus
-            "Validator": "Schema (Cerberus)",
+            # Marshmallow - detect Schema inheritance
+            "(Schema)": "Schema (Marshmallow)",
+            "(ma.Schema)": "Schema (Marshmallow)",
         },
         "typescript": {
-            # Zod
-            "z.object": "Schema (Zod)",
-            "z.string": "Schema (Zod)",
-            # Yup
-            "yup.object": "Schema (Yup)",
-            # class-validator
-            "@IsString": "Validator (class-validator)",
-            "@IsNumber": "Validator (class-validator)",
-            "@IsEmail": "Validator (class-validator)",
+            # Zod - detect schema definitions (z.object is most common entry point)
+            "z.object(": "Schema (Zod)",
+            # Yup - detect object schemas
+            "yup.object(": "Schema (Yup)",
             # io-ts
-            "t.type": "Schema (io-ts)",
+            "t.type(": "Schema (io-ts)",
         },
         "javascript": {
-            # Joi
-            "Joi.object": "Schema (Joi)",
-            "Joi.string": "Schema (Joi)",
-            # Yup
-            "yup.object": "Schema (Yup)",
+            # Joi - detect object schemas
+            "Joi.object(": "Schema (Joi)",
+            # Yup - detect object schemas  
+            "yup.object(": "Schema (Yup)",
         },
         "java": {
-            # Bean Validation
-            "@NotNull": "Validation (Bean Validation)",
-            "@Size": "Validation (Bean Validation)",
-            "@Valid": "Validation (Bean Validation)",
-            "@Pattern": "Validation (Bean Validation)",
+            # Bean Validation - skip individual annotations, too granular
         },
         "csharp": {
-            # Data Annotations
-            "[Required]": "Validation (Data Annotations)",
-            "[StringLength": "Validation (Data Annotations)",
-            "[Range": "Validation (Data Annotations)",
-            "FluentValidation": "Validation (FluentValidation)",
+            # FluentValidation base class
+            "AbstractValidator<": "Validation (FluentValidation)",
         },
         "go": {
-            # Go validator
-            "`validate:": "Validation (go-validator)",
+            # Go validator struct tags are per-field, skip
         },
         "ruby": {
-            # ActiveModel Validations
-            "validates ": "Validation (ActiveModel)",
-            "validates_presence_of": "Validation (ActiveModel)",
             # Dry-validation
             "Dry::Validation": "Schema (dry-validation)",
         },
@@ -536,8 +516,8 @@ class ArchDataModelRule:
         """Extract the model name from context around the pattern."""
         import re
         
-        # Get surrounding context
-        start = max(0, idx - 100)
+        # Get surrounding context (look backwards more for const/let declarations)
+        start = max(0, idx - 150)
         end = min(len(text), idx + 200)
         context = text[start:end]
         
@@ -545,6 +525,17 @@ class ArchDataModelRule:
         if lang == "python":
             # Look for "class ClassName" before or after
             match = re.search(r'class\s+(\w+)', context)
+            if match:
+                return match.group(1)
+        
+        elif lang in ("typescript", "javascript"):
+            # Look for "const schemaName = z.object" or "export const schemaName ="
+            # Pattern should be before the z.object/Joi.object call
+            match = re.search(r'(?:const|let|var|export\s+const)\s+(\w+)\s*=', context)
+            if match:
+                return match.group(1)
+            # Also check for type alias
+            match = re.search(r'type\s+(\w+)\s*=', context)
             if match:
                 return match.group(1)
         
