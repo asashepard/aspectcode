@@ -104,6 +104,38 @@ If you encounter repeated errors or unexpected behavior:
 6. **Check module clusters** in \`context.md\` for related files that may need updates
 `.trim();
 
+const MCP_TOOLS = `
+## MCP Tool Calls (API Access)
+
+If you have MCP server access configured, you can query the dependency graph programmatically:
+
+| Tool | Purpose |
+|------|---------|
+| \`get_file_dependencies\` | Get files a given file imports from |
+| \`get_file_dependents\` | Get files that import from a given file |
+| \`get_architectural_hubs\` | Find high-impact files with many dependents |
+| \`get_circular_dependencies\` | Detect circular import chains |
+| \`list_files\` | List indexed files, optionally by language |
+| \`get_impact_analysis\` | Analyze cascading impact of changing a file |
+
+### Example: Check impact before refactoring
+\`\`\`
+Tool: get_file_dependents
+Arguments: { "file_path": "src/utils/helpers.ts" }
+→ Returns list of files that will be affected by changes
+\`\`\`
+
+### Example: Find architectural hubs
+\`\`\`
+Tool: get_architectural_hubs
+Arguments: { "threshold": 5 }
+→ Returns files with 5+ dependents that require careful changes
+\`\`\`
+
+**MCP Endpoint:** \`POST /mcp/execute\` with \`{ tool, arguments, snapshot_id }\`
+**List Tools:** \`GET /mcp/tools\` returns all available tools with schemas.
+`.trim();
+
 /**
  * Generates or updates instruction files for configured AI assistants.
  */
@@ -199,6 +231,8 @@ ${KB_USAGE}
 
 ${TROUBLESHOOTING}
 
+${MCP_TOOLS}
+
 ## Copilot-Specific Tips
 
 - **Use @-references.** Type \`@.aspect/architecture.md\` to include KB context in chat.
@@ -257,6 +291,8 @@ ${CHANGE_RULES}
 ${KB_USAGE}
 
 ${TROUBLESHOOTING}
+
+${MCP_TOOLS}
 
 ## Cursor-Specific Tips
 
@@ -319,6 +355,8 @@ ${CHANGE_RULES}
 ${KB_USAGE}
 
 ${TROUBLESHOOTING}
+
+${MCP_TOOLS}
 
 ## Claude-Specific Tips
 
@@ -391,6 +429,8 @@ ${CHANGE_RULES}
 ${KB_USAGE}
 
 ${TROUBLESHOOTING}
+
+${MCP_TOOLS}
 
 ## General Guidelines
 

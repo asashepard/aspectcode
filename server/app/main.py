@@ -20,6 +20,8 @@ from .storage import get_storage
 from .settings import settings, DATABASE_URL
 from .auth import get_current_user, UserContext
 from .admin import router as admin_router
+from .mcp import router as mcp_router
+from .rate_limit import limiter
 from . import db
 
 # Import tree-sitter engine
@@ -32,24 +34,6 @@ try:
 except ImportError as e:
     print(f"Warning: Tree-sitter engine not available: {e}")
     TREE_SITTER_AVAILABLE = False
-
-# Rate limiter setup
-# Uses API key if available, otherwise falls back to IP address
-def get_rate_limit_key(request: Request) -> str:
-    api_key = request.headers.get("X-API-Key")
-    authz = request.headers.get("Authorization")
-
-    bearer_token: Optional[str] = None
-    if authz and authz.lower().startswith("bearer "):
-        bearer_token = authz.split(" ", 1)[1].strip() or None
-
-    token = api_key or bearer_token
-    if token:
-        # Avoid using raw secrets as limiter keys.
-        return "key:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
-    return get_remote_address(request)
-
-limiter = Limiter(key_func=get_rate_limit_key)
 
 
 # Lifespan context manager for startup/shutdown
@@ -78,6 +62,9 @@ app = FastAPI(
 
 # Include admin router
 app.include_router(admin_router)
+
+# Include MCP router for LLM agent tool access
+app.include_router(mcp_router)
 
 # Add rate limiter to app state
 app.state.limiter = limiter
