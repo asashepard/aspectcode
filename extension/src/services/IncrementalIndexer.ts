@@ -589,18 +589,18 @@ export class IncrementalIndexer {
     if (!workspaceRoot) return;
     
     // Call examination API with affected files only
-    const relativeFiles = Array.from(scope.affectedFiles).map(f => 
+    const relativePaths = Array.from(scope.affectedFiles).map(f => 
       path.relative(workspaceRoot, f).replace(/\\/g, '/')
     );
     
     const payload = {
       repo_root: workspaceRoot,
-      files: relativeFiles,
+      paths: relativePaths,  // Use 'paths' field for path-based filtering, not 'files' (which expects FileContent objects)
       incremental: true,
       modes: ['structure', 'types']
     };
     
-    this.outputChannel.appendLine(`[IncrementalIndexer] Validating files: ${relativeFiles.join(', ')}`);
+    this.outputChannel.appendLine(`[IncrementalIndexer] Validating files: ${relativePaths.join(', ')}`);
     
     try {
       // Add timeout to API call
