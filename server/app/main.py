@@ -181,8 +181,21 @@ def _detect_language(req: ValidateFullRequest) -> str:
 
 def _estimate_files_count(req: ValidateFullRequest) -> int:
     """Estimate files to be analyzed from request."""
+    if req.files:
+        return len(req.files)
     if req.paths:
         return len(req.paths)
+    return 0
+
+
+def _calculate_lines_of_code(req: ValidateFullRequest) -> int:
+    """Calculate total lines of code from request files."""
+    if req.files:
+        return sum(
+            content.count('\n') + 1 if content else 0
+            for f in req.files
+            if (content := getattr(f, 'content', None))
+        )
     return 0
 
 
@@ -209,7 +222,8 @@ async def validate_with_logging(req: ValidateFullRequest, user: UserContext, end
         raise
     finally:
         # Log request metrics (fire-and-forget)
-        if user.token_id and DATABASE_URL:
+        # Always log when DATABASE_URL is configured, even for admin keys
+        if DATABASE_URL:
             response_time_ms = int((time.time() - start_time) * 1000)
             
             # Extract rule_ids from violations
@@ -219,9 +233,12 @@ async def validate_with_logging(req: ValidateFullRequest, user: UserContext, end
                 rule_ids = [v.rule for v in response.violations]
                 findings_count = len(response.violations)
             
+            # Calculate lines of code examined
+            lines_of_code = _calculate_lines_of_code(req)
+            
             asyncio.create_task(
                 db.log_api_request(
-                    token_id=user.token_id,
+                    token_id=user.token_id,  # May be None for admin keys
                     endpoint=endpoint,
                     repo_root=req.repo_root,
                     language=_detect_language(req),
@@ -231,6 +248,8 @@ async def validate_with_logging(req: ValidateFullRequest, user: UserContext, end
                     rule_ids=rule_ids,
                     status=status,
                     error_type=error_type,
+                    lines_of_code_examined=lines_of_code,
+                    is_admin_key=user.is_admin,
                 )
             )
 

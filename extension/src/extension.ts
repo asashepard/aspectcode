@@ -1541,7 +1541,7 @@ async function examineFullRepository(state?: AspectCodeState, context?: vscode.E
       if (cacheManager && state && incrementalIndexer) {
         try {
           outputChannel?.appendLine('[Cache] Saving examination cache...');
-          const signatures = await cacheManager.buildFileSignatures();
+          const signatures = await cacheManager.buildFileSignatures(filesData.map(f => f.path));
           const cachedFindings = cacheManager.findingsToCache(state.s.findings || []);
           const dependencies = cacheManager.dependenciesToCache(incrementalIndexer.getReverseDependencyGraph());
           const lastValidate = state.s.lastValidate ? {
@@ -2127,19 +2127,21 @@ export async function activate(context: vscode.ExtensionContext) {
   const configApiKey = vscode.workspace.getConfiguration('aspectcode').get<string>('apiKey');
   
   if (!existingApiKey && !configApiKey) {
-    // No API key configured - prompt user
-    const choice = await vscode.window.showWarningMessage(
-      'Aspect Code requires an API key to function. Please enter your API key.',
-      'Enter API Key',
-      'Later'
-    );
-    
-    if (choice === 'Enter API Key') {
-      // Delay slightly to ensure extension is fully activated
-      setTimeout(() => {
-        vscode.commands.executeCommand('aspectcode.enterApiKey');
-      }, 500);
-    }
+    // No API key configured - prompt user (non-blocking; do not stall activation)
+    vscode.window
+      .showWarningMessage(
+        'Aspect Code requires an API key to function. Please enter your API key.',
+        'Enter API Key',
+        'Later'
+      )
+      .then((choice) => {
+        if (choice === 'Enter API Key') {
+          // Delay slightly to ensure extension is fully activated
+          setTimeout(() => {
+            vscode.commands.executeCommand('aspectcode.enterApiKey');
+          }, 500);
+        }
+      });
   }
 
   // Initialize state

@@ -534,12 +534,14 @@ async function handleConfigureAssistants(
 
     const selectedIds = new Set(selected.map(item => item.id));
 
-    // Update workspace settings
+    // Update workspace settings in parallel
     const config = vscode.workspace.getConfiguration('aspectcode.assistants');
-    await config.update('copilot', selectedIds.has('copilot'), vscode.ConfigurationTarget.Workspace);
-    await config.update('cursor', selectedIds.has('cursor'), vscode.ConfigurationTarget.Workspace);
-    await config.update('claude', selectedIds.has('claude'), vscode.ConfigurationTarget.Workspace);
-    await config.update('other', selectedIds.has('other'), vscode.ConfigurationTarget.Workspace);
+    await Promise.all([
+      config.update('copilot', selectedIds.has('copilot'), vscode.ConfigurationTarget.Workspace),
+      config.update('cursor', selectedIds.has('cursor'), vscode.ConfigurationTarget.Workspace),
+      config.update('claude', selectedIds.has('claude'), vscode.ConfigurationTarget.Workspace),
+      config.update('other', selectedIds.has('other'), vscode.ConfigurationTarget.Workspace)
+    ]);
     // TEMPORARILY DISABLED: ALIGNMENTS.json feature
     // await config.update('alignments', selectedIds.has('alignments'), vscode.ConfigurationTarget.Workspace);
 
@@ -597,14 +599,8 @@ async function handleGenerateInstructionFiles(
         progress.report({ message: 'Indexing repository...' });
         await vscode.commands.executeCommand('aspectcode.index');
         
-        // Wait a moment for index to complete
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
         progress.report({ message: 'Running examination...' });
         await vscode.commands.executeCommand('aspectcode.examine');
-        
-        // Wait for examine to complete and populate findings
-        await new Promise(resolve => setTimeout(resolve, 2000));
       });
       
       // Re-fetch findings after examination

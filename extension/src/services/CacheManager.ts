@@ -254,33 +254,33 @@ export class CacheManager {
     const added = new Set<string>();
     const modified = new Set<string>();
     const deleted = new Set<string>();
-    
-    // Get all current source files
-    const currentFiles = await this.discoverSourceFiles();
-    const cachedPaths = new Set(Object.keys(this.cache.files));
-    
-    // Check each current file against cache
-    for (const relativePath of currentFiles) {
+
+    // Performance: only validate cached files on startup.
+    // This avoids hashing the entire workspace, which can be extremely slow.
+    const cachedRelativePaths = Object.keys(this.cache.files);
+    const cacheTimestampMs = Date.parse(this.cache.timestamp);
+
+    for (const relativePath of cachedRelativePaths) {
       const absolutePath = path.join(this.workspaceRoot, relativePath);
-      
-      if (!cachedPaths.has(relativePath)) {
-        // New file
-        added.add(absolutePath);
-      } else {
-        // Check if content changed
-        const cachedSig = this.cache.files[relativePath];
+      const cachedSig = this.cache.files[relativePath];
+      try {
+        const stat = await vscode.workspace.fs.stat(vscode.Uri.file(absolutePath));
+
+        // Fast path: if size matches and file wasn't modified since cache timestamp, assume unchanged.
+        // If mtime differs, confirm with hash (prevents false positives on tools that touch mtimes).
+        const suspicious = (cachedSig?.size ?? -1) !== stat.size || (Number.isFinite(cacheTimestampMs) && stat.mtime > cacheTimestampMs);
+        if (!suspicious) {
+          continue;
+        }
+
         const currentSig = await this.computeFileSignature(absolutePath, relativePath);
-        
-        if (currentSig && currentSig.hash !== cachedSig.hash) {
+        if (!currentSig || currentSig.hash !== cachedSig.hash) {
           modified.add(absolutePath);
         }
-        cachedPaths.delete(relativePath);
+      } catch (error) {
+        // Missing/unreadable file -> treat as deleted
+        deleted.add(absolutePath);
       }
-    }
-    
-    // Remaining cached paths are deleted files
-    for (const relativePath of cachedPaths) {
-      deleted.add(path.join(this.workspaceRoot, relativePath));
     }
     
     const duration = Date.now() - startTime;
@@ -320,10 +320,13 @@ export class CacheManager {
   /**
    * Build file signatures map for all source files in workspace
    */
-  async buildFileSignatures(): Promise<Map<string, FileSignature>> {
+  async buildFileSignatures(relativePaths?: string[]): Promise<Map<string, FileSignature>> {
     const signatures = new Map<string, FileSignature>();
-    const files = await this.discoverSourceFiles();
-    
+
+    const files = (relativePaths && relativePaths.length > 0)
+      ? Array.from(new Set(relativePaths.map(p => p.replace(/\\/g, '/'))))
+      : await this.discoverSourceFiles();
+
     for (const relativePath of files) {
       const absolutePath = path.join(this.workspaceRoot, relativePath);
       const sig = await this.computeFileSignature(absolutePath, relativePath);

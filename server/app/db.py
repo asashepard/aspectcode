@@ -549,7 +549,7 @@ async def get_platform_metrics() -> dict:
 
 
 async def log_api_request(
-    token_id: str,
+    token_id: Optional[str],
     endpoint: str,
     repo_root: Optional[str],
     language: Optional[str],
@@ -559,11 +559,27 @@ async def log_api_request(
     rule_ids: list[str],
     status: str,
     error_type: Optional[str] = None,
+    lines_of_code_examined: int = 0,
+    is_admin_key: bool = False,
 ) -> None:
     """
     Log an API request for metrics tracking.
     
     This is fire-and-forget - failures don't affect the request.
+    
+    Args:
+        token_id: Database token ID (None for admin/env-based keys)
+        endpoint: API endpoint called (e.g., 'validate', 'validate_tree_sitter')
+        repo_root: Repository root path (truncated to 500 chars)
+        language: Primary language detected
+        files_count: Number of files analyzed
+        response_time_ms: Request duration in milliseconds
+        findings_count: Number of findings/violations
+        rule_ids: List of rule IDs that triggered
+        status: 'success', 'error', or 'timeout'
+        error_type: Error type if status is 'error'
+        lines_of_code_examined: Total lines of code scanned
+        is_admin_key: True if authenticated via env-based admin key
     """
     try:
         async with get_connection() as conn:
@@ -572,8 +588,9 @@ async def log_api_request(
                 INSERT INTO api_request_logs (
                     token_id, endpoint, repo_root, language, files_count,
                     response_time_ms, findings_count,
-                    rule_ids, status, error_type, created_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+                    rule_ids, status, error_type, lines_of_code_examined,
+                    is_admin_key, created_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
                 """,
                 token_id,
                 endpoint,
@@ -585,6 +602,8 @@ async def log_api_request(
                 rule_ids,
                 status,
                 error_type,
+                lines_of_code_examined,
+                is_admin_key,
             )
     except Exception as e:
         # Log but don't fail - this is best-effort
