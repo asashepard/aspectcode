@@ -372,10 +372,10 @@ _Functions, classes, and exports with call relationships._
 
 ### \`src/core/engine.ts\`
 
-| Symbol | Kind | Signature | Called By |
-|--------|------|-----------|----------|
-| \`Engine\` | class | \`class Engine\` | \`run\`, \`scan\` |
-| \`scan\` | function | \`function scan(path)\` | \`handler\` |
+| Symbol | Kind | Signature | Used In (files) |
+|--------|------|-----------|-----------------|
+| \`Engine\` | class | \`class Engine\` | \`run.ts\`, \`scan.ts\` |
+| \`scan\` | function | \`function scan(path)\` | \`handler.ts\` |
 
 ---
 
@@ -444,3 +444,221 @@ src/main.ts → src/commands/run.ts → src/core/engine.ts → src/utils/helpers
 
 _Generated: 2024-01-15T10:30:45.123Z_
 `;
+
+// ============================================================================
+// Additional Invariant Validation Functions
+// ============================================================================
+
+/**
+ * Validate that "Used In (files)" entries are actual file paths with extensions.
+ * Should not be bare identifiers like "deps", "env", "login".
+ */
+export function validateUsedInAreFilePaths(content: string): { valid: boolean; issues: string[] } {
+  const issues: string[] = [];
+  
+  // Find all "Used In (files)" column values in tables
+  const tableRows = content.match(/\|[^|]+\|[^|]+\|[^|]+\|[^|]+\|$/gm) || [];
+  
+  for (const row of tableRows) {
+    // Skip header and separator rows
+    if (row.includes('Symbol') || row.includes('---')) continue;
+    
+    // Get the last column (Used In)
+    const columns = row.split('|').filter(c => c.trim());
+    if (columns.length < 4) continue;
+    
+    const usedInCell = columns[3].trim();
+    if (usedInCell === '—' || usedInCell === '') continue;
+    
+    // Check each file reference in the cell
+    const fileRefs = usedInCell.split(',').map(f => f.trim().replace(/`/g, ''));
+    for (const ref of fileRefs) {
+      // Skip the (+N more) indicator
+      if (ref.match(/^\(\+\d+ more\)$/)) continue;
+      
+      // File paths should have extensions or be relative paths
+      const hasExtension = /\.\w{1,4}$/.test(ref);
+      const isPath = ref.includes('/');
+      
+      if (!hasExtension && !isPath && ref.length > 0) {
+        // Bare identifier without extension - likely wrong
+        issues.push(`Bare identifier in Used In: "${ref}" - should be a file path`);
+      }
+    }
+  }
+  
+  return { valid: issues.length === 0, issues };
+}
+
+/**
+ * Validate hub metrics consistency:
+ * - Blast radius = direct + indirect
+ * - Imported By count matches list length
+ */
+export function validateHubMetrics(content: string): { valid: boolean; issues: string[] } {
+  const issues: string[] = [];
+  
+  // Find hub details sections
+  const hubDetailsPattern = /\*\*\d+\.\s+`([^`]+)`\*\*\s+—\s+Blast radius:\s+(\d+)\s+files\n\s+- Direct dependents:\s+(\d+)\n\s+- Indirect dependents:\s+~(\d+)/g;
+  
+  let match;
+  while ((match = hubDetailsPattern.exec(content)) !== null) {
+    const [, filePath, blastRadius, directCount, indirectCount] = match;
+    const expectedBlast = parseInt(directCount) + parseInt(indirectCount);
+    const actualBlast = parseInt(blastRadius);
+    
+    if (expectedBlast !== actualBlast) {
+      issues.push(`Hub ${filePath}: Blast radius ${actualBlast} != direct(${directCount}) + indirect(${indirectCount}) = ${expectedBlast}`);
+    }
+  }
+  
+  // Check "Imported by (N files)" matches actual list
+  const importedByPattern = /Imported by \((\d+) files\):\n((?:\s+- `[^`]+`\n)+)/g;
+  
+  while ((match = importedByPattern.exec(content)) !== null) {
+    const [, countStr, listBlock] = match;
+    const declaredCount = parseInt(countStr);
+    const listItems = (listBlock.match(/- `[^`]+`/g) || []).length;
+    const hasMore = listBlock.includes('...and');
+    
+    // If there's a "...and X more", the list should be truncated
+    if (!hasMore && listItems !== declaredCount && listItems > 0) {
+      issues.push(`Imported by count (${declaredCount}) doesn't match list length (${listItems})`);
+    }
+  }
+  
+  return { valid: issues.length === 0, issues };
+}
+
+/**
+ * Validate entry points have confidence indicators and proper categorization.
+ */
+export function validateEntryPointStructure(content: string): { valid: boolean; issues: string[] } {
+  const issues: string[] = [];
+  
+  // Check that Entry Points section exists and has proper subsections
+  if (!content.includes('## Entry Points')) {
+    issues.push('Missing "## Entry Points" section');
+    return { valid: false, issues };
+  }
+  
+  // Check for confidence indicators
+  const entryPointSection = content.split('## Entry Points')[1]?.split('##')[0] || '';
+  const hasConfidenceIcons = entryPointSection.includes('🟢') || 
+                              entryPointSection.includes('🟡') || 
+                              entryPointSection.includes('🟠');
+  
+  if (!hasConfidenceIcons && entryPointSection.includes('-')) {
+    issues.push('Entry points should have confidence indicators (🟢/🟡/🟠)');
+  }
+  
+  return { valid: issues.length === 0, issues };
+}
+
+/**
+ * Validate cluster names are unique (no duplicates without disambiguation).
+ */
+export function validateClusterNamesUnique(content: string): { valid: boolean; duplicates: string[] } {
+  const duplicates: string[] = [];
+  
+  // Find all cluster headers in context.md
+  const clusterHeaders = content.match(/^###\s+([^\n]+)$/gm) || [];
+  const clusterNames = clusterHeaders.map(h => h.replace('### ', '').trim());
+  
+  const seen = new Set<string>();
+  for (const name of clusterNames) {
+    if (seen.has(name)) {
+      duplicates.push(name);
+    }
+    seen.add(name);
+  }
+  
+  return { valid: duplicates.length === 0, duplicates };
+}
+
+// ============================================================================
+// Extended Test Suite
+// ============================================================================
+
+suite('KB Generation Extended Invariants', () => {
+  
+  test('validateUsedInAreFilePaths detects bare identifiers', () => {
+    const badContent = `
+| Symbol | Kind | Signature | Used In (files) |
+|--------|------|-----------|-----------------|
+| \`foo\` | function | \`fn foo()\` | \`deps\`, \`env\` |
+`;
+    const goodContent = `
+| Symbol | Kind | Signature | Used In (files) |
+|--------|------|-----------|-----------------|
+| \`foo\` | function | \`fn foo()\` | \`services/auth.ts\`, \`main.ts\` |
+`;
+    
+    const badResult = validateUsedInAreFilePaths(badContent);
+    if (badResult.valid) {
+      throw new Error('Should detect bare identifiers as invalid');
+    }
+    
+    const goodResult = validateUsedInAreFilePaths(goodContent);
+    if (!goodResult.valid) {
+      throw new Error(`Should accept file paths: ${goodResult.issues.join(', ')}`);
+    }
+  });
+  
+  test('validateHubMetrics checks blast radius math', () => {
+    const validContent = `
+**1. \`src/core.ts\`** — Blast radius: 15 files
+   - Direct dependents: 10
+   - Indirect dependents: ~5
+`;
+    const invalidContent = `
+**1. \`src/core.ts\`** — Blast radius: 20 files
+   - Direct dependents: 10
+   - Indirect dependents: ~5
+`;
+    
+    const validResult = validateHubMetrics(validContent);
+    if (!validResult.valid) {
+      throw new Error(`Should accept correct blast radius: ${validResult.issues.join(', ')}`);
+    }
+    
+    const invalidResult = validateHubMetrics(invalidContent);
+    if (invalidResult.valid) {
+      throw new Error('Should detect incorrect blast radius math');
+    }
+  });
+  
+  test('validateClusterNamesUnique detects duplicate cluster names', () => {
+    const duplicateContent = `
+### Auth
+Some files
+
+### Core
+More files
+
+### Auth
+Duplicate name
+`;
+    const uniqueContent = `
+### Auth (api)
+Some files
+
+### Auth (web)
+More files
+
+### Core
+Other files
+`;
+    
+    const dupeResult = validateClusterNamesUnique(duplicateContent);
+    if (dupeResult.valid) {
+      throw new Error('Should detect duplicate cluster names');
+    }
+    
+    const uniqueResult = validateClusterNamesUnique(uniqueContent);
+    if (!uniqueResult.valid) {
+      throw new Error(`Should accept unique names: ${uniqueResult.duplicates.join(', ')}`);
+    }
+  });
+  
+});

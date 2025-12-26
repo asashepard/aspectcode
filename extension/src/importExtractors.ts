@@ -330,18 +330,45 @@ export function extractTSJSSymbols(lang: Parser.Language, code: string): Extract
     }
     
     if (n.type === 'lexical_declaration') {
-      // Handle const/let declarations
+      // Handle const/let declarations, including arrow functions
       for (const declarator of n.namedChildren) {
         if (declarator.type === 'variable_declarator') {
           const nameNode = declarator.namedChildren.find(ch => ch.type === 'identifier');
           if (nameNode) {
             const name = textFor(code, nameNode);
-            symbols.push({
-              name,
-              kind: 'const',
-              signature: null,
-              exported
-            });
+            
+            // Check for arrow function assignment
+            const arrowFn = declarator.namedChildren.find(ch => ch.type === 'arrow_function');
+            if (arrowFn) {
+              // Extract arrow function parameters
+              const paramsNode = arrowFn.namedChildren.find(ch => 
+                ch.type === 'formal_parameters' || ch.type === 'identifier'
+              );
+              let params: string[] = [];
+              if (paramsNode) {
+                if (paramsNode.type === 'formal_parameters') {
+                  params = extractTSJSParams(code, paramsNode);
+                } else if (paramsNode.type === 'identifier') {
+                  params = [textFor(code, paramsNode)];
+                }
+              }
+              const paramStr = params.length > 0 ? params.join(', ') : '';
+              symbols.push({
+                name,
+                kind: 'const',
+                signature: `const ${name} = (${paramStr}) =>`,
+                exported
+              });
+            } else {
+              // Not an arrow function - could be object, primitive, etc.
+              // Try to provide at least some signature
+              symbols.push({
+                name,
+                kind: 'const',
+                signature: `const ${name}`,
+                exported
+              });
+            }
           }
         }
       }

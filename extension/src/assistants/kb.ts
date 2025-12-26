@@ -474,128 +474,90 @@ async function generateArchitectureFile(
     }
 
     // ============================================================
-    // ENTRY POINTS (B4: Proper taxonomy with honest semantics)
+    // ENTRY POINTS (Language-aware content analysis)
     // ============================================================
     const ruleEntryPoints = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.ENTRY_POINT)
       .filter(f => classifyFile(f.file, workspaceRoot.fsPath) === 'app');
-    const fileEntryPoints = detectEntryPoints(appFiles, workspaceRoot.fsPath);
     
-    if (ruleEntryPoints.length > 0 || fileEntryPoints.length > 0) {
+    // Use content-based detection for accurate categorization
+    const contentBasedEntryPoints = await detectEntryPointsWithContent(appFiles, workspaceRoot.fsPath);
+    
+    if (ruleEntryPoints.length > 0 || contentBasedEntryPoints.length > 0) {
       content += '## Entry Points\n\n';
       content += '_Where code execution begins. Categorized by type with detection confidence._\n\n';
       
-      // Group rule-based entry points by type
+      // Group content-based entry points by category
+      const runtimeEntries = contentBasedEntryPoints.filter(e => e.category === 'runtime');
+      const toolingEntries = contentBasedEntryPoints.filter(e => e.category === 'tooling');
+      const barrelEntries = contentBasedEntryPoints.filter(e => e.category === 'barrel');
+      
+      // Also add rule-based HTTP handlers if not already covered
       const httpHandlers = dedupe(
         ruleEntryPoints.filter(f => f.message.includes('HTTP')),
         f => f.file
       );
-      const cliCommands = dedupe(
-        ruleEntryPoints.filter(f => f.message.includes('CLI')),
-        f => f.file
-      );
-      const mainFunctions = dedupe(
-        ruleEntryPoints.filter(f => f.message.includes('Main')),
-        f => f.file
-      );
       
-      // Categorize file-based entry points with proper taxonomy
-      const runtimeEntries: Array<{ path: string; reason: string; confidence: string }> = [];
-      const configEntries: Array<{ path: string; reason: string; confidence: string }> = [];
-      const barrelEntries: Array<{ path: string; reason: string; confidence: string }> = [];
-      
-      // Add rule-based entries with proper categorization
-      for (const entry of mainFunctions.slice(0, 5)) {
-        const relPath = makeRelativePath(entry.file, workspaceRoot.fsPath);
-        if (isConfigOrToolingFile(relPath)) {
-          configEntries.push({
-            path: relPath,
-            reason: entry.message,
-            confidence: '🟢 High'
-          });
-        } else {
+      // Merge rule-based HTTP handlers into runtime (deduped)
+      const runtimePaths = new Set(runtimeEntries.map(e => e.path));
+      for (const handler of httpHandlers) {
+        const relPath = makeRelativePath(handler.file, workspaceRoot.fsPath);
+        if (!runtimePaths.has(relPath)) {
           runtimeEntries.push({
             path: relPath,
-            reason: entry.message,
-            confidence: '🟢 High'
+            reason: handler.message.replace('HTTP entry point: ', ''),
+            confidence: 'high',
+            category: 'runtime',
+            routeCount: 1
           });
         }
       }
       
-      // Categorize file-based entry points
-      for (const entry of fileEntryPoints) {
-        const confIcon = entry.confidence === 'high' ? '🟢 High' : 
-                        entry.confidence === 'medium' ? '🟡 Medium' : '🟠 Low';
-        const baseName = path.basename(entry.path, path.extname(entry.path)).toLowerCase();
-        
-        // Config/Tooling files
-        if (isConfigOrToolingFile(entry.path)) {
-          configEntries.push({ path: entry.path, reason: entry.reason, confidence: confIcon });
-        }
-        // Barrel/Index re-exports
-        else if (baseName === 'index' || baseName === 'mod' || baseName === '__init__') {
-          barrelEntries.push({ path: entry.path, reason: 'Re-export barrel', confidence: '🟡 Medium' });
-        }
-        // Runtime entries (main, server, app, cli, etc.)
-        else {
-          runtimeEntries.push({ path: entry.path, reason: entry.reason, confidence: confIcon });
-        }
-      }
-      
-      // ---- RUNTIME ENTRY POINTS (servers, handlers, CLI, main) ----
-      if (httpHandlers.length > 0 || cliCommands.length > 0 || runtimeEntries.length > 0) {
+      // ---- RUNTIME ENTRY POINTS ----
+      if (runtimeEntries.length > 0) {
         content += '### Runtime Entry Points\n\n';
-        content += '_Server handlers, CLI commands, application entry._\n\n';
+        content += '_Server handlers, API routes, application entry._\n\n';
         
-        if (httpHandlers.length > 0) {
-          content += `**API Routes** (${httpHandlers.length}) — 🟢 High confidence\n`;
-          for (const handler of httpHandlers.slice(0, 5)) {
-            const relPath = makeRelativePath(handler.file, workspaceRoot.fsPath);
-            const info = handler.message.replace('HTTP entry point: ', '');
-            content += `- \`${relPath}\`: ${info}\n`;
-          }
-          if (httpHandlers.length > 5) {
-            content += `- _...and ${httpHandlers.length - 5} more_\n`;
-          }
-          content += '\n';
+        // Top 10 by route count, then confidence
+        const topRuntime = runtimeEntries.slice(0, KB_SECTION_LIMITS.entryPoints);
+        for (const entry of topRuntime) {
+          const confIcon = entry.confidence === 'high' ? '🟢' : 
+                          entry.confidence === 'medium' ? '🟡' : '🟠';
+          content += `- ${confIcon} \`${entry.path}\`: ${entry.reason}\n`;
         }
-        
-        if (cliCommands.length > 0) {
-          content += `**CLI Commands** (${cliCommands.length}) — 🟢 High confidence\n`;
-          for (const cmd of cliCommands.slice(0, 3)) {
-            const relPath = makeRelativePath(cmd.file, workspaceRoot.fsPath);
-            content += `- \`${relPath}\`: ${cmd.message}\n`;
-          }
-          content += '\n';
+        if (runtimeEntries.length > KB_SECTION_LIMITS.entryPoints) {
+          content += `- _...and ${runtimeEntries.length - KB_SECTION_LIMITS.entryPoints} more_\n`;
         }
-        
-        const uniqueRuntimeEntries = dedupe(runtimeEntries, e => e.path).slice(0, 5);
-        if (uniqueRuntimeEntries.length > 0) {
-          content += '**Application Entry:**\n';
-          for (const entry of uniqueRuntimeEntries) {
-            content += `- \`${entry.path}\`: ${entry.reason} — ${entry.confidence}\n`;
-          }
-          content += '\n';
-        }
+        content += '\n';
       }
       
-      // ---- CONFIG/TOOLING ENTRY FILES ----
-      const uniqueConfigEntries = dedupe(configEntries, e => e.path).slice(0, 5);
-      if (uniqueConfigEntries.length > 0) {
-        content += '### Config/Tooling Entry Files\n\n';
-        content += '_Build, test, and tooling configuration._\n\n';
-        for (const entry of uniqueConfigEntries) {
-          content += `- \`${entry.path}\`: ${entry.reason} — ${entry.confidence}\n`;
+      // ---- RUNNABLE SCRIPTS / TOOLING ----
+      if (toolingEntries.length > 0) {
+        content += '### Runnable Scripts / Tooling\n\n';
+        content += '_CLI tools, build scripts, standalone utilities._\n\n';
+        
+        const topTooling = toolingEntries.slice(0, 5);
+        for (const entry of topTooling) {
+          const confIcon = entry.confidence === 'high' ? '🟢' : 
+                          entry.confidence === 'medium' ? '🟡' : '🟠';
+          content += `- ${confIcon} \`${entry.path}\`: ${entry.reason}\n`;
+        }
+        if (toolingEntries.length > 5) {
+          content += `- _...and ${toolingEntries.length - 5} more_\n`;
         }
         content += '\n';
       }
       
       // ---- BARREL/INDEX EXPORTS ----
-      const uniqueBarrelEntries = dedupe(barrelEntries, e => e.path).slice(0, 5);
-      if (uniqueBarrelEntries.length > 0) {
+      if (barrelEntries.length > 0) {
         content += '### Barrel/Index Exports\n\n';
-        content += '_Re-export hubs. Often aggregate module exports._\n\n';
-        for (const entry of uniqueBarrelEntries) {
-          content += `- \`${entry.path}\`: ${entry.reason} — ${entry.confidence}\n`;
+        content += '_Re-export hubs that aggregate module exports._\n\n';
+        
+        const topBarrels = barrelEntries.slice(0, 5);
+        for (const entry of topBarrels) {
+          content += `- 🟡 \`${entry.path}\`: ${entry.reason}\n`;
+        }
+        if (barrelEntries.length > 5) {
+          content += `- _...and ${barrelEntries.length - 5} more_\n`;
         }
         content += '\n';
       }
@@ -848,7 +810,10 @@ async function generateMapFile(
         if (data?.signature) {
           content += `**\`${relPath}\`**: \`${data.signature}\`\n\n`;
         } else {
-          const modelInfo = model.message.replace('Data model: ', '');
+          // Clean up the model info for display
+          let modelInfo = model.message.replace('Data model: ', '');
+          // Remove verbose descriptors like "(dataclass) - class"
+          modelInfo = modelInfo.replace(/\s*\([^)]+\)\s*-\s*\w+\s*$/, '');
           content += `**\`${relPath}\`**: ${modelInfo}\n\n`;
         }
       }
@@ -1037,7 +1002,23 @@ async function extractModelSignature(filePath: string, modelName: string): Promi
     const ext = path.extname(filePath).toLowerCase();
     
     // Extract just the class/model name without extra details
-    const cleanName = modelName.split(':')[0].split('(')[0].trim();
+    // Handle formats like: "MyClass", "MyClass: description", "Data Class (dataclass) - class"
+    // Also handle: "Pydantic: MyModel", "ORM: MyEntity", etc.
+    let cleanName = modelName;
+    
+    // Remove common prefixes from detection messages
+    cleanName = cleanName.replace(/^(Data Class|Pydantic|ORM|Entity|BaseModel|SQLModel|Interface|Type Alias)\s*[:(]\s*/i, '');
+    // Remove descriptors like "(dataclass) - class"
+    cleanName = cleanName.replace(/\s*\([^)]+\)\s*-\s*\w+\s*$/, '');
+    // Remove trailing descriptors like " - class", " - function"
+    cleanName = cleanName.replace(/\s*-\s*(class|function|type|interface)\s*$/i, '');
+    // Take first word/identifier (the actual class name)
+    cleanName = cleanName.split(/[\s:,]/)[0].trim();
+    
+    // Skip if we couldn't extract a valid identifier
+    if (!cleanName || cleanName.length < 2 || !/^[A-Za-z_]/.test(cleanName)) {
+      return null;
+    }
     
     if (ext === '.py') {
       // Find class definition and capture signature
@@ -1546,9 +1527,15 @@ async function generateContextFile(
     }
 
     // ============================================================
-    // DEPENDENCY CHAINS (top 3-10 chains)
+    // DEPENDENCY CHAINS (top 3-10 chains, prefer starting from entry points)
     // ============================================================
-    const chains = findDependencyChains(appLinks, workspaceRoot.fsPath, 4);
+    // Detect entry points for chain prioritization
+    const entryPointsForChains = await detectEntryPointsWithContent(appFiles, workspaceRoot.fsPath);
+    const runtimeEntryPaths = entryPointsForChains
+      .filter(e => e.category === 'runtime')
+      .map(e => e.path);
+    
+    const chains = findDependencyChains(appLinks, workspaceRoot.fsPath, 4, runtimeEntryPaths);
     if (chains.length > 0) {
       // Limit to 3-10 chains, preferring longer chains
       const sortedChains = chains
@@ -1825,9 +1812,10 @@ function detectLayerFlows(
 function findDependencyChains(
   allLinks: DependencyLink[],
   workspaceRoot: string,
-  maxDepth: number = 5
+  maxDepth: number = 5,
+  preferredStartPaths: string[] = []
 ): string[] {
-  const chains: Array<{ chain: string[]; depth: number; startPath: string }> = [];
+  const chains: Array<{ chain: string[]; depth: number; startPath: string; startsFromEntry: boolean }> = [];
   
   // Build adjacency map (sorted for determinism)
   const outgoing = new Map<string, string[]>();
@@ -1844,6 +1832,9 @@ function findDependencyChains(
     outgoing.set(key, deps.sort());
   }
   
+  // Build a set of preferred start paths for quick lookup
+  const preferredSet = new Set(preferredStartPaths.map(p => p.toLowerCase()));
+  
   // Find files with high in-degree (good starting points for chains)
   const inDegree = new Map<string, number>();
   for (const link of allLinks) {
@@ -1851,18 +1842,35 @@ function findDependencyChains(
     inDegree.set(link.target, (inDegree.get(link.target) || 0) + 1);
   }
   
-  // Start from high in-degree files and trace outward
-  // Deterministic tie-breaker by path name
-  const startFiles = Array.from(inDegree.entries())
+  // Prioritize preferred entry points, then fall back to high in-degree files
+  // Get start files from preferred paths first
+  const entryStartFiles: string[] = [];
+  for (const file of outgoing.keys()) {
+    const relPath = makeRelativePath(file, workspaceRoot).toLowerCase();
+    if (preferredSet.has(relPath)) {
+      entryStartFiles.push(file);
+    }
+  }
+  
+  // Then add high in-degree files (deterministic tie-breaker by path name)
+  const inDegreeStartFiles = Array.from(inDegree.entries())
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .slice(0, 8) // Check more starting points to ensure we get 3-5 chains
-    .map(([file]) => file);
+    .slice(0, 8)
+    .map(([file]) => file)
+    .filter(f => !entryStartFiles.some(e => e === f)); // Avoid duplicates
+  
+  // Combine: entry points first, then high in-degree
+  const startFiles = [...entryStartFiles.sort(), ...inDegreeStartFiles].slice(0, 10);
   
   const seenChains = new Set<string>();
   
   for (const startFile of startFiles) {
     const deps = outgoing.get(startFile) || [];
     if (deps.length === 0) continue;
+    
+    // Check if this is an entry point start
+    const startRelPath = makeRelativePath(startFile, workspaceRoot).toLowerCase();
+    const startsFromEntry = preferredSet.has(startRelPath);
     
     // Build chain with BFS-like approach to find longest path
     const chain: string[] = [makeRelativePath(startFile, workspaceRoot)];
@@ -1891,14 +1899,15 @@ function findDependencyChains(
         chains.push({
           chain: finalChain,
           depth: finalChain.length,
-          startPath: startFile
+          startPath: startFile,
+          startsFromEntry
         });
       }
     }
   }
   
-  // Sort by depth (longest first), then by start path for determinism
-  // Prefer chains that end at "leaf" files (files with low out-degree)
+  // Sort: prefer entry point chains, then by depth, then by path for determinism
+  // Also prefer chains that end at "leaf" files (files with low out-degree)
   const outDegree = new Map<string, number>();
   for (const link of allLinks) {
     if (link.source === link.target) continue;
@@ -1907,10 +1916,11 @@ function findDependencyChains(
   
   const sortedChains = chains
     .map(c => {
-      // Score chains by: length + bonus if ending at a leaf (low out-degree)
+      // Score chains by: entry point bonus + length + bonus if ending at a leaf
       const lastFile = c.chain[c.chain.length - 1];
       const isLeaf = (outDegree.get(lastFile) || 0) <= 1;
-      return { ...c, score: c.depth + (isLeaf ? 1 : 0) };
+      const entryBonus = c.startsFromEntry ? 10 : 0;
+      return { ...c, score: entryBonus + c.depth + (isLeaf ? 1 : 0) };
     })
     .sort((a, b) => b.score - a.score || b.depth - a.depth || a.startPath.localeCompare(b.startPath))
     .slice(0, 5); // Max 5 chains
@@ -1950,6 +1960,7 @@ function findDependencyChains(
             chain: finalChain,
             depth: finalChain.length,
             startPath: startFile,
+            startsFromEntry: false, // Fallback chains don't start from entry points
             score: finalChain.length + (isLeaf ? 1 : 0)
           });
         }
@@ -2098,19 +2109,61 @@ function findModuleClusters(
     }
   }
   
-  // Deduplicate cluster names by appending centroid filename or numbering
-  const nameCounts = new Map<string, number>();
-  for (const cluster of sortedClusters) {
-    const count = nameCounts.get(cluster.name) || 0;
-    if (count > 0) {
-      // Use the first file's basename as a distinguisher
-      const centroid = path.basename(cluster.files[0], path.extname(cluster.files[0]));
-      cluster.name = `${cluster.name} (${centroid})`;
-    }
-    nameCounts.set(cluster.name, count + 1);
-  }
+  // Disambiguate cluster names using path context or sequential numbering
+  disambiguateClusterNames(sortedClusters);
   
   return sortedClusters.slice(0, 7); // Max 7 clusters
+}
+
+/**
+ * Disambiguate cluster names that would otherwise collide.
+ * Uses path segment context first, then falls back to sequential numbering.
+ */
+function disambiguateClusterNames(clusters: Array<{ name: string; files: string[] }>): void {
+  // Group clusters by name to find collisions
+  const nameGroups = new Map<string, number[]>();
+  for (let i = 0; i < clusters.length; i++) {
+    const name = clusters[i].name;
+    if (!nameGroups.has(name)) {
+      nameGroups.set(name, []);
+    }
+    nameGroups.get(name)!.push(i);
+  }
+  
+  // Resolve collisions
+  for (const [name, indices] of nameGroups.entries()) {
+    if (indices.length <= 1) continue; // No collision
+    
+    // Try to disambiguate using path context from first file
+    const pathContexts: string[] = [];
+    for (const idx of indices) {
+      const firstFile = clusters[idx].files[0] || '';
+      const segments = firstFile.split('/');
+      // Get distinguishing path segment (prefer parent dir if available)
+      if (segments.length >= 2) {
+        pathContexts.push(segments[segments.length - 2]); // Parent directory
+      } else if (segments.length >= 1) {
+        const basename = path.basename(segments[0], path.extname(segments[0]));
+        pathContexts.push(basename);
+      } else {
+        pathContexts.push('');
+      }
+    }
+    
+    // Check if path contexts are unique
+    const uniqueContexts = new Set(pathContexts);
+    if (uniqueContexts.size === pathContexts.length && !pathContexts.some(c => c === '')) {
+      // Use path context for disambiguation
+      for (let i = 0; i < indices.length; i++) {
+        clusters[indices[i]].name = `${name} (${pathContexts[i]})`;
+      }
+    } else {
+      // Fall back to sequential numbering
+      for (let i = 0; i < indices.length; i++) {
+        clusters[indices[i]].name = `${name} #${i + 1}`;
+      }
+    }
+  }
 }
 
 /**
@@ -2854,7 +2907,9 @@ function getSymbolDependencies(filePath: string, allLinks: DependencyLink[], wor
 
 /**
  * Get files that import/call a specific symbol from a file.
- * Returns formatted strings like "handler.ts" or "handler.ts:processRequest"
+ * Returns shortened relative file paths with extension for unambiguous identification.
+ * Format: "handler.ts", "services/auth.ts" (uses shortest unique path)
+ * Caps at 5 files with (+N more) if more exist.
  */
 function getSymbolCallers(symbolName: string, filePath: string, allLinks: DependencyLink[], workspaceRoot?: string): string[] {
   // Normalize the file path for comparison
@@ -2883,16 +2938,37 @@ function getSymbolCallers(symbolName: string, filePath: string, allLinks: Depend
       return true;
     });
   
-  // Dedupe by source file and return with relative path context
+  // Dedupe by source file
   const uniqueCallers = dedupe(callers, l => l.source);
   
   // Sort for determinism
-  return uniqueCallers
-    .sort((a, b) => a.source.localeCompare(b.source))
-    .slice(0, 4)
-    .map(l => {
-      return path.basename(l.source, path.extname(l.source));
-    });
+  const sorted = uniqueCallers.sort((a, b) => a.source.localeCompare(b.source));
+  
+  // Map to shortened paths (last 2-3 path segments for readability)
+  const maxDisplay = 5;
+  const result: string[] = [];
+  
+  for (let i = 0; i < Math.min(maxDisplay, sorted.length); i++) {
+    const caller = sorted[i];
+    const relPath = workspaceRoot 
+      ? makeRelativePath(caller.source, workspaceRoot)
+      : path.basename(caller.source);
+    
+    // Use shortened path: prefer last 2 segments for brevity
+    const segments = relPath.split('/');
+    const shortened = segments.length > 2 
+      ? segments.slice(-2).join('/')  // e.g., "services/auth.ts"
+      : relPath;                       // e.g., "main.ts"
+    
+    result.push(shortened);
+  }
+  
+  // Add (+N more) indicator if truncated
+  if (sorted.length > maxDisplay) {
+    result.push(`(+${sorted.length - maxDisplay} more)`);
+  }
+  
+  return result;
 }
 
 function analyzeDirStructure(
@@ -2951,6 +3027,555 @@ function inferDirPurpose(dirName: string): string {
   return purposes[lower] || 'General';
 }
 
+/**
+ * Entry point detection result with category and confidence.
+ */
+interface DetectedEntryPoint {
+  path: string;
+  reason: string;
+  confidence: 'high' | 'medium' | 'low';
+  category: 'runtime' | 'tooling' | 'barrel';
+  routeCount?: number; // For ranking runtime entries
+}
+
+/**
+ * Detect entry points with language-aware content analysis.
+ * Categorizes into: Runtime Entry Points, Runnable Scripts/Tooling, Barrel/Index Exports.
+ * 
+ * Runtime Entry Points (🟢/🟡):
+ * - Python: FastAPI/Flask/Django apps, route handlers
+ * - TS/JS: Next.js API routes, Express/Nest servers
+ * - C#: ASP.NET Program.cs with WebApplication
+ * - Java: Spring Boot @SpringBootApplication, @RestController
+ * 
+ * Runnable Scripts/Tooling (🟡):
+ * - Python: if __name__ == "__main__"
+ * - JS/TS: bin scripts, require.main === module
+ * - Config files: jest.config, next.config, etc.
+ * 
+ * Barrel/Index Exports (🟡):
+ * - index.ts/tsx/js, __init__.py that primarily re-export
+ */
+async function detectEntryPointsWithContent(
+  files: string[], 
+  workspaceRoot: string
+): Promise<DetectedEntryPoint[]> {
+  const entryPoints: DetectedEntryPoint[] = [];
+  const processedPaths = new Set<string>();
+  
+  // Read files in parallel (batch of 20)
+  const batchSize = 20;
+  for (let i = 0; i < files.length; i += batchSize) {
+    const batch = files.slice(i, i + batchSize);
+    const results = await Promise.allSettled(
+      batch.map(async (file) => {
+        const relPath = makeRelativePath(file, workspaceRoot);
+        if (processedPaths.has(relPath)) return null;
+        processedPaths.add(relPath);
+        
+        const ext = path.extname(file).toLowerCase();
+        const basename = path.basename(file, ext).toLowerCase();
+        
+        // Read file content for content-based detection
+        let content = '';
+        try {
+          const uri = vscode.Uri.file(file);
+          const bytes = await vscode.workspace.fs.readFile(uri);
+          content = Buffer.from(bytes).toString('utf-8');
+        } catch {
+          // Skip unreadable files
+          return null;
+        }
+        
+        return analyzeFileForEntryPoint(relPath, basename, ext, content);
+      })
+    );
+    
+    for (const result of results) {
+      if (result.status === 'fulfilled' && result.value) {
+        entryPoints.push(result.value);
+      }
+    }
+  }
+  
+  // Sort: runtime first (by route count desc), then tooling, then barrel
+  // Within each category: by confidence (high first), then path for determinism
+  const categoryOrder = { runtime: 0, tooling: 1, barrel: 2 };
+  const confidenceOrder = { high: 0, medium: 1, low: 2 };
+  
+  entryPoints.sort((a, b) => {
+    const catDiff = categoryOrder[a.category] - categoryOrder[b.category];
+    if (catDiff !== 0) return catDiff;
+    
+    // Within runtime, sort by route count desc
+    if (a.category === 'runtime' && b.category === 'runtime') {
+      const routeDiff = (b.routeCount || 0) - (a.routeCount || 0);
+      if (routeDiff !== 0) return routeDiff;
+    }
+    
+    const confDiff = confidenceOrder[a.confidence] - confidenceOrder[b.confidence];
+    if (confDiff !== 0) return confDiff;
+    
+    return a.path.localeCompare(b.path);
+  });
+  
+  return entryPoints;
+}
+
+/**
+ * Analyze a single file for entry point characteristics.
+ */
+function analyzeFileForEntryPoint(
+  relPath: string,
+  basename: string,
+  ext: string,
+  content: string
+): DetectedEntryPoint | null {
+  const pathLower = relPath.toLowerCase();
+  
+  // ============================================================
+  // BARREL/INDEX EXPORTS (check first - quick)
+  // ============================================================
+  if (basename === 'index' || basename === 'mod' || basename === '__init__') {
+    // Check if it's primarily re-exports
+    const exportLines = (content.match(/^export\s+/gm) || []).length;
+    const fromLines = (content.match(/from\s+['"]/gm) || []).length;
+    const totalLines = content.split('\n').filter(l => l.trim()).length;
+    
+    // If more than 50% of non-empty lines are exports/re-exports, it's a barrel
+    if (totalLines > 0 && (exportLines + fromLines) / totalLines > 0.4) {
+      return {
+        path: relPath,
+        reason: 'Re-export barrel',
+        confidence: 'medium',
+        category: 'barrel'
+      };
+    }
+    
+    // Python __init__.py with from .X import patterns
+    if (ext === '.py') {
+      const pyReexports = (content.match(/^from\s+\./gm) || []).length;
+      if (pyReexports > 2 && pyReexports / Math.max(1, totalLines) > 0.3) {
+        return {
+          path: relPath,
+          reason: 'Package re-exports',
+          confidence: 'medium',
+          category: 'barrel'
+        };
+      }
+    }
+  }
+  
+  // ============================================================
+  // CONFIG/TOOLING FILES (check early - no content needed)
+  // ============================================================
+  if (isConfigOrToolingFile(relPath)) {
+    // Only include if it has executable content
+    if (content.includes('module.exports') || content.includes('export default') || 
+        content.includes('defineConfig') || content.includes('createConfig')) {
+      return {
+        path: relPath,
+        reason: 'Config/Build tool',
+        confidence: 'high',
+        category: 'tooling'
+      };
+    }
+    return null; // Skip plain config files
+  }
+  
+  // ============================================================
+  // PYTHON ENTRY POINTS
+  // ============================================================
+  if (ext === '.py') {
+    return analyzePythonEntryPoint(relPath, basename, content);
+  }
+  
+  // ============================================================
+  // TYPESCRIPT/JAVASCRIPT ENTRY POINTS
+  // ============================================================
+  if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) {
+    return analyzeTSJSEntryPoint(relPath, basename, pathLower, content);
+  }
+  
+  // ============================================================
+  // C# ENTRY POINTS
+  // ============================================================
+  if (ext === '.cs') {
+    return analyzeCSharpEntryPoint(relPath, basename, content);
+  }
+  
+  // ============================================================
+  // JAVA ENTRY POINTS
+  // ============================================================
+  if (ext === '.java') {
+    return analyzeJavaEntryPoint(relPath, basename, content);
+  }
+  
+  return null;
+}
+
+/**
+ * Analyze Python file for entry point patterns.
+ */
+function analyzePythonEntryPoint(relPath: string, basename: string, content: string): DetectedEntryPoint | null {
+  // FastAPI detection (HIGH confidence)
+  const hasFastAPI = content.includes('FastAPI(') || content.includes('from fastapi');
+  const fastAPIRoutes = (content.match(/@(app|router)\.(get|post|put|delete|patch|options|head)\s*\(/gi) || []).length;
+  
+  if (hasFastAPI && fastAPIRoutes > 0) {
+    return {
+      path: relPath,
+      reason: `FastAPI (${fastAPIRoutes} routes)`,
+      confidence: 'high',
+      category: 'runtime',
+      routeCount: fastAPIRoutes
+    };
+  }
+  
+  // Flask detection (HIGH confidence)
+  const hasFlask = content.includes('Flask(__name__)') || content.includes('from flask import Flask');
+  const flaskRoutes = (content.match(/@(app|blueprint|bp)\.(route|get|post|put|delete|patch)\s*\(/gi) || []).length;
+  
+  if (hasFlask && flaskRoutes > 0) {
+    return {
+      path: relPath,
+      reason: `Flask (${flaskRoutes} routes)`,
+      confidence: 'high',
+      category: 'runtime',
+      routeCount: flaskRoutes
+    };
+  }
+  
+  // Django detection
+  if (basename === 'urls' && content.includes('urlpatterns')) {
+    const urlPatterns = (content.match(/path\s*\(|re_path\s*\(|url\s*\(/g) || []).length;
+    return {
+      path: relPath,
+      reason: `Django URLs (${urlPatterns} patterns)`,
+      confidence: 'high',
+      category: 'runtime',
+      routeCount: urlPatterns
+    };
+  }
+  
+  if (basename === 'views' && (content.includes('def get(') || content.includes('def post(') || content.includes('@api_view'))) {
+    return {
+      path: relPath,
+      reason: 'Django views',
+      confidence: 'medium',
+      category: 'runtime',
+      routeCount: 1
+    };
+  }
+  
+  if ((basename === 'wsgi' || basename === 'asgi') && content.includes('application')) {
+    return {
+      path: relPath,
+      reason: `Django ${basename.toUpperCase()} entry`,
+      confidence: 'high',
+      category: 'runtime',
+      routeCount: 1
+    };
+  }
+  
+  // __main__.py is always a runtime entry
+  if (basename === '__main__') {
+    return {
+      path: relPath,
+      reason: 'Python main module',
+      confidence: 'high',
+      category: 'runtime',
+      routeCount: 1
+    };
+  }
+  
+  // CLI tools with click/typer (TOOLING)
+  if (content.includes('@click.command') || content.includes('@click.group') || 
+      content.includes('@app.command') && content.includes('import typer')) {
+    return {
+      path: relPath,
+      reason: 'CLI tool (click/typer)',
+      confidence: 'high',
+      category: 'tooling'
+    };
+  }
+  
+  // if __name__ == "__main__" pattern (TOOLING unless it's a web server)
+  if (content.includes('if __name__') && content.includes('__main__')) {
+    // Check if it starts a server
+    if (content.includes('uvicorn.run') || content.includes('app.run(') || content.includes('.serve(')) {
+      return {
+        path: relPath,
+        reason: 'Server entry',
+        confidence: 'high',
+        category: 'runtime',
+        routeCount: 1
+      };
+    }
+    return {
+      path: relPath,
+      reason: 'Script entry (__main__)',
+      confidence: 'medium',
+      category: 'tooling'
+    };
+  }
+  
+  // main.py, app.py, server.py without specific framework (medium confidence)
+  if (['main', 'app', 'server', 'application'].includes(basename)) {
+    return {
+      path: relPath,
+      reason: `Entry point (${basename})`,
+      confidence: 'medium',
+      category: 'runtime',
+      routeCount: 0
+    };
+  }
+  
+  return null;
+}
+
+/**
+ * Analyze TypeScript/JavaScript file for entry point patterns.
+ */
+function analyzeTSJSEntryPoint(
+  relPath: string, 
+  basename: string, 
+  pathLower: string,
+  content: string
+): DetectedEntryPoint | null {
+  // Next.js API routes (HIGH confidence)
+  if (pathLower.includes('pages/api/') || pathLower.includes('app/api/')) {
+    const hasHandler = content.includes('export default') || content.includes('export async function');
+    if (hasHandler) {
+      return {
+        path: relPath,
+        reason: 'Next.js API route',
+        confidence: 'high',
+        category: 'runtime',
+        routeCount: 1
+      };
+    }
+  }
+  
+  // Next.js middleware
+  if (basename === 'middleware' && (pathLower.endsWith('.ts') || pathLower.endsWith('.js'))) {
+    if (content.includes('NextRequest') || content.includes('NextResponse')) {
+      return {
+        path: relPath,
+        reason: 'Next.js middleware',
+        confidence: 'high',
+        category: 'runtime',
+        routeCount: 1
+      };
+    }
+  }
+  
+  // Express/Fastify/Koa route detection
+  const expressRoutes = (content.match(/\.(get|post|put|delete|patch|use)\s*\(\s*['"]/g) || []).length;
+  const hasExpressApp = content.includes('express()') || content.includes('fastify(') || content.includes('new Koa(');
+  
+  if (hasExpressApp || expressRoutes > 2) {
+    return {
+      path: relPath,
+      reason: `Express/HTTP server (${expressRoutes} routes)`,
+      confidence: expressRoutes > 0 ? 'high' : 'medium',
+      category: 'runtime',
+      routeCount: expressRoutes
+    };
+  }
+  
+  // NestJS controllers
+  if (content.includes('@Controller') || content.includes('@Injectable')) {
+    const nestRoutes = (content.match(/@(Get|Post|Put|Delete|Patch|All)\s*\(/g) || []).length;
+    if (nestRoutes > 0) {
+      return {
+        path: relPath,
+        reason: `NestJS controller (${nestRoutes} routes)`,
+        confidence: 'high',
+        category: 'runtime',
+        routeCount: nestRoutes
+      };
+    }
+  }
+  
+  // Hono routes (Cloudflare Workers, etc.)
+  if (content.includes('new Hono(') || content.includes('Hono.get') || content.includes('app.get(')) {
+    const honoRoutes = (content.match(/\.(get|post|put|delete|patch)\s*\(/g) || []).length;
+    if (honoRoutes > 0) {
+      return {
+        path: relPath,
+        reason: `Hono server (${honoRoutes} routes)`,
+        confidence: 'high',
+        category: 'runtime',
+        routeCount: honoRoutes
+      };
+    }
+  }
+  
+  // require.main === module pattern (TOOLING)
+  if (content.includes('require.main === module')) {
+    return {
+      path: relPath,
+      reason: 'Node.js script entry',
+      confidence: 'medium',
+      category: 'tooling'
+    };
+  }
+  
+  // Check for bin/CLI scripts
+  if (pathLower.includes('/bin/') || pathLower.includes('/cli/')) {
+    if (content.includes('#!/') || content.includes('commander') || content.includes('yargs')) {
+      return {
+        path: relPath,
+        reason: 'CLI script',
+        confidence: 'medium',
+        category: 'tooling'
+      };
+    }
+  }
+  
+  // Server files by name
+  if (['server', 'main', 'app', 'index'].includes(basename)) {
+    // Check if it starts a server
+    if (content.includes('.listen(') || content.includes('createServer') || 
+        content.includes('http.createServer') || content.includes('https.createServer')) {
+      return {
+        path: relPath,
+        reason: 'Server entry',
+        confidence: 'high',
+        category: 'runtime',
+        routeCount: 1
+      };
+    }
+    
+    // Generic entry by name (lower confidence)
+    if (basename === 'main' || basename === 'server') {
+      return {
+        path: relPath,
+        reason: `Entry point (${basename})`,
+        confidence: 'medium',
+        category: 'runtime',
+        routeCount: 0
+      };
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Analyze C# file for entry point patterns.
+ */
+function analyzeCSharpEntryPoint(relPath: string, basename: string, content: string): DetectedEntryPoint | null {
+  // ASP.NET Program.cs with WebApplication (HIGH confidence)
+  if (basename === 'program') {
+    if (content.includes('WebApplication.CreateBuilder') || content.includes('CreateHostBuilder') ||
+        content.includes('UseStartup') || content.includes('app.Run()')) {
+      const mapRoutes = (content.match(/\.Map(Get|Post|Put|Delete|Patch)\s*\(/g) || []).length;
+      return {
+        path: relPath,
+        reason: `ASP.NET entry${mapRoutes > 0 ? ` (${mapRoutes} routes)` : ''}`,
+        confidence: 'high',
+        category: 'runtime',
+        routeCount: mapRoutes || 1
+      };
+    }
+    
+    // Console app Program.cs
+    if (content.includes('static void Main') || content.includes('static async Task Main')) {
+      return {
+        path: relPath,
+        reason: 'Console app entry',
+        confidence: 'medium',
+        category: 'tooling'
+      };
+    }
+  }
+  
+  // ASP.NET Controllers
+  if (content.includes('[ApiController]') || content.includes('[Controller]')) {
+    const routes = (content.match(/\[(Http(Get|Post|Put|Delete|Patch)|Route)\]/g) || []).length;
+    return {
+      path: relPath,
+      reason: `ASP.NET controller (${routes} routes)`,
+      confidence: routes > 0 ? 'high' : 'medium',
+      category: 'runtime',
+      routeCount: routes
+    };
+  }
+  
+  // Startup.cs
+  if (basename === 'startup' && content.includes('ConfigureServices')) {
+    return {
+      path: relPath,
+      reason: 'ASP.NET Startup config',
+      confidence: 'high',
+      category: 'runtime',
+      routeCount: 1
+    };
+  }
+  
+  return null;
+}
+
+/**
+ * Analyze Java file for entry point patterns.
+ */
+function analyzeJavaEntryPoint(relPath: string, basename: string, content: string): DetectedEntryPoint | null {
+  // Spring Boot main class (HIGH confidence)
+  if (content.includes('@SpringBootApplication')) {
+    return {
+      path: relPath,
+      reason: 'Spring Boot entry',
+      confidence: 'high',
+      category: 'runtime',
+      routeCount: 1
+    };
+  }
+  
+  // Spring controllers
+  if (content.includes('@RestController') || content.includes('@Controller')) {
+    const mappings = (content.match(/@(Get|Post|Put|Delete|Patch|Request)Mapping/g) || []).length;
+    return {
+      path: relPath,
+      reason: `Spring controller (${mappings} endpoints)`,
+      confidence: mappings > 0 ? 'high' : 'medium',
+      category: 'runtime',
+      routeCount: mappings
+    };
+  }
+  
+  // JAX-RS resources
+  if (content.includes('@Path(') && (content.includes('@GET') || content.includes('@POST'))) {
+    const jaxRoutes = (content.match(/@(GET|POST|PUT|DELETE|PATCH)/g) || []).length;
+    return {
+      path: relPath,
+      reason: `JAX-RS resource (${jaxRoutes} endpoints)`,
+      confidence: 'high',
+      category: 'runtime',
+      routeCount: jaxRoutes
+    };
+  }
+  
+  // Public static void main (check if not Spring Boot)
+  if (content.includes('public static void main(String')) {
+    if (!content.includes('@SpringBootApplication')) {
+      return {
+        path: relPath,
+        reason: 'Java main class',
+        confidence: 'medium',
+        category: 'tooling'
+      };
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Legacy sync entry point detection (filename-based only).
+ * Used as fallback when async detection is not available.
+ */
 function detectEntryPoints(files: string[], workspaceRoot: string): Array<{ path: string; reason: string; confidence: 'high' | 'medium' | 'low' }> {
   const entryPoints: Array<{ path: string; reason: string; confidence: 'high' | 'medium' | 'low' }> = [];
   

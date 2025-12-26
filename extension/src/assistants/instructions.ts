@@ -33,7 +33,7 @@ Before multi-file edits, read the KB files in \`.aspect/\`:
 
 1. **Parse the task** → Identify which files/endpoints are involved
 2. **Read \`architecture.md\`** → Find high-risk hubs (3+ dependents) and entry points
-3. **Read \`map.md\`** → Locate relevant symbols; check "Called by" for blast radius
+3. **Read \`map.md\`** → Locate relevant symbols; check "Used In (files)" for blast radius
 4. **Read \`context.md\`** → See which files are commonly co-edited (module clusters)
 5. **Plan minimal change** → Target the smallest, safest location
 6. **Implement** → Preserve all existing exports; match naming conventions
@@ -47,7 +47,7 @@ Before multi-file edits, read the KB files in \`.aspect/\`:
 - Read the complete file before modifying it
 - Add code; don't reorganize unless explicitly asked
 - Match naming patterns shown in \`map.md\`
-- Check "Called by" in \`map.md\` before renaming/deleting symbols
+- Check "Used In (files)" in \`map.md\` before renaming/deleting symbols
 
 **Don't:**
 - Edit files with 5+ dependents without acknowledging the risk
@@ -64,7 +64,7 @@ Hub files have many dependents — changes ripple widely. Before editing:
 1. Confirm the file is in \`architecture.md\` → \`## High-Risk Architectural Hubs\`
 2. Check dependent count (e.g., "8 dependents" = high risk)
 3. Prefer **additive changes** (new functions) over modifying existing signatures
-4. If you must change a signature, update all callers listed in "Called by (files)"
+4. If you must change a signature, update all callers listed in "Used In (files)"
 
 **Example:** If a hub file has 8+ dependents, adding a new function is safer than renaming an existing one.
 
@@ -216,7 +216,7 @@ ${generateCanonicalContent()}
 
 - Read KB files before using Composer for multi-file edits
 - Check \`architecture.md\` for hub files before agent-mode refactors
-- Use "Called by" in \`map.md\` to find all usages before renaming
+- Use "Used In (files)" in \`map.md\` to find all usages before renaming
 `.trim();
 }
 
