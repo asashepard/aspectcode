@@ -38,9 +38,12 @@ export class DependencyAnalyzer {
    */
   async analyzeDependencies(files: string[]): Promise<DependencyLink[]> {
     const links: DependencyLink[] = [];
+    const startTime = Date.now();
     
-    // Load and cache file contents
+    // Load and cache file contents (parallelized for performance)
     await this.loadFileContents(files);
+    const loadTime = Date.now() - startTime;
+    console.log(`[DependencyAnalyzer] Loaded ${this.workspaceFiles.size}/${files.length} files in ${loadTime}ms`);
     
     for (const file of files) {
       const fileDependencies = await this.analyzeFileImports(file);
@@ -653,18 +656,29 @@ export class DependencyAnalyzer {
   }
 
   /**
-   * Load file contents into cache
+   * Load file contents into cache using fast filesystem reads.
+   * Uses parallel batching for performance on large workspaces.
    */
   private async loadFileContents(files: string[]): Promise<void> {
     this.workspaceFiles.clear();
     
-    for (const filePath of files) {
-      try {
-        const uri = vscode.Uri.file(filePath);
-        const document = await vscode.workspace.openTextDocument(uri);
-        this.workspaceFiles.set(filePath, document.getText());
-      } catch (error) {
-        console.warn(`Failed to load file ${filePath}:`, error);
+    // Process in parallel batches for performance
+    const BATCH_SIZE = 50;
+    for (let i = 0; i < files.length; i += BATCH_SIZE) {
+      const batch = files.slice(i, i + BATCH_SIZE);
+      const results = await Promise.allSettled(
+        batch.map(async (filePath) => {
+          const uri = vscode.Uri.file(filePath);
+          const content = await vscode.workspace.fs.readFile(uri);
+          return { filePath, content: Buffer.from(content).toString('utf-8') };
+        })
+      );
+      
+      for (const result of results) {
+        if (result.status === 'fulfilled') {
+          this.workspaceFiles.set(result.value.filePath, result.value.content);
+        }
+        // Skip failed files silently
       }
     }
   }

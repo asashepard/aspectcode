@@ -23,7 +23,7 @@ Before multi-file edits, read the KB files in \`.aspect/\`:
 
 | File | Contains | When to Read |
 |------|----------|--------------|
-| \`architecture.md\` | High-risk hubs, entry points, circular deps | **Always first** |
+| \`architecture.md\` | High-risk hubs, entry points, circular deps | **For multi-file edits** |
 | \`map.md\` | Data models, symbol index, naming conventions | Before modifying functions |
 | \`context.md\` | Module clusters, external integrations, data flows | Before architectural changes |
 
@@ -53,7 +53,7 @@ Before multi-file edits, read the KB files in \`.aspect/\`:
 - Edit files with 5+ dependents without acknowledging the risk
 - Create circular dependencies (check \`architecture.md\`)
 - Use placeholders like \`// ...rest\` — provide complete code
-- Touch tests, migrations, or third-party code unless asked
+- Modify tests unless needed to satisfy the task or fix test failures
 
 ---
 
@@ -84,9 +84,9 @@ If MCP is configured, query the dependency graph programmatically:
 
 **Example:**
 \`\`\`json
-{ "tool": "get_file_dependents", "arguments": { "file_path": "src/utils/helpers.ts" } }
+{ "tool": "get_file_dependents", "arguments": { "file_path": "<path-to-file>" } }
 \`\`\`
-→ Returns files affected by changes to \`helpers.ts\`
+→ Returns files that import the target file (blast radius)
 `.trim();
 }
 

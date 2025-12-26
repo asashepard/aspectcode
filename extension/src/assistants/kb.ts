@@ -407,21 +407,28 @@ async function generateArchitectureFile(
       for (let i = 0; i < hubs.length; i++) {
         const hub = hubs[i];
         const relPath = makeRelativePath(hub.file, workspaceRoot.fsPath);
-        const risk = hub.inDegree > 8 || hub.criticalFindings > 0 ? '🔴 High' : 
-                     hub.inDegree > 4 || hub.findings > 3 ? '🟡 Medium' : '🟢 Low';
-        content += `| ${i + 1} | \`${relPath}\` | ${hub.outDegree} | ${hub.inDegree} | ${hub.findings} | ${risk} |\n`;
+        // Calculate app-file-only import count for consistency with details section
+        const appImportCount = dedupe(
+          allLinks
+            .filter(l => l.target === hub.file && l.source !== hub.file)
+            .filter(l => classifyFile(l.source, workspaceRoot.fsPath) === 'app'),
+          l => l.source
+        ).length;
+        const risk = appImportCount > 8 || hub.criticalFindings > 0 ? '🔴 High' : 
+                     appImportCount > 4 || hub.findings > 3 ? '🟡 Medium' : '🟢 Low';
+        content += `| ${i + 1} | \`${relPath}\` | ${hub.outDegree} | ${appImportCount} | ${hub.findings} | ${risk} |\n`;
       }
       content += '\n';
 
       // Show top hub details with blast radius
       content += '### Hub Details & Blast Radius\n\n';
-      content += '_Blast radius = files that would be affected if this hub breaks._\n\n';
+      content += '_Blast radius = direct dependents + their dependents (2 levels)._\n\n';
       
       for (let i = 0; i < Math.min(KB_SECTION_LIMITS.hubDetails, hubs.length); i++) {
         const hub = hubs[i];
         const relPath = makeRelativePath(hub.file, workspaceRoot.fsPath);
         
-        // Get direct importers (first-level blast radius) - MUST match Imported By count
+        // Get direct importers (first-level blast radius) - only app files
         const directImporters = dedupe(
           allLinks
             .filter(l => l.target === hub.file && l.source !== hub.file)
@@ -442,17 +449,18 @@ async function generateArchitectureFile(
           }
         }
         
-        const totalBlastRadius = directImporters.length + secondLevelImporters.size;
+        // Use directImporters.length for consistency (same filtered source for all metrics)
+        const directDependentCount = directImporters.length;
+        const totalBlastRadius = directDependentCount + secondLevelImporters.size;
         
-        // Use hub.inDegree for consistency with table (both count direct importers)
         content += `**${i + 1}. \`${relPath}\`** — Blast radius: ${totalBlastRadius} files\n`;
-        content += `   - Direct dependents: ${hub.inDegree}\n`;
+        content += `   - Direct dependents: ${directDependentCount}\n`;
         content += `   - Indirect dependents: ~${secondLevelImporters.size}\n`;
         
-        // Show actual importers list (limited, but must match count concept)
+        // Show actual importers list
         if (directImporters.length > 0) {
           const shownCount = Math.min(5, directImporters.length);
-          content += `\n   Imported by (${hub.inDegree} files):\n`;
+          content += `\n   Imported by (${directDependentCount} files):\n`;
           for (const imp of directImporters.slice(0, shownCount)) {
             const impRel = makeRelativePath(imp.source, workspaceRoot.fsPath);
             content += `   - \`${impRel}\`\n`;
@@ -495,28 +503,32 @@ async function generateArchitectureFile(
       const configEntries: Array<{ path: string; reason: string; confidence: string }> = [];
       const barrelEntries: Array<{ path: string; reason: string; confidence: string }> = [];
       
-      // Add rule-based entries to runtime (high confidence)
-      for (const entry of mainFunctions.slice(0, 3)) {
-        runtimeEntries.push({
-          path: makeRelativePath(entry.file, workspaceRoot.fsPath),
-          reason: entry.message,
-          confidence: '🟢 High'
-        });
+      // Add rule-based entries with proper categorization
+      for (const entry of mainFunctions.slice(0, 5)) {
+        const relPath = makeRelativePath(entry.file, workspaceRoot.fsPath);
+        if (isConfigOrToolingFile(relPath)) {
+          configEntries.push({
+            path: relPath,
+            reason: entry.message,
+            confidence: '🟢 High'
+          });
+        } else {
+          runtimeEntries.push({
+            path: relPath,
+            reason: entry.message,
+            confidence: '🟢 High'
+          });
+        }
       }
       
       // Categorize file-based entry points
       for (const entry of fileEntryPoints) {
         const confIcon = entry.confidence === 'high' ? '🟢 High' : 
                         entry.confidence === 'medium' ? '🟡 Medium' : '🟠 Low';
-        const pathLower = entry.path.toLowerCase();
         const baseName = path.basename(entry.path, path.extname(entry.path)).toLowerCase();
         
         // Config/Tooling files
-        if (pathLower.includes('config') || pathLower.includes('.config') ||
-            baseName.includes('jest') || baseName.includes('webpack') ||
-            baseName.includes('vite') || baseName.includes('tailwind') ||
-            baseName.includes('eslint') || baseName.includes('prettier') ||
-            baseName.includes('tsconfig') || baseName.includes('babel')) {
+        if (isConfigOrToolingFile(entry.path)) {
           configEntries.push({ path: entry.path, reason: entry.reason, confidence: confIcon });
         }
         // Barrel/Index re-exports
@@ -787,17 +799,42 @@ async function generateMapFile(
       !ormModels.includes(f) && !dataClasses.includes(f) && !interfaces.includes(f)
     );
 
+    // Pre-extract all model signatures in parallel for performance
+    const allModelsToExtract = [
+      ...ormModels.slice(0, 15).map(m => ({ model: m, type: 'orm' })),
+      ...dataClasses.slice(0, 15).map(m => ({ model: m, type: 'dataclass' })),
+      ...interfaces.slice(0, 15).map(m => ({ model: m, type: 'interface' }))
+    ];
+    
+    const signatureResults = await Promise.allSettled(
+      allModelsToExtract.map(async ({ model }) => {
+        const modelInfo = model.message.replace('Data model: ', '').replace('ORM model: ', '');
+        const signature = await extractModelSignature(model.file, modelInfo);
+        return { file: model.file, modelInfo, signature };
+      })
+    );
+    
+    // Build lookup map for signatures
+    const signatureMap = new Map<string, { modelInfo: string; signature: string | null }>();
+    for (const result of signatureResults) {
+      if (result.status === 'fulfilled') {
+        signatureMap.set(result.value.file, { 
+          modelInfo: result.value.modelInfo, 
+          signature: result.value.signature 
+        });
+      }
+    }
+
     // Show models with enhanced signatures
     if (ormModels.length > 0) {
       content += '### ORM / Database Models\n\n';
       for (const model of ormModels.slice(0, 15)) {
         const relPath = makeRelativePath(model.file, workspaceRoot.fsPath);
-        const modelInfo = model.message.replace('Data model: ', '').replace('ORM model: ', '');
-        // Try to extract signature from file
-        const signature = await extractModelSignature(model.file, modelInfo);
-        if (signature) {
-          content += `**\`${relPath}\`**: \`${signature}\`\n\n`;
+        const data = signatureMap.get(model.file);
+        if (data?.signature) {
+          content += `**\`${relPath}\`**: \`${data.signature}\`\n\n`;
         } else {
+          const modelInfo = model.message.replace('Data model: ', '').replace('ORM model: ', '');
           content += `**\`${relPath}\`**: ${modelInfo}\n\n`;
         }
       }
@@ -807,11 +844,11 @@ async function generateMapFile(
       content += '### Pydantic / Data Classes\n\n';
       for (const model of dataClasses.slice(0, 15)) {
         const relPath = makeRelativePath(model.file, workspaceRoot.fsPath);
-        const modelInfo = model.message.replace('Data model: ', '');
-        const signature = await extractModelSignature(model.file, modelInfo);
-        if (signature) {
-          content += `**\`${relPath}\`**: \`${signature}\`\n\n`;
+        const data = signatureMap.get(model.file);
+        if (data?.signature) {
+          content += `**\`${relPath}\`**: \`${data.signature}\`\n\n`;
         } else {
+          const modelInfo = model.message.replace('Data model: ', '');
           content += `**\`${relPath}\`**: ${modelInfo}\n\n`;
         }
       }
@@ -821,11 +858,11 @@ async function generateMapFile(
       content += '### TypeScript Interfaces & Types\n\n';
       for (const model of interfaces.slice(0, 15)) {
         const relPath = makeRelativePath(model.file, workspaceRoot.fsPath);
-        const modelInfo = model.message.replace('Data model: ', '');
-        const signature = await extractModelSignature(model.file, modelInfo);
-        if (signature) {
-          content += `**\`${relPath}\`**: \`${signature}\`\n\n`;
+        const data = signatureMap.get(model.file);
+        if (data?.signature) {
+          content += `**\`${relPath}\`**: \`${data.signature}\`\n\n`;
         } else {
+          const modelInfo = model.message.replace('Data model: ', '');
           content += `**\`${relPath}\`**: ${modelInfo}\n\n`;
         }
       }
@@ -895,9 +932,20 @@ async function generateMapFile(
       .slice(0, 40)
       .map(([file]) => file);
 
-    for (const file of sortedFiles) {
+    // Extract symbols in parallel for all files (much faster than sequential)
+    const symbolExtractionResults = await Promise.allSettled(
+      sortedFiles.map(file => 
+        extractFileSymbolsWithSignatures(file, allLinks, workspaceRoot.fsPath, grammars)
+          .then(symbols => ({ file, symbols }))
+      )
+    );
+    
+    for (const result of symbolExtractionResults) {
+      if (result.status !== 'fulfilled') continue;
+      const { file, symbols } = result.value;
+      if (symbols.length === 0) continue;
+      
       const relPath = makeRelativePath(file, workspaceRoot.fsPath);
-      const symbols = await extractFileSymbolsWithSignatures(file, allLinks, workspaceRoot.fsPath, grammars);
 
       if (symbols.length === 0) continue;
 
@@ -1089,6 +1137,28 @@ async function extractModelSignature(filePath: string, modelName: string): Promi
             return `${classLine.replace('{', '').trim()} { ${fields.join('; ')}${fields.length >= 3 ? '; ...' : ''} }`;
           }
           return classLine.replace('{', '').trim();
+        }
+      }
+    } else if (ext === '.prisma') {
+      // Prisma schema files
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (line.match(new RegExp(`model\\s+${cleanName}\\s*{`))) {
+          const fields: string[] = [];
+          for (let j = i + 1; j < Math.min(i + 15, lines.length); j++) {
+            const fieldMatch = lines[j].match(/^\s+(\w+)\s+(String|Int|Float|Boolean|DateTime|Json|Bytes|BigInt|\w+)(\?)?(\[\])?/);
+            if (fieldMatch) {
+              const nullable = fieldMatch[3] ? '?' : '';
+              const array = fieldMatch[4] ? '[]' : '';
+              fields.push(`${fieldMatch[1]}: ${fieldMatch[2]}${nullable}${array}`);
+              if (fields.length >= 4) break;
+            }
+            if (lines[j].trim() === '}') break;
+          }
+          if (fields.length > 0) {
+            return `model ${cleanName} { ${fields.join(', ')}${fields.length >= 4 ? ', ...' : ''} }`;
+          }
+          return `model ${cleanName}`;
         }
       }
     }
@@ -1828,8 +1898,21 @@ function findDependencyChains(
   }
   
   // Sort by depth (longest first), then by start path for determinism
+  // Prefer chains that end at "leaf" files (files with low out-degree)
+  const outDegree = new Map<string, number>();
+  for (const link of allLinks) {
+    if (link.source === link.target) continue;
+    outDegree.set(link.source, (outDegree.get(link.source) || 0) + 1);
+  }
+  
   const sortedChains = chains
-    .sort((a, b) => b.depth - a.depth || a.startPath.localeCompare(b.startPath))
+    .map(c => {
+      // Score chains by: length + bonus if ending at a leaf (low out-degree)
+      const lastFile = c.chain[c.chain.length - 1];
+      const isLeaf = (outDegree.get(lastFile) || 0) <= 1;
+      return { ...c, score: c.depth + (isLeaf ? 1 : 0) };
+    })
+    .sort((a, b) => b.score - a.score || b.depth - a.depth || a.startPath.localeCompare(b.startPath))
     .slice(0, 5); // Max 5 chains
   
   // If we have fewer than 3 chains, try to find more by exploring other starting points
@@ -1860,10 +1943,14 @@ function findDependencyChains(
         const chainStr = finalChain.join(' → ');
         if (!seenChains.has(chainStr)) {
           seenChains.add(chainStr);
+          // Calculate score for fallback chains
+          const lastFile = finalChain[finalChain.length - 1];
+          const isLeaf = (outDegree.get(lastFile) || 0) <= 1;
           sortedChains.push({
             chain: finalChain,
             depth: finalChain.length,
-            startPath: startFile
+            startPath: startFile,
+            score: finalChain.length + (isLeaf ? 1 : 0)
           });
         }
       }
@@ -1948,7 +2035,16 @@ function findModuleClusters(
       .slice(0, 7); // Max 8 files per cluster
     
     if (related.length >= 1) {
-      const clusterFiles = dedupe([file, ...related.map(([f]) => f)].map(f => makeRelativePath(f, workspaceRoot))).slice(0, 8);
+      // Filter out config files from clusters - they pollute feature groupings
+      const rawFiles = [file, ...related.map(([f]) => f)].map(f => makeRelativePath(f, workspaceRoot));
+      const clusterFiles = dedupe(rawFiles.filter(f => !isConfigOrToolingFile(f))).slice(0, 8);
+      
+      // Skip if all files were configs
+      if (clusterFiles.length < 2) {
+        processed.add(file);
+        related.forEach(([f]) => processed.add(f));
+        continue;
+      }
       
       // Collect all shared importers across the cluster
       const allSharedImporters = new Set<string>();
@@ -2002,6 +2098,18 @@ function findModuleClusters(
     }
   }
   
+  // Deduplicate cluster names by appending centroid filename or numbering
+  const nameCounts = new Map<string, number>();
+  for (const cluster of sortedClusters) {
+    const count = nameCounts.get(cluster.name) || 0;
+    if (count > 0) {
+      // Use the first file's basename as a distinguisher
+      const centroid = path.basename(cluster.files[0], path.extname(cluster.files[0]));
+      cluster.name = `${cluster.name} (${centroid})`;
+    }
+    nameCounts.set(cluster.name, count + 1);
+  }
+  
   return sortedClusters.slice(0, 7); // Max 7 clusters
 }
 
@@ -2019,6 +2127,8 @@ function buildDirectoryClusters(
   for (const file of allFiles) {
     if (processedFiles.has(file)) continue;
     const relPath = makeRelativePath(file, workspaceRoot);
+    // Skip config files in directory clusters too
+    if (isConfigOrToolingFile(relPath)) continue;
     const dir = path.dirname(relPath);
     if (!dirGroups.has(dir)) {
       dirGroups.set(dir, []);
@@ -2032,7 +2142,7 @@ function buildDirectoryClusters(
     .slice(0, 3)
     .map(([dir, files]) => ({
       name: path.basename(dir) || 'Root',
-      files: files.sort().slice(0, 8),
+      files: files.filter(f => !isConfigOrToolingFile(f)).sort().slice(0, 8),
       reason: `Files in \`${dir}/\` directory`,
       sharedImporters: [],
       score: files.length
@@ -2630,6 +2740,27 @@ function isStructuralAppFile(file: string, workspaceRoot: string): boolean {
   return true;
 }
 
+/**
+ * Check if a file is a config/tooling file (not runtime code).
+ * Used to filter configs from feature clusters and categorize entry points.
+ */
+function isConfigOrToolingFile(filePath: string): boolean {
+  const pathLower = filePath.toLowerCase();
+  const baseName = path.basename(filePath, path.extname(filePath)).toLowerCase();
+  
+  return pathLower.includes('config') || pathLower.includes('.config') ||
+         baseName.includes('jest') || baseName.includes('webpack') ||
+         baseName.includes('vite') || baseName.includes('tailwind') ||
+         baseName.includes('eslint') || baseName.includes('prettier') ||
+         baseName.includes('tsconfig') || baseName.includes('babel') ||
+         baseName.includes('postcss') || baseName.includes('rollup') ||
+         baseName.startsWith('next.') || baseName.startsWith('vitest.') ||
+         baseName === 'package' || baseName === 'package-lock' ||
+         baseName === 'tsconfig' || baseName === 'jsconfig' ||
+         pathLower.endsWith('.config.js') || pathLower.endsWith('.config.ts') ||
+         pathLower.endsWith('.config.mjs') || pathLower.endsWith('.config.cjs');
+}
+
 async function extractFileSymbols(
   filePath: string,
   allLinks: DependencyLink[],
@@ -2735,13 +2866,16 @@ function getSymbolCallers(symbolName: string, filePath: string, allLinks: Depend
       const normalizedTarget = l.target.replace(/\\/g, '/');
       if (normalizedTarget !== normalizedFilePath) return false;
       
-      // Check if this import references the symbol:
+      // Check if this import could reference the symbol:
       // 1. Explicit symbol import (import { symbolName } from ...)
       // 2. Wildcard import (import * as X from ...) - counts as importing all
-      // 3. Default/namespace import - check if symbols array is empty or matches
+      // 3. Default import with matching name
+      // 4. Empty symbols = import entire module (could use any export)
+      // 5. Type imports often don't track individual symbols
       const hasSymbol = l.symbols.includes(symbolName) || 
                        l.symbols.includes('*') ||
-                       (l.symbols.length === 0 && l.type === 'import');
+                       l.symbols.length === 0 ||
+                       l.type === 'import'; // Any file that imports the target may use the symbol
       if (!hasSymbol) return false;
       
       // Filter out third-party and test files from callers
@@ -2752,15 +2886,12 @@ function getSymbolCallers(symbolName: string, filePath: string, allLinks: Depend
   // Dedupe by source file and return with relative path context
   const uniqueCallers = dedupe(callers, l => l.source);
   
+  // Sort for determinism
   return uniqueCallers
+    .sort((a, b) => a.source.localeCompare(b.source))
     .slice(0, 4)
     .map(l => {
-      const basename = path.basename(l.source, path.extname(l.source));
-      // If the link has explicit symbols, show which symbol references this
-      if (l.symbols.length > 0 && l.symbols[0] !== '*' && l.symbols[0] !== symbolName) {
-        return `${basename}`;
-      }
-      return basename;
+      return path.basename(l.source, path.extname(l.source));
     });
 }
 

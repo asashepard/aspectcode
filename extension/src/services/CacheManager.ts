@@ -440,7 +440,8 @@ export class CacheManager {
       '**/*.{py,ts,tsx,js,jsx,mjs,cjs,java,cpp,c,h,hpp,cs,go,rs}'
     );
     
-    const excludePattern = '{**/node_modules/**,**/.git/**,**/dist/**,**/build/**,**/__pycache__/**,**/.venv/**,**/venv/**,**/e2e/**,**/playwright/**,**/cypress/**,**/target/**}';
+    // Comprehensive exclusion pattern for build outputs, dependencies, and virtual environments
+    const excludePattern = '**/{node_modules,.git,dist,build,__pycache__,.venv,venv,env,site-packages,.pytest_cache,.mypy_cache,.tox,htmlcov,coverage,.eggs,target,e2e,playwright,cypress,.next,.turbo,.cache}/**';
     
     const uris = await vscode.workspace.findFiles(pattern, excludePattern, 10000);
     

@@ -165,17 +165,29 @@ class RepositoryIndexer:
             except Exception as e:
                 logger.warning(f"Git file discovery failed, falling back to filesystem: {e}")
         
-        # Fall back to filesystem walk
+        # Fall back to filesystem walk with directory pruning
         logger.info("Using filesystem walk for file discovery")
         
-        for item in root_path.rglob("*"):
-            if item.is_file():
+        # Directories to skip entirely (prune from walk)
+        skip_dirs = {
+            '.git', 'node_modules', '.venv', 'venv', 'env', '__pycache__',
+            'site-packages', 'dist-packages', '.pytest_cache', '.mypy_cache',
+            '.tox', 'htmlcov', 'coverage', '.eggs', 'build', 'dist', 'target',
+            '.next', '.turbo', '.cache', 'e2e', 'playwright', 'cypress'
+        }
+        
+        for dirpath, dirnames, filenames in os.walk(root_path):
+            # Prune directories in-place to avoid walking into them
+            dirnames[:] = [d for d in dirnames if d not in skip_dirs and not d.endswith('.egg-info')]
+            
+            for filename in filenames:
+                full_path = Path(dirpath) / filename
                 try:
-                    rel_path = str(item.relative_to(root_path)).replace(os.sep, '/')
+                    rel_path = str(full_path.relative_to(root_path)).replace(os.sep, '/')
                     if self._should_include_file(rel_path, request):
-                        files.append(self._create_file_entry(item, rel_path))
+                        files.append(self._create_file_entry(full_path, rel_path))
                 except (ValueError, OSError) as e:
-                    logger.debug(f"Skipping file {item}: {e}")
+                    logger.debug(f"Skipping file {full_path}: {e}")
                     continue
         
         return files
@@ -201,11 +213,23 @@ class RepositoryIndexer:
     
     def _should_include_file(self, rel_path: str, request: IndexRequest) -> bool:
         """Check if file should be included in index."""
-        # Skip common ignore patterns
+        # Directories to always skip (check path components)
+        skip_dirs = {
+            '.git', 'node_modules', '.venv', 'venv', 'env', '__pycache__',
+            'site-packages', 'dist-packages', '.pytest_cache', '.mypy_cache',
+            '.tox', 'htmlcov', 'coverage', '.eggs', 'build', 'dist', 'target',
+            '.next', '.turbo', '.cache', 'e2e', 'playwright', 'cypress'
+        }
+        
+        # Quick check: if any path component is in skip_dirs, exclude it
+        path_parts = rel_path.replace('\\', '/').split('/')
+        for part in path_parts[:-1]:  # Check all directories (not the filename)
+            if part in skip_dirs or part.endswith('.egg-info'):
+                return False
+        
+        # Skip common ignore file patterns
         ignore_patterns = [
-            ".git/*", "node_modules/*", ".venv/*", "venv/*", "__pycache__/*",
-            "*.pyc", "*.pyo", "*.egg-info/*", "dist/*", "build/*", 
-            ".pytest_cache/*", ".mypy_cache/*", ".coverage", "coverage.xml",
+            "*.pyc", "*.pyo", ".coverage", "coverage.xml",
             "*.log", "*.tmp", "*.swp", ".DS_Store", "Thumbs.db"
         ]
         
@@ -213,9 +237,10 @@ class RepositoryIndexer:
         if request.exclude_patterns:
             ignore_patterns.extend(request.exclude_patterns)
         
-        # Check against ignore patterns
+        # Check against ignore patterns (file-level only now)
+        filename = path_parts[-1] if path_parts else rel_path
         for pattern in ignore_patterns:
-            if fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(rel_path, f"*/{pattern}"):
+            if fnmatch.fnmatch(filename, pattern) or fnmatch.fnmatch(rel_path, pattern):
                 return False
         
         # Check include patterns if specified

@@ -180,39 +180,38 @@ async function discoverWorkspaceSourceFiles(): Promise<string[]> {
   }
   
   const allFiles: string[] = [];
+  const seenPaths = new Set<string>();
   
-  // Common source code file patterns
-  const patterns = [
-    '**/*.py',
-    '**/*.ts', '**/*.tsx',
-    '**/*.js', '**/*.jsx', '**/*.mjs', '**/*.cjs',
-    '**/*.java',
-    '**/*.cpp', '**/*.c', '**/*.hpp', '**/*.h',
-    '**/*.cs',
-    '**/*.go',
-    '**/*.rs'
-  ];
+  // Use single combined pattern for much faster discovery
+  const combinedPattern = '**/*.{py,ts,tsx,js,jsx,mjs,cjs,java,cpp,c,hpp,h,cs,go,rs}';
+  // VS Code findFiles uses GlobPattern - use curly braces for alternatives
+  const excludePattern = '**/{node_modules,.git,__pycache__,build,dist,target,e2e,playwright,cypress,.venv,venv,.next,coverage,site-packages,.pytest_cache,.mypy_cache,.tox,htmlcov,eggs,*.egg-info,.eggs}/**';
   
-  for (const pattern of patterns) {
-    try {
-      const files = await vscode.workspace.findFiles(
-        pattern,
-        '**/node_modules/**,**/.git/**,**/__pycache__/**,**/build/**,**/dist/**,**/target/**,**/e2e/**,**/playwright/**,**/cypress/**,**/.venv/**,**/venv/**',
-        500 // Limit to prevent performance issues
-      );
-      
-      for (const file of files) {
-        const filePath = file.fsPath;
-        if (!allFiles.includes(filePath)) {
-          allFiles.push(filePath);
-        }
+  try {
+    const files = await vscode.workspace.findFiles(
+      combinedPattern,
+      excludePattern,
+      5000 // Higher limit for large repos
+    );
+    
+    for (const file of files) {
+      const filePath = file.fsPath;
+      if (!seenPaths.has(filePath)) {
+        seenPaths.add(filePath);
+        allFiles.push(filePath);
       }
-    } catch (error) {
-      outputChannel?.appendLine(`Error finding files with pattern ${pattern}: ${error}`);
     }
+  } catch (error) {
+    outputChannel?.appendLine(`Error finding files: ${error}`);
   }
   
   outputChannel?.appendLine(`[DiscoverFiles] Found ${allFiles.length} source files in workspace`);
+  
+  // Sanity check: warn if too many files (likely missing exclusions)
+  if (allFiles.length > 2000) {
+    outputChannel?.appendLine(`[DiscoverFiles] WARNING: Large file count (${allFiles.length}) may indicate missing exclusion patterns`);
+  }
+  
   return allFiles;
 }
 
@@ -1195,7 +1194,7 @@ async function indexRepository(force: boolean = false, state?: AspectCodeState) 
         root: root,
         force_reindex: force,
         include_patterns: ['**/*.py', '**/*.ts', '**/*.tsx', '**/*.js', '**/*.jsx'],
-        exclude_patterns: ['.git/**', 'node_modules/**', '__pycache__/**', '*.pyc']
+        exclude_patterns: ['.git/**', 'node_modules/**', '__pycache__/**', '*.pyc', '.venv/**', 'venv/**', 'env/**', 'site-packages/**', '.pytest_cache/**', '.mypy_cache/**', '.tox/**', 'build/**', 'dist/**', 'target/**', '.next/**', 'coverage/**', 'htmlcov/**', '*.egg-info/**', '.eggs/**']
       };
 
       // Phase 3: Sending to server (30%)
@@ -1214,16 +1213,20 @@ async function indexRepository(force: boolean = false, state?: AspectCodeState) 
         setTimeout(() => reject(new Error('Indexing timeout - repository may be too large')), timeoutMs);
       });
       
+      const fetchStartTime = Date.now();
+      
       const fetchPromise = (async () => {
         const headers = await getHeaders();
-        return fetch(apiUrl + '/index', {
+        const response = await fetch(apiUrl + '/index', {
           method: 'POST',
           headers,
           body: JSON.stringify(payload)
         });
+        return response;
       })();
 
       const res = await Promise.race([fetchPromise, timeoutPromise]) as Response;
+      outputChannel?.appendLine(`[indexRepository] Server responded in ${Date.now() - fetchStartTime}ms`);
 
       if (!res.ok) {
         handleHttpError(res.status, res.statusText);
@@ -1404,16 +1407,20 @@ async function examineFullRepository(state?: AspectCodeState, context?: vscode.E
         setTimeout(() => reject(new Error('Examination timeout - repository may be too large or complex')), timeoutMs);
       });
 
+      const examFetchStart = Date.now();
+      
       const fetchPromise = (async () => {
         const headers = await getHeaders();
-        return fetch(apiUrl + '/validate_tree_sitter', {
+        const response = await fetch(apiUrl + '/validate_tree_sitter', {
           method: 'POST',
           headers,
           body: JSON.stringify(payload)
         });
+        return response;
       })();
 
       const res = await Promise.race([fetchPromise, timeoutPromise]) as Response;
+      outputChannel?.appendLine(`[examineFullRepository] Server responded in ${Date.now() - examFetchStart}ms (${filesData.length} files)`);
 
       if (!res.ok) {
         handleHttpError(res.status, res.statusText);
@@ -2352,6 +2359,7 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('aspectcode.index', async () => {
       try {
+        const indexStartTime = Date.now();
         outputChannel?.appendLine('=== INDEX: Starting repository indexing ===');
         
         // Clear all existing state and start fresh
@@ -2364,24 +2372,28 @@ export async function activate(context: vscode.ExtensionContext) {
         });
         
         // Index the entire repository without caching
+        const t1 = Date.now();
         await indexRepository(true, state); // force = true to bypass cache
-        
-        outputChannel?.appendLine('=== INDEX: Repository indexing complete ===');
+        outputChannel?.appendLine(`=== INDEX: Repository indexed in ${Date.now() - t1}ms ===`);
         
         // Initialize incremental indexer after successful index
         if (incrementalIndexer) {
           try {
             outputChannel?.appendLine('=== INDEX: Initializing incremental indexer ===');
+            const t2 = Date.now();
             const allFiles = await discoverWorkspaceSourceFiles();
+            outputChannel?.appendLine(`=== INDEX: Discovered ${allFiles.length} files in ${Date.now() - t2}ms ===`);
+            
+            const t3 = Date.now();
             await incrementalIndexer.initialize(allFiles);
-            outputChannel?.appendLine('=== INDEX: Incremental indexer ready ===');
+            outputChannel?.appendLine(`=== INDEX: Incremental indexer initialized in ${Date.now() - t3}ms ===`);
           } catch (error) {
             outputChannel?.appendLine(`INDEX: Incremental indexer initialization failed: ${error}`);
             // Continue anyway - incremental indexing is optional
           }
         }
         
-        // vscode.window.showInformationMessage('Repository indexed successfully');
+        outputChannel?.appendLine(`=== INDEX: Total time ${Date.now() - indexStartTime}ms ===`);
         
       } catch (error) {
         outputChannel?.appendLine(`INDEX ERROR: ${error}`);

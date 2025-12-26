@@ -141,18 +141,27 @@ export class IncrementalIndexer {
       const links = await this.dependencyAnalyzer.analyzeDependencies(workspaceFiles);
       this.buildDependencyMaps(links);
       
-      // 2. Create snapshots for all files (lightweight - just metadata)
+      // 2. Create snapshots for all files in parallel batches (much faster than sequential)
       this.outputChannel.appendLine('[IncrementalIndexer] Creating file snapshots...');
+      const snapshotStartTime = Date.now();
       let snapshotCount = 0;
-      for (const file of workspaceFiles) {
-        try {
-          await this.createFileSnapshot(file);
-          snapshotCount++;
-        } catch (error) {
-          // Continue on individual file errors
-          this.outputChannel.appendLine(`[IncrementalIndexer] Snapshot failed for ${path.basename(file)}: ${error}`);
+      const BATCH_SIZE = 100;
+      
+      for (let i = 0; i < workspaceFiles.length; i += BATCH_SIZE) {
+        const batch = workspaceFiles.slice(i, i + BATCH_SIZE);
+        const results = await Promise.allSettled(
+          batch.map(file => this.createFileSnapshot(file))
+        );
+        
+        for (const result of results) {
+          if (result.status === 'fulfilled') {
+            snapshotCount++;
+          }
         }
       }
+      
+      const snapshotDuration = Date.now() - snapshotStartTime;
+      this.outputChannel.appendLine(`[IncrementalIndexer] Snapshots: ${snapshotCount}/${workspaceFiles.length} in ${snapshotDuration}ms`);
       
       const duration = Date.now() - startTime;
       this.outputChannel.appendLine(
@@ -735,8 +744,9 @@ export class IncrementalIndexer {
   private async createFileSnapshot(filePath: string): Promise<FileSnapshot> {
     try {
       const uri = vscode.Uri.file(filePath);
-      const document = await vscode.workspace.openTextDocument(uri);
-      const content = document.getText();
+      // Use fs.readFile instead of openTextDocument - 10-50x faster for bulk reads
+      const rawContent = await vscode.workspace.fs.readFile(uri);
+      const content = Buffer.from(rawContent).toString('utf-8');
       const ext = path.extname(filePath);
       
       // Extract symbols via simple regex (lightweight, fast)
