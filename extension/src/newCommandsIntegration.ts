@@ -13,18 +13,24 @@ import { AspectCodeState } from './state';
 import { detectAssistants, AssistantId } from './assistants/detection';
 import { generateInstructionFiles } from './assistants/instructions';
 import { addAlignmentEntry } from './assistants/kb';
+import { getBaseUrl } from './http';
 import type { ScoreResult } from './scoring/scoreEngine';
 
 /**
  * Activate the new engine-based commands.
  * Call this from the main extension activate function.
  */
-export function activateNewCommands(context: vscode.ExtensionContext, state: AspectCodeState): void {
-  const outputChannel = vscode.window.createOutputChannel('Aspect Code Engine');
+export function activateNewCommands(
+  context: vscode.ExtensionContext,
+  state: AspectCodeState,
+  outputChannel?: vscode.OutputChannel
+): void {
+  // Reuse the main extension output channel so users only need to watch one.
+  const channel = outputChannel ?? vscode.window.createOutputChannel('Aspect Code');
   const commands = new AspectCodeCommands(context, state);
   const codeActionProvider = new AspectCodeCodeActionProvider(commands);
-  const smartValidationService = new SmartValidationService(outputChannel);
-  const promptGenerationService = new PromptGenerationService(outputChannel);
+  const smartValidationService = new SmartValidationService(channel);
+  const promptGenerationService = new PromptGenerationService(channel);
 
   // Register commands
   context.subscriptions.push(
@@ -42,13 +48,13 @@ export function activateNewCommands(context: vscode.ExtensionContext, state: Asp
       return await handleProposeFixes(promptGenerationService, state);
     }),
     vscode.commands.registerCommand('aspectcode.alignIssue', async () => {
-      return await handleAlignIssue(promptGenerationService, state, outputChannel);
+      return await handleAlignIssue(promptGenerationService, state, channel);
     }),
     vscode.commands.registerCommand('aspectcode.configureAssistants', async () => {
-      return await handleConfigureAssistants(context, state, commands, outputChannel);
+      return await handleConfigureAssistants(context, state, commands, channel);
     }),
     vscode.commands.registerCommand('aspectcode.generateInstructionFiles', async () => {
-      return await handleGenerateInstructionFiles(state, commands, outputChannel, context);
+      return await handleGenerateInstructionFiles(state, commands, channel, context);
     })
   );
 
@@ -472,6 +478,12 @@ async function handleConfigureAssistants(
   outputChannel: vscode.OutputChannel
 ): Promise<void> {
   try {
+    const perfEnabled = vscode.workspace.getConfiguration().get<boolean>('aspectcode.devLogs', true);
+    const tStart = Date.now();
+    if (perfEnabled) {
+      outputChannel.appendLine('[Perf][Assistants][configure] start');
+    }
+
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
       vscode.window.showErrorMessage('No workspace folder open');
@@ -481,7 +493,11 @@ async function handleConfigureAssistants(
     const workspaceRoot = workspaceFolders[0].uri;
 
     // Detect existing assistants
+    const tDetect = Date.now();
     const detected = await detectAssistants(workspaceRoot);
+    if (perfEnabled) {
+      outputChannel.appendLine(`[Perf][Assistants][configure] detectAssistants tookMs=${Date.now() - tDetect}`);
+    }
     outputChannel.appendLine(`[Assistants] Detected: ${Array.from(detected).join(', ') || 'none'}`);
 
     // Show QuickPick for selection
@@ -523,10 +539,18 @@ async function handleConfigureAssistants(
       // }
     ];
 
+    if (perfEnabled) {
+      outputChannel.appendLine('[Perf][Assistants][configure] showing QuickPick');
+    }
+    const tPick = Date.now();
     const selected = await vscode.window.showQuickPick(items, {
       canPickMany: true,
       placeHolder: 'Select AI assistants to configure Aspect Code for'
     });
+
+    if (perfEnabled) {
+      outputChannel.appendLine(`[Perf][Assistants][configure] QuickPick resolved tookMs=${Date.now() - tPick} pickedCount=${selected?.length ?? 0}`);
+    }
 
     if (!selected) {
       return; // User cancelled
@@ -536,12 +560,16 @@ async function handleConfigureAssistants(
 
     // Update workspace settings in parallel
     const config = vscode.workspace.getConfiguration('aspectcode.assistants');
+    const tCfg = Date.now();
     await Promise.all([
       config.update('copilot', selectedIds.has('copilot'), vscode.ConfigurationTarget.Workspace),
       config.update('cursor', selectedIds.has('cursor'), vscode.ConfigurationTarget.Workspace),
       config.update('claude', selectedIds.has('claude'), vscode.ConfigurationTarget.Workspace),
       config.update('other', selectedIds.has('other'), vscode.ConfigurationTarget.Workspace)
     ]);
+    if (perfEnabled) {
+      outputChannel.appendLine(`[Perf][Assistants][configure] config.update tookMs=${Date.now() - tCfg}`);
+    }
     // TEMPORARILY DISABLED: ALIGNMENTS.json feature
     // await config.update('alignments', selectedIds.has('alignments'), vscode.ConfigurationTarget.Workspace);
 
@@ -557,7 +585,25 @@ async function handleConfigureAssistants(
       }
 
       // Generate files directly without extra confirmation
-      await vscode.commands.executeCommand('aspectcode.generateInstructionFiles');
+      if (perfEnabled) {
+        outputChannel.appendLine('[Perf][Assistants][configure] executing generateInstructionFiles');
+      }
+      // Don't block the UI on potentially long-running EXAMINE/KB generation.
+      // Users can watch progress in the "Aspect Code" output channel.
+      void vscode.commands.executeCommand('aspectcode.generateInstructionFiles').then(
+        () => {
+          if (perfEnabled) {
+            outputChannel.appendLine('[Perf][Assistants][configure] generateInstructionFiles resolved');
+          }
+        },
+        (err) => {
+          outputChannel.appendLine(`[Assistants] generateInstructionFiles failed: ${err}`);
+        }
+      );
+    }
+
+    if (perfEnabled) {
+      outputChannel.appendLine(`[Perf][Assistants][configure] end tookMs=${Date.now() - tStart}`);
     }
   } catch (error) {
     outputChannel.appendLine(`[Assistants] Error: ${error}`);
@@ -577,6 +623,12 @@ async function handleGenerateInstructionFiles(
   context?: vscode.ExtensionContext
 ): Promise<void> {
   try {
+    const perfEnabled = vscode.workspace.getConfiguration().get<boolean>('aspectcode.devLogs', true);
+    const tStart = Date.now();
+    if (perfEnabled) {
+      outputChannel.appendLine(`[Perf][Instructions][cmd] start findingsCount=${state.s.findings?.length ?? 0}`);
+    }
+
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
       vscode.window.showErrorMessage('No workspace folder open');
@@ -589,6 +641,9 @@ async function handleGenerateInstructionFiles(
     let findings = state.s.findings;
     if (!findings || findings.length === 0) {
       outputChannel.appendLine('[Instructions] No findings exist, running INDEX and EXAMINE first...');
+      if (perfEnabled) {
+        outputChannel.appendLine('[Perf][Instructions][cmd] triggering INDEX+EXAMINE');
+      }
       
       // Show progress notification
       await vscode.window.withProgress({
@@ -596,11 +651,27 @@ async function handleGenerateInstructionFiles(
         title: 'Aspect Code',
         cancellable: false
       }, async (progress) => {
-        progress.report({ message: 'Indexing repository...' });
-        await vscode.commands.executeCommand('aspectcode.index');
+        const baseUrl = getBaseUrl();
+        const isLocalServer = /(^|\/\/)(localhost|127\.0\.0\.1)(:|\/|$)/i.test(baseUrl);
+
+        // IMPORTANT: /index requires the repo to exist on the server filesystem.
+        // For remote servers (default), it cannot see your local paths and may take ~60s to fail.
+        if (isLocalServer) {
+          const tIndex = Date.now();
+          progress.report({ message: 'Indexing repository...' });
+          await vscode.commands.executeCommand('aspectcode.index');
+          outputChannel.appendLine(`[Perf][Instructions][cmd] INDEX tookMs=${Date.now() - tIndex}`);
+        } else {
+          outputChannel.appendLine(`[Instructions] Skipping INDEX (serverBaseUrl=${baseUrl} cannot access local filesystem)`);
+        }
         
+        const tExam = Date.now();
         progress.report({ message: 'Running examination...' });
-        await vscode.commands.executeCommand('aspectcode.examine');
+        // Remote validation can be slow. For instruction generation, structure-only is usually sufficient
+        // (entry points, data models, external integrations) and is typically faster.
+        const examineModes = isLocalServer ? undefined : ['structure'];
+        await vscode.commands.executeCommand('aspectcode.examine', { modes: examineModes });
+        outputChannel.appendLine(`[Perf][Instructions][cmd] EXAMINE tookMs=${Date.now() - tExam}`);
       });
       
       // Re-fetch findings after examination
@@ -643,7 +714,11 @@ async function handleGenerateInstructionFiles(
     }
 
     // Generate instruction files
+    const tGen = Date.now();
     await generateInstructionFiles(workspaceRoot, state, scoreResult, outputChannel, context);
+    if (perfEnabled) {
+      outputChannel.appendLine(`[Perf][Instructions][cmd] generateInstructionFiles tookMs=${Date.now() - tGen}`);
+    }
 
     // Save cache after generating files (ensures cache is in sync with KB)
     try {
@@ -653,7 +728,12 @@ async function handleGenerateInstructionFiles(
       
       if (cacheManager && incrementalIndexer) {
         outputChannel.appendLine('[Cache] Saving cache after KB generation...');
-        const signatures = await cacheManager.buildFileSignatures();
+        // IMPORTANT: Avoid hashing the entire workspace here (can take 30-60s on Windows).
+        // Prefer reusing existing cache signatures when available.
+        const existingCache = cacheManager.getCache();
+        const signatures = existingCache
+          ? new Map(Object.entries(existingCache.files))
+          : new Map();
         const cachedFindings = cacheManager.findingsToCache(state.s.findings || []);
         const dependencies = cacheManager.dependenciesToCache(incrementalIndexer.getReverseDependencyGraph());
         const lastValidate = state.s.lastValidate ? {
@@ -661,6 +741,9 @@ async function handleGenerateInstructionFiles(
           fixable: state.s.lastValidate.fixable,
           tookMs: state.s.lastValidate.tookMs
         } : undefined;
+        if (signatures.size === 0) {
+          outputChannel.appendLine('[Cache] No existing cache signatures available; skipping signatures update after KB generation');
+        }
         await cacheManager.saveCache(signatures, cachedFindings, dependencies, lastValidate);
         outputChannel.appendLine(`[Cache] Saved ${cachedFindings.length} findings to cache`);
       } else {
@@ -683,6 +766,10 @@ async function handleGenerateInstructionFiles(
     // }
 
     vscode.window.showInformationMessage('Aspect Code knowledge base and assistant instruction files have been updated.');
+
+    if (perfEnabled) {
+      outputChannel.appendLine(`[Perf][Instructions][cmd] end tookMs=${Date.now() - tStart}`);
+    }
   } catch (error) {
     outputChannel.appendLine(`[Instructions] Error: ${error}`);
     vscode.window.showErrorMessage(`Failed to generate instruction files: ${error}`);

@@ -1162,6 +1162,20 @@ async function indexRepository(force: boolean = false, state?: AspectCodeState) 
   }
 
   const apiUrl = getBaseUrl();
+  const isLocalServer = /(^|\/\/)(localhost|127\.0\.0\.1)(:|\/|$)/i.test(apiUrl);
+
+  // /index requires that the repo path exists on the server filesystem.
+  // When apiUrl points to a remote server, it cannot access local paths and will often take ~60s to fail.
+  if (!isLocalServer) {
+    outputChannel?.appendLine(`[indexRepository] Skipping INDEX for remote serverBaseUrl=${apiUrl} (cannot access local filesystem path ${root})`);
+    vscode.window.showWarningMessage(
+      'Aspect Code INDEX requires a local server. Configure aspectcode.serverBaseUrl to a local endpoint (e.g. http://localhost:PORT) or run EXAMINE only.'
+    );
+    if (state) {
+      state.update({ busy: false, error: `Index skipped: remote server cannot access local repo path (${apiUrl})` });
+    }
+    return;
+  }
 
   try {
     outputChannel?.appendLine(`=== ${force ? 'Re-indexing' : 'Indexing'} repository: ${root} ===`);
@@ -1239,6 +1253,10 @@ async function indexRepository(force: boolean = false, state?: AspectCodeState) 
       const result: any = await res.json();
       outputChannel?.appendLine(`Index result: ${JSON.stringify(result, null, 2)}`);
 
+      if (typeof result?.snapshot_id === 'string' && result.snapshot_id === 'error-indexing-failed') {
+        throw new Error('Server failed to index repository (snapshot_id=error-indexing-failed)');
+      }
+
       // Phase 6: Finalizing (100%)
       progress.report({ increment: 10, message: 'Finalizing indexing...' });
       sendProgressToPanel(state, 'indexing', 100, 'Indexing complete');
@@ -1292,8 +1310,13 @@ async function indexRepository(force: boolean = false, state?: AspectCodeState) 
   }
 }
 
-async function examineFullRepository(state?: AspectCodeState, context?: vscode.ExtensionContext) {
+async function examineFullRepository(
+  state?: AspectCodeState,
+  context?: vscode.ExtensionContext,
+  modesOverride?: string[]
+) {
   outputChannel?.appendLine(`[examineFullRepository] Called with state: ${state ? 'YES' : 'NO'}`);
+  const perfEnabled = vscode.workspace.getConfiguration().get<boolean>('aspectcode.devLogs', true);
   const root = await getWorkspaceRoot();
   if (!root) {
     vscode.window.showErrorMessage('No workspace root found');
@@ -1330,19 +1353,38 @@ async function examineFullRepository(state?: AspectCodeState, context?: vscode.E
       sendProgressToPanel(state, 'examination', 20, 'Collecting source files...');
 
       // Collect all source files and read their contents for remote validation
+      const tDiscover = Date.now();
       const sourceFiles = await discoverWorkspaceSourceFiles();
       outputChannel?.appendLine(`[examineFullRepository] Discovered ${sourceFiles.length} source files`);
+      outputChannel?.appendLine(`[Perf][EXAMINE] discoverWorkspaceSourceFiles tookMs=${Date.now() - tDiscover}`);
       
       // Read file contents (with size limit to prevent memory issues)
       const maxFileSize = 100 * 1024; // 100KB per file
       const maxTotalSize = 10 * 1024 * 1024; // 10MB total
       const filesData: { path: string; content: string; language?: string }[] = [];
       let totalSize = 0;
+
+      const tReadLoopStart = Date.now();
+      let statSlowCount = 0;
+      let readSlowCount = 0;
+      let statSlowLogged = 0;
+      let readSlowLogged = 0;
+      let processed = 0;
       
       for (const filePath of sourceFiles) {
         try {
           const uri = vscode.Uri.file(filePath);
+
+          const tStat = Date.now();
           const stat = await vscode.workspace.fs.stat(uri);
+          const statMs = Date.now() - tStat;
+          if (statMs > 500) {
+            statSlowCount++;
+            if (statSlowLogged < 25) {
+              statSlowLogged++;
+              outputChannel?.appendLine(`[Perf][EXAMINE] SLOW stat tookMs=${statMs} path=${filePath}`);
+            }
+          }
           
           // Skip files that are too large
           if (stat.size > maxFileSize) {
@@ -1356,7 +1398,16 @@ async function examineFullRepository(state?: AspectCodeState, context?: vscode.E
             break;
           }
           
+          const tRead = Date.now();
           const content = await vscode.workspace.fs.readFile(uri);
+          const readMs = Date.now() - tRead;
+          if (readMs > 500) {
+            readSlowCount++;
+            if (readSlowLogged < 25) {
+              readSlowLogged++;
+              outputChannel?.appendLine(`[Perf][EXAMINE] SLOW readFile tookMs=${readMs} path=${filePath}`);
+            }
+          }
           const text = new TextDecoder().decode(content);
           
           // Determine relative path from root
@@ -1377,18 +1428,28 @@ async function examineFullRepository(state?: AspectCodeState, context?: vscode.E
           });
           
           totalSize += stat.size;
+          processed++;
+
+          if (processed % 10 === 0) {
+            const elapsed = Date.now() - tReadLoopStart;
+            outputChannel?.appendLine(`[Perf][EXAMINE] readLoop progress filesAdded=${filesData.length} examined=${processed}/${sourceFiles.length} totalKB=${(totalSize / 1024).toFixed(1)} elapsedMs=${elapsed}`);
+          }
         } catch (err) {
           // Skip files that can't be read
           outputChannel?.appendLine(`[examineFullRepository] Error reading file ${filePath}: ${err}`);
         }
       }
+
+      outputChannel?.appendLine(`[Perf][EXAMINE] readLoop end filesAdded=${filesData.length} examined=${processed}/${sourceFiles.length} totalKB=${(totalSize / 1024).toFixed(1)} tookMs=${Date.now() - tReadLoopStart} slowStat=${statSlowCount} slowRead=${readSlowCount}`);
       
       outputChannel?.appendLine(`[examineFullRepository] Prepared ${filesData.length} files (${(totalSize / 1024).toFixed(1)} KB) for remote validation`);
 
       // Build payload with file contents for remote validation
       const payload = {
         repo_root: root,
-        modes: ['structure', 'types'],
+        modes: (Array.isArray(modesOverride) && modesOverride.length > 0)
+          ? modesOverride
+          : ['structure', 'types'],
         enable_project_graph: false, // Disabled for remote validation (no cross-file analysis yet)
         files: filesData  // Send file contents for remote validation
       };
@@ -2417,12 +2478,12 @@ export async function activate(context: vscode.ExtensionContext) {
   
   // 2. VALIDATE - Analyze entire repository for issues
   context.subscriptions.push(
-    vscode.commands.registerCommand('aspectcode.examine', async () => {
+    vscode.commands.registerCommand('aspectcode.examine', async (opts?: { modes?: string[] }) => {
       try {
         outputChannel?.appendLine('=== EXAMINE: Starting repository examination ===');
         
         // Validate the entire repository
-        await examineFullRepository(state, context);
+        await examineFullRepository(state, context, opts?.modes);
         
         const total = state.s.lastValidate?.total ?? 0;
         const fixable = state.s.findings?.filter(f => f.fixable)?.length ?? 0;
@@ -2838,7 +2899,7 @@ export async function activate(context: vscode.ExtensionContext) {
   }));
 
   // Activate new JSON Protocol v1 commands
-  activateNewCommands(context, state);
+  activateNewCommands(context, state, outputChannel);
 }
 
 export function deactivate() {

@@ -1024,7 +1024,18 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
 
         case 'COMMAND':
           if (msg?.command) {
-            await vscode.commands.executeCommand(msg.command);
+                        const perfEnabled = vscode.workspace.getConfiguration().get<boolean>('aspectcode.devLogs', true);
+                        const t0 = Date.now();
+                        if (perfEnabled) {
+                            this._outputChannel?.appendLine(`[Perf][PanelProvider][COMMAND] start cmd=${msg.command}`);
+                        }
+                        try {
+                            await vscode.commands.executeCommand(msg.command);
+                        } finally {
+                            if (perfEnabled) {
+                                this._outputChannel?.appendLine(`[Perf][PanelProvider][COMMAND] end cmd=${msg.command} tookMs=${Date.now() - t0}`);
+                            }
+                        }
           }
           break;
 
