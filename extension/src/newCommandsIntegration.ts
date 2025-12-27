@@ -11,7 +11,6 @@ import { PromptGenerationService } from './services/PromptGenerationService';
 import { AspectCodeState } from './state';
 import { detectAssistants, AssistantId } from './assistants/detection';
 import { generateInstructionFiles } from './assistants/instructions';
-import { addAlignmentEntry } from './assistants/kb';
 import { getBaseUrl } from './http';
 import type { ScoreResult } from './scoring/scoreEngine';
 
@@ -28,7 +27,7 @@ export function activateNewCommands(
   const channel = outputChannel ?? vscode.window.createOutputChannel('Aspect Code');
   const commands = new AspectCodeCommands(context, state);
   const codeActionProvider = new AspectCodeCodeActionProvider(commands);
-  const promptGenerationService = new PromptGenerationService(channel);
+  const promptGenerationService = new PromptGenerationService({ outputChannel: channel, state });
 
   // Register commands
   context.subscriptions.push(
@@ -39,14 +38,8 @@ export function activateNewCommands(
     vscode.commands.registerCommand('aspectcode.openFinding', (finding: any) => commands.openFinding(finding)),
     vscode.commands.registerCommand('aspectcode.insertSuppression', (finding: any) => commands.insertSuppression(finding)),
     vscode.commands.registerCommand('aspectcode.configureRules', () => commands.configureRules()),
-    vscode.commands.registerCommand('aspectcode.explainFile', async () => {
-      return await handleExplainFile(promptGenerationService);
-    }),
-    vscode.commands.registerCommand('aspectcode.proposeFixes', async () => {
-      return await handleProposeFixes(promptGenerationService, state);
-    }),
-    vscode.commands.registerCommand('aspectcode.alignIssue', async () => {
-      return await handleAlignIssue(promptGenerationService, state, channel);
+    vscode.commands.registerCommand('aspectcode.generatePrompt', async () => {
+      return await handleGeneratePrompt(promptGenerationService, state);
     }),
     vscode.commands.registerCommand('aspectcode.configureAssistants', async () => {
       return await handleConfigureAssistants(context, state, commands, channel);
@@ -128,23 +121,6 @@ export function activateNewCommands(
 
   context.subscriptions.push(fileWatcher, saveListener);
 
-  // Watch for ALIGNMENTS.json changes to update the align button visibility
-  const alignmentsWatcher = vscode.workspace.createFileSystemWatcher('**/ALIGNMENTS.json');
-  const updateAlignmentsButton = async () => {
-    const panelProvider = (state as any)._panelProvider;
-    if (panelProvider && typeof panelProvider.post === 'function') {
-      const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
-      if (workspaceRoot) {
-        const { alignmentsFileExists } = await import('./assistants/kb');
-        const hasFile = await alignmentsFileExists(workspaceRoot);
-        panelProvider.post({ type: 'ALIGNMENTS_FILE_STATUS', hasFile });
-      }
-    }
-  };
-  alignmentsWatcher.onDidCreate(updateAlignmentsButton);
-  alignmentsWatcher.onDidDelete(updateAlignmentsButton);
-  context.subscriptions.push(alignmentsWatcher);
-
   // Watch for .aspect/ folder and instruction file changes to update the '+' button visibility
   // Track if we've recently shown the notification to avoid spamming
   let lastNotificationTime = 0;
@@ -158,10 +134,9 @@ export function activateNewCommands(
     const detected = await detectAssistants(workspaceRoot);
     const hasAspectKB = detected.has('aspectKB');
     
-    // Check for instruction files (exclude aspectKB and alignments from count)
+    // Check for instruction files (exclude aspectKB from count)
     const instructionAssistants = new Set(detected);
     instructionAssistants.delete('aspectKB');
-    instructionAssistants.delete('alignments');
     const hasInstructionFiles = instructionAssistants.size > 0;
     
     // Show + button if either is missing
@@ -177,7 +152,7 @@ export function activateNewCommands(
       const now = Date.now();
       if (now - lastNotificationTime > NOTIFICATION_DEBOUNCE_MS) {
         lastNotificationTime = now;
-        outputChannel.appendLine(`[Watcher] Detected missing files: aspectKB=${hasAspectKB}, instructionFiles=${hasInstructionFiles}`);
+        channel.appendLine(`[Watcher] Detected missing files: aspectKB=${hasAspectKB}, instructionFiles=${hasInstructionFiles}`);
         const message = !hasAspectKB 
           ? 'Aspect Code: Knowledge base (.aspect/) was deleted.'
           : 'Aspect Code: AI instruction files were deleted.';
@@ -206,11 +181,11 @@ export function activateNewCommands(
   // Watch for .aspect/ folder changes (including files within it)
   const aspectWatcher = vscode.workspace.createFileSystemWatcher('**/.aspect/**');
   aspectWatcher.onDidCreate((uri) => {
-    outputChannel.appendLine(`[Watcher] .aspect file created: ${uri.fsPath}`);
+    channel.appendLine(`[Watcher] .aspect file created: ${uri.fsPath}`);
     debouncedInstructionUpdate(false);
   });
   aspectWatcher.onDidDelete((uri) => {
-    outputChannel.appendLine(`[Watcher] .aspect file deleted: ${uri.fsPath}`);
+    channel.appendLine(`[Watcher] .aspect file deleted: ${uri.fsPath}`);
     debouncedInstructionUpdate(true);
   });
   context.subscriptions.push(aspectWatcher);
@@ -218,11 +193,11 @@ export function activateNewCommands(
   // Also watch for the .aspect folder itself being deleted
   const aspectFolderWatcher = vscode.workspace.createFileSystemWatcher('**/.aspect');
   aspectFolderWatcher.onDidCreate((uri) => {
-    outputChannel.appendLine(`[Watcher] .aspect folder created: ${uri.fsPath}`);
+    channel.appendLine(`[Watcher] .aspect folder created: ${uri.fsPath}`);
     debouncedInstructionUpdate(false);
   });
   aspectFolderWatcher.onDidDelete((uri) => {
-    outputChannel.appendLine(`[Watcher] .aspect folder deleted: ${uri.fsPath}`);
+    channel.appendLine(`[Watcher] .aspect folder deleted: ${uri.fsPath}`);
     debouncedInstructionUpdate(true);
   });
   context.subscriptions.push(aspectFolderWatcher);
@@ -248,59 +223,7 @@ export function activateNewCommands(
   cursorFolderWatcher.onDidDelete(() => debouncedInstructionUpdate(true));
   context.subscriptions.push(cursorWatcher, cursorFolderWatcher);
 
-  // Run initial check on startup (after a short delay to let panel initialize)
-  // This ensures notification shows even if panel is never opened
-  setTimeout(async () => {
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
-    if (!workspaceRoot) {return;}
-
-    // The setup warning is shown in sync with '+' after the dependency graph is ready (PanelProvider).
-    // Avoid popping a separate startup toast here.
-    return;
-    
-    const panelProvider = (state as any)._panelProvider;
-    // If the panel exists but hasn't finished its initial graph load yet, don't pop warnings.
-    // The panel UI will present the setup action once it's ready.
-    if (panelProvider) {
-      const setupInProgress = typeof panelProvider.isSetupInProgress === 'function' && panelProvider.isSetupInProgress();
-      const graphNotReady = typeof panelProvider.isGraphReady === 'function' && !panelProvider.isGraphReady();
-      if (setupInProgress || graphNotReady) {
-        outputChannel.appendLine(`[Startup] Panel still loading (setupInProgress=${setupInProgress}, graphNotReady=${graphNotReady}); suppressing startup warning`);
-        return;
-      }
-    }
-
-    const detected = await detectAssistants(workspaceRoot);
-    const hasAspectKB = detected.has('aspectKB');
-    
-    const instructionAssistants = new Set(detected);
-    instructionAssistants.delete('aspectKB');
-    instructionAssistants.delete('alignments');
-    const hasInstructionFiles = instructionAssistants.size > 0;
-    
-    const setupComplete = hasAspectKB && hasInstructionFiles;
-    
-    outputChannel.appendLine(`[Startup] Instruction files check: aspectKB=${hasAspectKB}, instructionFiles=${hasInstructionFiles}, setupComplete=${setupComplete}`);
-    
-    if (!setupComplete) {
-      // Update panel if available
-      if (panelProvider && typeof panelProvider.post === 'function') {
-        panelProvider.post({ type: 'INSTRUCTION_FILES_STATUS', hasFiles: false });
-      }
-      
-      // Show warning notification (more persistent than info)
-      const message = !hasAspectKB 
-        ? 'Aspect Code: Knowledge base (.aspect/) not found.'
-        : 'Aspect Code: No AI instruction files found.';
-      const action = await vscode.window.showWarningMessage(
-        message + ' Generate them to provide AI assistants with project context.',
-        'Generate Now'
-      );
-      if (action === 'Generate Now') {
-        vscode.commands.executeCommand('aspectcode.configureAssistants');
-      }
-    }
-  }, 2000);
+  // Startup check intentionally disabled: panel UI handles setup prompts.
 
   // Add legacy CLI scan status bar items (only if enabled)
   const config = vscode.workspace.getConfiguration('aspectcode');
@@ -322,142 +245,6 @@ export function activateNewCommands(
     configStatusBarItem.show();
     
     context.subscriptions.push(statusBarItem, configStatusBarItem);
-  }
-}
-
-/**
- * Handle Explain File command - immediately copies to clipboard
- */
-async function handleExplainFile(promptService: PromptGenerationService): Promise<void> {
-  try {
-    const activeEditor = vscode.window.activeTextEditor;
-    if (!activeEditor) {
-      vscode.window.showWarningMessage('No active file to explain');
-      return;
-    }
-
-    const fileName = activeEditor.document.fileName.split(/[\\/]/).pop();
-
-    const prompt = await promptService.buildExplainCurrentFilePrompt({
-      activeFileUri: activeEditor.document.uri,
-      fileContent: activeEditor.document.getText()
-    });
-
-    await vscode.env.clipboard.writeText(prompt);
-    vscode.window.showInformationMessage(`Explanation for ${fileName} copied to clipboard`);
-
-  } catch (error) {
-    vscode.window.showErrorMessage(`Failed to generate explanation: ${error}`);
-  }
-}
-
-/**
- * Handle Propose Fixes command - immediately copies to clipboard
- */
-async function handleProposeFixes(promptService: PromptGenerationService, state: AspectCodeState): Promise<void> {
-  const MAX_CONTEXT_LENGTH = 500; // Character limit for optional context
-  
-  try {
-    const currentState = state.s;
-    const findings = currentState.findings || [];
-
-    if (findings.length === 0) {
-      vscode.window.showWarningMessage('No findings available. Run examination first to get structural context.');
-      return;
-    }
-
-    // Ask for optional context (not required)
-    const userContext = await vscode.window.showInputBox({
-      prompt: 'What would you like the AI to help with? (optional)',
-      placeHolder: 'e.g., "Refactor the auth module" or "Fix the API timeout issue" (leave blank for general guidance)',
-      ignoreFocusOut: true,
-      validateInput: (value) => {
-        if (value && value.length > MAX_CONTEXT_LENGTH) {
-          return `Context too long (${value.length}/${MAX_CONTEXT_LENGTH} characters)`;
-        }
-        return null;
-      }
-    });
-
-    // User cancelled the input box (pressed Escape)
-    if (userContext === undefined) {
-      return;
-    }
-
-    // Convert findings to the expected format
-    const formattedFindings = findings.map((f: any) => ({
-      id: f.id || f.violation_id || `finding-${Math.random()}`,
-      code: f.rule || f.code || f.ruleId || 'unknown',
-      severity: (f.severity === 'critical' ? 'error' : f.severity) as 'info' | 'warn' | 'error',
-      file: f.file || '',
-      message: f.explain || f.message || f.title || '',
-      fixable: !!f.fixable,
-      span: f.span,
-      _raw: f
-    }));
-
-    const prompt = await promptService.buildProposeFixesPrompt({
-      findings: formattedFindings,
-      userContext: userContext.trim() || undefined // Pass context if provided
-    });
-
-    await vscode.env.clipboard.writeText(prompt);
-    vscode.window.showInformationMessage('Structural plan copied to clipboard');
-
-  } catch (error) {
-    vscode.window.showErrorMessage(`Failed to generate plan: ${error}`);
-  }
-}
-
-/**
- * Handle Align Issue command - asks user to describe the AI issue,
- * generates a prompt to help fix it, and logs to ALIGNMENTS.json
- */
-async function handleAlignIssue(
-  promptService: PromptGenerationService, 
-  state: AspectCodeState,
-  outputChannel: vscode.OutputChannel
-): Promise<void> {
-  try {
-    // Prompt user to describe the issue they experienced
-    const issueDescription = await vscode.window.showInputBox({
-      prompt: 'Describe the issue you experienced',
-      placeHolder: 'e.g., "Kept trying to use deprecated API" or "Deleted important code"',
-      ignoreFocusOut: true
-    });
-
-    if (!issueDescription) {
-      return; // User cancelled
-    }
-
-    const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (!workspaceFolders || workspaceFolders.length === 0) {
-      vscode.window.showErrorMessage('No workspace folder open');
-      return;
-    }
-
-    const workspaceRoot = workspaceFolders[0].uri;
-
-    // Add entry to ALIGNMENTS.json (files left blank for user to fill in)
-    await addAlignmentEntry(workspaceRoot, {
-      issue: issueDescription,
-      files: [], // Empty - user can add relevant files later
-      resolution: '' // Empty - to be filled in later by user after verification
-    }, outputChannel);
-
-    // Generate the alignment prompt
-    const prompt = await promptService.buildAlignmentPrompt({
-      issueDescription,
-      findings: state.s.findings || []
-    });
-
-    await vscode.env.clipboard.writeText(prompt);
-    vscode.window.showInformationMessage(
-      'Alignment prompt copied to clipboard. Issue logged to ALIGNMENTS.json'
-    );
-
-  } catch (error) {
-    vscode.window.showErrorMessage(`Failed to generate alignment prompt: ${error}`);
   }
 }
 
@@ -753,5 +540,66 @@ async function handleGenerateInstructionFiles(
   } catch (error) {
     outputChannel.appendLine(`[Instructions] Error: ${error}`);
     vscode.window.showErrorMessage(`Failed to generate instruction files: ${error}`);
+  }
+}
+
+/**
+ * Generate a deterministic, offline, context-aware planning prompt
+ * from user-provided text and local dependency graph.
+ */
+async function handleGeneratePrompt(promptService: PromptGenerationService, state: AspectCodeState): Promise<void> {
+  const MAX_CONTEXT_LENGTH = 2000;
+
+  try {
+    const userText = await vscode.window.showInputBox({
+      prompt: 'What do you want the AI to do?',
+      placeHolder: 'e.g., "Refactor auth module to reduce coupling"',
+      ignoreFocusOut: true,
+      validateInput: (value) => {
+        if (!value || value.trim().length === 0) {
+          return 'Please enter a short task description.';
+        }
+        if (value.length > MAX_CONTEXT_LENGTH) {
+          return `Context too long (${value.length}/${MAX_CONTEXT_LENGTH} characters)`;
+        }
+        return null;
+      }
+    });
+
+    // User cancelled the input box (pressed Escape)
+    if (userText === undefined) {
+      return;
+    }
+
+    const activeFileUri = vscode.window.activeTextEditor?.document?.uri;
+
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'Aspect Code: Generating prompt',
+        cancellable: false
+      },
+      async (progress) => {
+        const report = (message: string) => progress.report({ message });
+        report('Starting...');
+        state.update({ busy: true });
+        try {
+          const prompt = await promptService.buildUserPrompt({
+            userText: userText.trim(),
+            activeFileUri,
+            onProgress: report
+          });
+          report('Copying to clipboard...');
+          await vscode.env.clipboard.writeText(prompt);
+        } finally {
+          state.update({ busy: false });
+        }
+      }
+    );
+
+    vscode.window.showInformationMessage('Planning prompt copied to clipboard (offline)');
+  } catch (error) {
+    state.update({ busy: false });
+    vscode.window.showErrorMessage(`Failed to generate plan: ${error}`);
   }
 }
