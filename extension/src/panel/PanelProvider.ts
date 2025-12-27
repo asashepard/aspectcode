@@ -47,6 +47,13 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
   private _view?: vscode.WebviewView;
   private _autoProcessingStarted = false;
   private _cacheLoadedSuccessfully = false; // Skip auto-processing when cache was loaded
+  private _initialGraphSent = false; // Track if first dependency graph has been sent (enables UI)
+  private _setupInProgress = false; // Track if initial setup is in progress (suppresses startup warning)
+    private _setupCompleteAtPanelReady: boolean | null = null;
+    private _hasAspectKBAtPanelReady: boolean | null = null;
+    private _startupSetupWarningShown = false;
+    private _initialGraphLoadInFlight: Promise<void> | null = null;
+    private _resolveInitialGraphLoadInFlight: (() => void) | null = null;
   // NOTE: ScoreEngine disabled for performance
   // private _scoreEngine: ScoreEngine;
   private _dependencyAnalyzer: DependencyAnalyzer;
@@ -65,6 +72,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
   private _centerFileUpdatedTime: number = 0; // Track when center was last updated by user action
   private _isProcessingNodeClick: boolean = false; // Flag to indicate node click is being processed
   private _cacheCleanupInterval: NodeJS.Timeout | null = null; // Periodic cache cleanup
+  private _kbStale: boolean = false; // Track KB staleness for UI indicator
 
   constructor(
     private readonly _context: vscode.ExtensionContext,
@@ -242,10 +250,20 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     totalFiles?: number;
     processingPhase?: string;
     progress?: number;
+    kbStale?: boolean;
   } = { busy: false, findings: [], byRule: {}, history: [] };
 
   // (optional) helper to show the view from activate()
   reveal() { this._view?.show?.(true); }
+  
+  /**
+   * Update KB staleness indicator - called by extension when fingerprint changes.
+   */
+  setKbStale(stale: boolean): void {
+    this._kbStale = stale;
+    this._bridgeState.kbStale = stale;
+    this.pushState();
+  }
 
   private mapSeverity(severity: string): 'critical' | 'high' | 'medium' | 'low' | 'info' {
     const severityMap: { [key: string]: 'critical' | 'high' | 'medium' | 'low' | 'info' } = {
@@ -297,12 +315,85 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     }
   }
 
+    private async maybeShowSetupWarningAfterGraphReady(): Promise<void> {
+        if (this._startupSetupWarningShown) return;
+        if (this._setupCompleteAtPanelReady !== false) return;
+
+        this._startupSetupWarningShown = true;
+
+        const hasAspectKB = this._hasAspectKBAtPanelReady === true;
+        const message = !hasAspectKB
+            ? 'Aspect Code: Knowledge base (.aspect/) not found.'
+            : 'Aspect Code: No AI instruction files found.';
+
+        const action = await vscode.window.showWarningMessage(
+            message + ' Generate them to provide AI assistants with project context.',
+            'Generate Now'
+        );
+        if (action === 'Generate Now') {
+            void vscode.commands.executeCommand('aspectcode.configureAssistants');
+        }
+    }
+
   private async sendFocusedDependencyGraph(activeFile: string) {
     // Ensure view is ready
     if (!this._view) {
       console.error('[Dependency Graph] View not initialized, cannot send graph');
       return;
     }
+
+        // Track if this is the first graph load (enables UI + suppresses startup warning)
+        const isFirstGraphLoad = !this._initialGraphSent;
+
+        // Avoid duplicate concurrent initial graph loads.
+        if (isFirstGraphLoad && this._initialGraphLoadInFlight) {
+            await this._initialGraphLoadInFlight;
+            return;
+        }
+
+        if (isFirstGraphLoad) {
+            this._setupInProgress = true;
+            this._initialGraphLoadInFlight = new Promise<void>((resolve) => {
+                this._resolveInitialGraphLoadInFlight = resolve;
+            });
+        }
+
+        // For the first graph load, show a VS Code notification progress ("toast") in sync with the spinner.
+        let finishProgress: (() => void) | undefined;
+        let reportProgress: ((message: string) => void) | undefined;
+        let pendingProgressMessage: string | undefined;
+
+        const setPhase = (phase: string) => {
+            pendingProgressMessage = phase;
+            try {
+                this._view?.webview.postMessage({ type: 'LOADING_PHASE', phase });
+            } catch {
+                // best-effort
+            }
+            reportProgress?.(phase);
+        };
+
+        if (isFirstGraphLoad) {
+            const done = new Promise<void>((resolve) => {
+                finishProgress = resolve;
+            });
+            void vscode.window.withProgress(
+                {
+                    location: vscode.ProgressLocation.Notification,
+                    title: 'Aspect Code: Building dependency graph',
+                    cancellable: false
+                },
+                async (progress) => {
+                    reportProgress = (message) => progress.report({ message });
+                    if (pendingProgressMessage) {
+                        reportProgress(pendingProgressMessage);
+                    }
+                    await done;
+                }
+            );
+        }
+
+        try {
     
     // Normalize file path to avoid mismatches
     const normalizedFile = path.normalize(activeFile);
@@ -320,6 +411,15 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           type: 'DEPENDENCY_GRAPH',
           graph: { ...cachedGraph, focusMode: true, centerFile: normalizedFile }
         });
+
+                // If the first graph was satisfied by cache, we still need to enable UI.
+                if (isFirstGraphLoad) {
+                    this._initialGraphSent = true;
+                    this.post({ type: 'GRAPH_READY' });
+                    this._outputChannel?.appendLine('[PanelProvider] Initial dependency graph ready (cached) - UI enabled');
+                    this._setupInProgress = false;
+                    void this.maybeShowSetupWarningAfterGraphReady();
+                }
         return;
       } catch (error) {
         console.warn(`[Dependency Graph] Failed to send cached graph, fetching fresh data:`, error);
@@ -333,10 +433,14 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
       type: 'graphLoading',
       file: normalizedFile
     });
+
+        // Always emit a phase message so the spinner has text even if caches are warm.
+        setPhase('Preparing dependency graph...');
     
     // Get all files in workspace (cached)
     let allFiles = this._workspaceFilesCache;
     if (!allFiles || (now - this._cacheTimestamp) > this._cacheTimeout) {
+            setPhase('Discovering workspace files...');
       allFiles = await this.discoverAllWorkspaceFiles();
       this._workspaceFilesCache = allFiles;
       this._cacheTimestamp = now;
@@ -359,8 +463,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         console.error(`[Dependency Graph] File still not found after rescan. Showing empty graph.`);
         // Send empty graph centered on this file anyway
         this._view?.webview.postMessage({
-          type: 'dependencyGraph',
-          data: {
+                    type: 'DEPENDENCY_GRAPH',
+                    graph: {
             nodes: [{
               id: normalizedFile,
               label: path.basename(normalizedFile),
@@ -386,7 +490,10 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     // Get dependencies (cached)
     let allDependencies = this._dependencyCache.get('all');
     if (!allDependencies || (now - this._cacheTimestamp) > this._cacheTimeout) {
-      allDependencies = await this._dependencyAnalyzer.analyzeDependencies(allFiles);
+            setPhase(`Analyzing dependencies (${allFiles.length} files)...`);
+      allDependencies = await this._dependencyAnalyzer.analyzeDependencies(allFiles, (current, total, phase) => {
+        setPhase(phase);
+      });
       this._dependencyCache.set('all', allDependencies);
     }
     
@@ -503,11 +610,32 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
       if (timeSinceUserUpdate > 1000) { // Only auto-update if no recent user action
         this._currentGraphCenterFile = path.normalize(actualFile);
       }
+      
+      // If this was the first graph load, signal that graph is ready (enables UI)
+      if (isFirstGraphLoad) {
+        this._initialGraphSent = true;
+        this.post({ type: 'GRAPH_READY' });
+        this._outputChannel?.appendLine('[PanelProvider] Initial dependency graph ready - UI enabled');
+                this._setupInProgress = false;
+                void this.maybeShowSetupWarningAfterGraphReady();
+      }
     } else {
       console.error(`[Dependency Graph] ✗ Failed to send graph after ${maxRetries} retries`);
       // Clear cache on failure to force fresh fetch next time
       this._graphCache.delete(cacheKey);
+            if (isFirstGraphLoad) {
+                this._setupInProgress = false;
+            }
     }
+
+        } finally {
+            if (isFirstGraphLoad) {
+                this._resolveInitialGraphLoadInFlight?.();
+                this._resolveInitialGraphLoadInFlight = null;
+                this._initialGraphLoadInFlight = null;
+            }
+            finishProgress?.();
+        }
   }
 
   private async isFileValid(filePath: string): Promise<boolean> {
@@ -569,7 +697,15 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     }
     
     // Analyze real dependencies among selected files
-    const allDependencies = await this._dependencyAnalyzer.analyzeDependencies(selectedFiles);
+    const allDependencies = await this._dependencyAnalyzer.analyzeDependencies(selectedFiles, (current, total, phase) => {
+      // Progress callback - this method is not the primary entry point
+      // so we just send the phase to the webview
+      try {
+        this._view?.webview.postMessage({ type: 'LOADING_PHASE', phase });
+      } catch {
+        // best-effort
+      }
+    });
     
     // Create nodes for ALL selected files (even those without dependencies)
     const nodes = selectedFiles.map(file => {
@@ -718,8 +854,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     if (!workspaceFolders || workspaceFolders.length === 0) {
       return [];
     }
-    
-    const allFiles: string[] = [];
+
+        const allFiles = new Set<string>();
     
     // Common source code file patterns
     const patterns = [
@@ -734,27 +870,37 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
       '**/*.rb',
       '**/*.php'
     ];
-    
-    for (const pattern of patterns) {
-      try {
-        const files = await vscode.workspace.findFiles(
-          pattern,
-          '**/node_modules/**,**/.git/**,**/__pycache__/**,**/build/**,**/dist/**,**/target/**,**/e2e/**,**/playwright/**,**/cypress/**,**/.venv/**,**/venv/**',
-          300 // Increased from 100 to discover more files
+
+        // Note: VS Code expects a single glob pattern here; comma-separated lists are not treated as multiple excludes.
+        const exclude = '**/{node_modules,.git,__pycache__,build,dist,target,e2e,playwright,cypress,.venv,venv}/**';
+        const maxResultsPerPattern = 300;
+        const perPatternTimeoutMs = 15_000;
+
+        const results = await Promise.allSettled(
+            patterns.map(async (pattern) => {
+                try {
+                    const files = await Promise.race<readonly vscode.Uri[]>([
+                        vscode.workspace.findFiles(pattern, exclude, maxResultsPerPattern),
+                        new Promise<readonly vscode.Uri[]>((resolve) => setTimeout(() => resolve([]), perPatternTimeoutMs))
+                    ]);
+                    return files;
+                } catch (error) {
+                    console.warn('Error finding files with pattern:', pattern, error);
+                    return [];
+                }
+            })
         );
-        
-        for (const file of files) {
-          const filePath = file.fsPath;
-          if (!allFiles.includes(filePath)) {
-            allFiles.push(filePath);
-          }
+
+        for (const result of results) {
+            if (result.status === 'fulfilled') {
+                for (const file of result.value) {
+                    allFiles.add(file.fsPath);
+                }
+            }
+            // Ignore rejected results (already logged)
         }
-      } catch (error) {
-        console.warn('Error finding files with pattern:', pattern, error);
-      }
-    }
-    
-    return allFiles;
+
+        return Array.from(allFiles);
   }
   
   private isKeyArchitecturalFile(filePath: string): boolean {
@@ -816,23 +962,32 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     
     // Reset auto-processing flag when webview is resolved/recreated
     this._autoProcessingStarted = false;
-    
-    // Send initial graph after view is ready
-    setTimeout(async () => {
-      await this.sendDependencyGraph();
-    }, 100);
+    // Reset initial graph flag - will be set true after first graph is sent
+    this._initialGraphSent = false;
 
     // Enhanced message handlers for new UI
     view.webview.onDidReceiveMessage(async (msg: any) => {
       switch (msg?.type) {
         case 'PANEL_READY':
-          // Check if .aspect/ KB exists (indicates prior configuration)
+          // Check if .aspect/ KB and instruction files exist (single detectAssistants call)
           const workspaceRootForKB = vscode.workspace.workspaceFolders?.[0]?.uri;
           let hasAspectKB = false;
+          let hasInstructionFiles = false;
+          let setupComplete = false;
           if (workspaceRootForKB) {
             const detected = await detectAssistants(workspaceRootForKB);
             hasAspectKB = detected.has('aspectKB');
+            // Check for instruction files (exclude aspectKB and alignments from count)
+            const instructionAssistants = new Set(detected);
+            instructionAssistants.delete('aspectKB');
+            instructionAssistants.delete('alignments');
+            hasInstructionFiles = instructionAssistants.size > 0;
+            setupComplete = hasAspectKB && hasInstructionFiles;
           }
+
+                    // Persist status so we can show the warning toast in sync with '+' (after GRAPH_READY).
+                    this._setupCompleteAtPanelReady = setupComplete;
+                    this._hasAspectKBAtPanelReady = hasAspectKB;
           
           // Auto-start processing ONLY if:
           // 1. Cache was loaded successfully, OR
@@ -867,25 +1022,12 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             this.post({ type: 'ACTIVE_FILE_CHANGED', file: activeFile });
           }
           
-          // Check if any instruction files exist
-          const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
-          if (workspaceRoot) {
-            const detected = await detectAssistants(workspaceRoot);
-            // Show + button if .aspect/ KB doesn't exist OR no instruction files exist
-            const hasAspectKB = detected.has('aspectKB');
-            // Check for instruction files (exclude aspectKB and alignments from count)
-            const instructionAssistants = new Set(detected);
-            instructionAssistants.delete('aspectKB');
-            instructionAssistants.delete('alignments');
-            const hasInstructionFiles = instructionAssistants.size > 0;
-            // Show + if either is missing
-            const setupComplete = hasAspectKB && hasInstructionFiles;
-            this.post({ type: 'INSTRUCTION_FILES_STATUS', hasFiles: setupComplete });
-            
-            // TEMPORARILY DISABLED: Check if ALIGNMENTS.json exists to show align button
-            // const hasAlignmentsFile = await alignmentsFileExists(workspaceRoot);
-            // this.post({ type: 'ALIGNMENTS_FILE_STATUS', hasFile: hasAlignmentsFile });
-          }
+          // Send instruction files status (using already-computed values)
+          this.post({ type: 'INSTRUCTION_FILES_STATUS', hasFiles: setupComplete });
+          
+          // TEMPORARILY DISABLED: Check if ALIGNMENTS.json exists to show align button
+          // const hasAlignmentsFile = await alignmentsFileExists(workspaceRoot);
+          // this.post({ type: 'ALIGNMENTS_FILE_STATUS', hasFile: hasAlignmentsFile });
           break;
 
         case 'REQUEST_DEPENDENCY_GRAPH':
@@ -1008,6 +1150,15 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         case 'FIX_SAFE':
           // Auto-Fix feature temporarily disabled
           // await vscode.commands.executeCommand('aspectcode.applyAutofix');
+          break;
+
+        case 'REGENERATE_KB':
+          // Regenerate knowledge base files
+          try {
+            await vscode.commands.executeCommand('aspectcode.generateKB');
+          } catch (e) {
+            console.error('[PanelProvider] Failed to regenerate KB:', e);
+          }
           break;
 
         case 'FORCE_REINDEX':
@@ -1144,6 +1295,19 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  /**
+   * Check if initial setup/loading is in progress.
+   * When true, startup warnings should be suppressed.
+   */
+  public isSetupInProgress(): boolean {
+    return this._setupInProgress;
+  }
+
+    /** True once the initial dependency graph has been computed and sent. */
+    public isGraphReady(): boolean {
+        return this._initialGraphSent;
+    }
+
   public __setBridgeStateFromSnapshot(snap: any) {
     this._bridgeState.findings = new Array(snap.renderedFindings || 0)
       .fill(0)
@@ -1185,12 +1349,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         this.post({ type: 'FLOW_PROGRESS', phase: step });
 
         if (step === 'index') {
-          try {
-            await vscode.commands.executeCommand('aspectcode.index');
-          } catch (error) {
-            console.error('[Aspect Code] index step failed:', error);
-            throw error;
-          }
+          // INDEX is disabled for remote servers - skip silently
+          // The aspectcode.index command is a no-op for remote servers
         }
 
         else if (step === 'validate') {
@@ -1340,6 +1500,45 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             display: flex;
             flex-direction: column;
             overflow: hidden;
+        }
+        
+        /* KB Stale Indicator */
+        .kb-stale-indicator {
+            display: none;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 12px;
+            background: var(--vscode-inputValidation-warningBackground);
+            border-bottom: 1px solid var(--vscode-inputValidation-warningBorder);
+            font-size: 11px;
+            color: var(--vscode-inputValidation-warningForeground, var(--vscode-foreground));
+        }
+        
+        .kb-stale-indicator svg {
+            width: 14px;
+            height: 14px;
+            flex-shrink: 0;
+            stroke: currentColor;
+            fill: none;
+        }
+        
+        .kb-stale-text {
+            flex: 1;
+        }
+        
+        .kb-stale-btn {
+            background: var(--vscode-button-secondaryBackground);
+            color: var(--vscode-button-secondaryForeground);
+            border: none;
+            border-radius: 3px;
+            padding: 4px 8px;
+            font-size: 11px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        
+        .kb-stale-btn:hover {
+            background: var(--vscode-button-secondaryHoverBackground);
         }
         
         /* Compact header bar */
@@ -1833,6 +2032,18 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         
         .simple-view-spinner.active {
             display: flex;
+        }
+
+        .simple-loading-text {
+            margin-top: 6px;
+            font-size: 12px;
+            color: var(--vscode-descriptionForeground);
+            text-align: center;
+            max-width: 260px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: none;
         }
 
         /* Graph view content */
@@ -2784,6 +2995,17 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         </div>
     </div>
     
+    <!-- KB Stale Indicator -->
+    <div class="kb-stale-indicator" id="kb-stale-indicator">
+        <svg viewBox="0 0 24 24" stroke-width="2">
+            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+            <line x1="12" y1="9" x2="12" y2="13"></line>
+            <line x1="12" y1="17" x2="12.01" y2="17"></line>
+        </svg>
+        <span class="kb-stale-text">Knowledge base may be stale</span>
+        <button id="btn-regenerate-kb" class="kb-stale-btn">Regenerate KB</button>
+    </div>
+    
     <!-- Simple View (minimal mode - default) -->
     <div class="simple-view" id="simple-view">
         <div class="simple-view-spinner" id="simple-view-spinner" title="Processing...">
@@ -2793,6 +3015,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 </circle>
             </svg>
         </div>
+        <div class="simple-loading-text" id="simple-loading-text"></div>
         <div class="simple-view-buttons">
             <button id="simple-generate-btn" class="simple-view-btn primary" title="Generate AI instruction files" style="display: none;">
                 <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5">
@@ -2947,6 +3170,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         let currentActiveFile = ''; // Track currently active file for findings sorting
         let currentState = null; // Track latest state for re-rendering
         let severityFilters = { problems: true, informational: true }; // Track which priority types are shown (P0/P1 = problems, P2/P3 = informational)
+        let graphReady = false; // Track if initial dependency graph has loaded
+        let pendingInstructionFilesStatus = null; // Store instruction files status until graph is ready
         
         // View mode: 'simple' (default) or 'full'
         let viewMode = 'simple';
@@ -4612,6 +4837,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     render(msg.state);
                     break;
                 case 'DEPENDENCY_GRAPH':
+                    // Any graph payload means graph loading is done for this request
+                    hideGraphLoading();
                     // Store graph data based on focus mode
                     if (msg.graph.focusMode) {
                         focusedGraph = msg.graph;
@@ -4657,15 +4884,50 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     break;
                 case 'INSTRUCTION_FILES_STATUS':
                     // Show/hide the generate instructions button based on whether files exist
-                    const generateBtn = document.getElementById('generate-instructions-btn');
-                    if (generateBtn) {
-                        generateBtn.style.display = msg.hasFiles ? 'none' : 'flex';
+                    // But only if graph is ready - otherwise keep hidden until GRAPH_READY
+                    if (graphReady) {
+                        const generateBtn = document.getElementById('generate-instructions-btn');
+                        if (generateBtn) {
+                            generateBtn.style.display = msg.hasFiles ? 'none' : 'flex';
+                        }
+                        // Also sync simple view setup button
+                        const simpleGenerateBtn = document.getElementById('simple-generate-btn');
+                        if (simpleGenerateBtn) {
+                            simpleGenerateBtn.style.display = msg.hasFiles ? 'none' : 'flex';
+                        }
                     }
-                    // Also sync simple view setup button
-                    const simpleGenerateBtn = document.getElementById('simple-generate-btn');
-                    if (simpleGenerateBtn) {
-                        simpleGenerateBtn.style.display = msg.hasFiles ? 'none' : 'flex';
+                    // Store the status for when graph becomes ready
+                    pendingInstructionFilesStatus = msg.hasFiles;
+                    break;
+                case 'GRAPH_READY':
+                    // Dependency graph has loaded - now we can show the UI
+                    graphReady = true;
+                    hideGraphLoading();
+                    // Now show the + button if instruction files don't exist
+                    if (pendingInstructionFilesStatus === false) {
+                        const generateBtn = document.getElementById('generate-instructions-btn');
+                        if (generateBtn) {
+                            generateBtn.style.display = 'flex';
+                        }
+                        const simpleGenerateBtn = document.getElementById('simple-generate-btn');
+                        if (simpleGenerateBtn) {
+                            simpleGenerateBtn.style.display = 'flex';
+                        }
                     }
+                    break;
+                case 'LOADING_PHASE':
+                    // Show loading phase progress message
+                    const detailsElPhase = document.getElementById('score-details');
+                    if (detailsElPhase) {
+                        detailsElPhase.textContent = msg.phase;
+                    }
+                    const simpleLoadingText = document.getElementById('simple-loading-text');
+                    if (simpleLoadingText) {
+                        simpleLoadingText.textContent = msg.phase;
+                        simpleLoadingText.style.display = 'block';
+                    }
+                    // Ensure spinner is visible during loading
+                    showGraphLoading();
                     break;
                 case 'ALIGNMENTS_FILE_STATUS':
                     // Show/hide the align button based on whether ALIGNMENTS.json exists
@@ -4691,15 +4953,24 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         function handleRealProgress(phase, percentage, message) {
             const validationSpinner = document.getElementById('validation-spinner');
             const simpleSpinner = document.getElementById('simple-view-spinner');
+            const simpleLoadingText = document.getElementById('simple-loading-text');
             
             // Show/hide inline validation spinner for all processing phases
             if (phase === 'validation' || phase === 'indexing' || phase === 'examination') {
                 if (percentage > 0 && percentage < 100) {
                     validationSpinner?.classList.add('active');
                     simpleSpinner?.classList.add('active');
+                    if (simpleLoadingText) {
+                        simpleLoadingText.textContent = message;
+                        simpleLoadingText.style.display = 'block';
+                    }
                 } else if (percentage >= 100 || percentage === 0) {
                     validationSpinner?.classList.remove('active');
                     simpleSpinner?.classList.remove('active');
+                    if (simpleLoadingText) {
+                        simpleLoadingText.textContent = '';
+                        simpleLoadingText.style.display = 'none';
+                    }
                 }
             }
             
@@ -4726,12 +4997,40 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 scoreEl.style.color = 'var(--vscode-descriptionForeground)';
             }
             if (detailsEl) {
-                detailsEl.innerHTML = 'Click <strong>+</strong> to set up Aspect Code';
+                // Show loading message until graph is ready
+                if (!graphReady) {
+                    detailsEl.innerHTML = 'Analyzing workspace...';
+                    showGraphLoading();
+                } else {
+                    detailsEl.innerHTML = 'Click <strong>+</strong> to set up Aspect Code';
+                }
             }
-            // Show the generate instructions button prominently
-            const generateBtn = document.getElementById('generate-instructions-btn');
-            if (generateBtn) {
-                generateBtn.style.display = 'flex';
+            // Don't show the + button here - GRAPH_READY will show it when ready
+        }
+        
+        // Show loading indicator while building dependency graph
+        function showGraphLoading() {
+            const validationSpinner = document.getElementById('validation-spinner');
+            const simpleSpinner = document.getElementById('simple-view-spinner');
+            validationSpinner?.classList.add('active');
+            simpleSpinner?.classList.add('active');
+        }
+        
+        // Hide graph loading indicator
+        function hideGraphLoading() {
+            const validationSpinner = document.getElementById('validation-spinner');
+            const simpleSpinner = document.getElementById('simple-view-spinner');
+            validationSpinner?.classList.remove('active');
+            simpleSpinner?.classList.remove('active');
+            const simpleLoadingText = document.getElementById('simple-loading-text');
+            if (simpleLoadingText) {
+                simpleLoadingText.textContent = '';
+                simpleLoadingText.style.display = 'none';
+            }
+            // Update the details text now that graph is ready
+            const detailsEl = document.getElementById('score-details');
+            if (detailsEl && pendingInstructionFilesStatus === false) {
+                detailsEl.innerHTML = 'Click <strong>+</strong> to set up Aspect Code';
             }
         }
         

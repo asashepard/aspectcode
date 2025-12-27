@@ -12,7 +12,6 @@ import { Finding, ScanResult, createSuppressionComment } from './types/protocol'
 import { AutofixV1Service } from './archive/autofix/service';
 import { isAutoFixV1Finding } from './archive/autofix/config';
 import { AspectCodeState } from './state';
-import { getIncrementalIndexer } from './extension';
 
 export class AspectCodeCommands {
   private engineService: AspectCodeEngineService;
@@ -464,23 +463,7 @@ export class AspectCodeCommands {
    * Re-run full repository analysis (same as "Analyze workspace" command)
    */
   async rerunAnalysis(modifiedFiles?: string[]): Promise<void> {
-    // Try to use incremental validation for better performance
-    const incrementalIndexer = getIncrementalIndexer();
-    
-    if (modifiedFiles && modifiedFiles.length > 0 && incrementalIndexer?.isInitialized()) {
-      this.outputChannel.appendLine(`[Auto-Fix v1] Using incremental validation for ${modifiedFiles.length} modified files`);
-      
-      try {
-        await incrementalIndexer.handleBulkChange(modifiedFiles);
-        this.outputChannel.appendLine('[Auto-Fix v1] Incremental validation complete');
-        return;
-      } catch (error) {
-        this.outputChannel.appendLine(`[Auto-Fix v1] Incremental validation failed: ${error}, falling back to full validation`);
-        // Fall through to full validation
-      }
-    }
-    
-    // Fall back to full validation
+    // Always run full validation (no incremental)
     this.outputChannel.appendLine('[Auto-Fix v1] Running full validation...');
     
     try {

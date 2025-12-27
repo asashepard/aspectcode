@@ -1,6 +1,8 @@
 /**
  * Production-ready dependency analyzer for code relationships
  * Performs actual static analysis of imports, requires, and function calls
+ * 
+ * Optimized with pre-built indexes for O(1) lookups instead of O(N) scans.
  */
 
 import * as vscode from 'vscode';
@@ -30,28 +32,119 @@ export interface CallSite {
   isExternal: boolean;  // Call to external module
 }
 
+/** Progress callback for dependency analysis */
+export type DependencyProgressCallback = (current: number, total: number, phase: string) => void;
+
+/**
+ * Pre-built indexes for fast module resolution.
+ * Built once per analysis run; lookups are O(1) average.
+ */
+interface FileIndex {
+  /** basename (no ext) -> list of full paths */
+  byBasename: Map<string, string[]>;
+  /** normalized lowercase path -> original path */
+  byNormalizedPath: Map<string, string>;
+  /** Set of all normalized lowercase paths for O(1) existence check */
+  normalizedPathSet: Set<string>;
+  /** For package-style imports: "pkg/subpkg/module" -> full path */
+  byPackagePath: Map<string, string[]>;
+}
+
 export class DependencyAnalyzer {
   private workspaceFiles: Map<string, string> = new Map(); // file path -> content cache
+  private fileIndex: FileIndex | null = null;
+  
+  /**
+   * Set pre-loaded file contents to avoid redundant file reads.
+   * Call this before analyzeDependencies if you already have the content.
+   */
+  setFileContentsCache(cache: Map<string, string>): void {
+    this.workspaceFiles = new Map(cache);
+  }
+  
+  /**
+   * Build indexes for fast lookups. O(N) once, then O(1) per lookup.
+   */
+  private buildFileIndex(files: string[]): FileIndex {
+    const byBasename = new Map<string, string[]>();
+    const byNormalizedPath = new Map<string, string>();
+    const normalizedPathSet = new Set<string>();
+    const byPackagePath = new Map<string, string[]>();
+    
+    for (const file of files) {
+      const normalized = path.normalize(file);
+      const normalizedLower = normalized.toLowerCase();
+      const basename = path.basename(file, path.extname(file));
+      
+      // Index by basename
+      const basenameKey = basename.toLowerCase();
+      if (!byBasename.has(basenameKey)) {
+        byBasename.set(basenameKey, []);
+      }
+      byBasename.get(basenameKey)!.push(file);
+      
+      // Index by normalized path
+      byNormalizedPath.set(normalizedLower, file);
+      normalizedPathSet.add(normalizedLower);
+      
+      // Index by package-style path segments
+      const parts = normalized.replace(/\\/g, '/').split('/');
+      const basenameNoExt = path.basename(file, path.extname(file));
+      for (let i = 0; i < parts.length - 1; i++) {
+        const pkgPath = parts.slice(i, -1).join('/') + '/' + basenameNoExt;
+        const pkgKey = pkgPath.toLowerCase();
+        if (!byPackagePath.has(pkgKey)) {
+          byPackagePath.set(pkgKey, []);
+        }
+        byPackagePath.get(pkgKey)!.push(file);
+      }
+    }
+    
+    return { byBasename, byNormalizedPath, normalizedPathSet, byPackagePath };
+  }
   
   /**
    * Analyze all real dependencies between workspace files
+   * @param files - List of file paths to analyze
+   * @param onProgress - Optional callback for progress reporting
    */
-  async analyzeDependencies(files: string[]): Promise<DependencyLink[]> {
+  async analyzeDependencies(
+    files: string[],
+    onProgress?: DependencyProgressCallback
+  ): Promise<DependencyLink[]> {
     const links: DependencyLink[] = [];
     const startTime = Date.now();
     
     // Load and cache file contents (parallelized for performance)
-    await this.loadFileContents(files);
+    // Skip if cache was already set via setFileContentsCache
+    if (this.workspaceFiles.size === 0) {
+      onProgress?.(0, files.length, 'Loading file contents...');
+      await this.loadFileContents(files, onProgress);
+    }
     const loadTime = Date.now() - startTime;
     console.log(`[DependencyAnalyzer] Loaded ${this.workspaceFiles.size}/${files.length} files in ${loadTime}ms`);
     
-    for (const file of files) {
+    // Build indexes for fast resolution (O(N) once)
+    onProgress?.(0, files.length, 'Building file index...');
+    this.fileIndex = this.buildFileIndex(files);
+    const indexTime = Date.now() - startTime - loadTime;
+    console.log(`[DependencyAnalyzer] Built index in ${indexTime}ms`);
+    
+    // Analyze each file
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      
+      // Report progress every 10 files or on first/last
+      if (i % 10 === 0 || i === files.length - 1) {
+        onProgress?.(i + 1, files.length, `Analyzing imports (${i + 1}/${files.length})...`);
+      }
+      
       const fileDependencies = await this.analyzeFileImports(file);
       const fileCalls = await this.analyzeFileCalls(file);
       
       // Convert imports to dependency links
       for (const imp of fileDependencies) {
-        const resolvedTarget = this.resolveModulePath(imp.module, file, files);
+        const resolvedTarget = this.resolveModulePathFast(imp.module, file);
         
         // Skip self-references (file importing itself)
         if (resolvedTarget && resolvedTarget !== file) {
@@ -70,7 +163,7 @@ export class DependencyAnalyzer {
       // Convert function calls to dependency links
       for (const call of fileCalls) {
         if (call.isExternal) {
-          const resolvedTarget = this.resolveCallTarget(call.callee, file, files);
+          const resolvedTarget = this.resolveCallTargetFast(call.callee, file);
           // Skip self-references
           if (resolvedTarget && resolvedTarget !== file) {
             const existing = links.find(l => 
@@ -98,10 +191,17 @@ export class DependencyAnalyzer {
     }
     
     // Detect circular dependencies
+    onProgress?.(files.length, files.length, 'Detecting circular dependencies...');
     this.detectCircularDependencies(links);
     
     // Merge bidirectional relationships
     this.mergeBidirectionalLinks(links);
+    
+    // Clear index after use to free memory
+    this.fileIndex = null;
+    
+    const totalTime = Date.now() - startTime;
+    console.log(`[DependencyAnalyzer] Analyzed ${files.length} files, found ${links.length} links in ${totalTime}ms`);
     
     return links;
   }
@@ -534,6 +634,183 @@ export class DependencyAnalyzer {
   }
 
   /**
+   * Fast module path resolution using pre-built indexes.
+   * O(1) average per lookup instead of O(N).
+   */
+  private resolveModulePathFast(module: string, sourceFile: string): string | null {
+    if (!this.fileIndex) {
+      return null;
+    }
+    
+    const sourceDir = path.dirname(sourceFile);
+    const extension = path.extname(sourceFile);
+    const { byBasename, byNormalizedPath, normalizedPathSet, byPackagePath } = this.fileIndex;
+
+    const chooseBestCandidate = (candidates: string[]): string | null => {
+      if (candidates.length === 0) return null;
+      if (candidates.length === 1) return candidates[0];
+
+      // Prefer same directory
+      for (const candidate of candidates) {
+        if (path.dirname(candidate) === sourceDir) {
+          return candidate;
+        }
+      }
+
+      // Prefer matching extension (when present)
+      const sameExt = candidates.filter((c) => path.extname(c).toLowerCase() === extension.toLowerCase());
+      if (sameExt.length === 1) return sameExt[0];
+      if (sameExt.length > 1) candidates = sameExt;
+
+      // Prefer shortest relative path
+      let best = candidates[0];
+      let bestScore = Number.POSITIVE_INFINITY;
+      for (const candidate of candidates) {
+        const rel = path.relative(sourceDir, path.dirname(candidate));
+        const score = rel.split(path.sep).filter(Boolean).length;
+        if (score < bestScore) {
+          best = candidate;
+          bestScore = score;
+        }
+      }
+      return best;
+    };
+
+    const stripKnownExt = (key: string): string => key.replace(/\.(ts|tsx|js|jsx|mjs|cjs|py|java|cs|go|rs|rb|php)$/i, '');
+    
+    // Build module variants
+    let moduleVariants = [module];
+    if (module.includes('.')) {
+      const parts = module.split('.');
+      moduleVariants.push(parts[parts.length - 1]); // Last part
+      moduleVariants.push(parts.join('/')); // Dots to slashes
+    }
+    
+    // Try relative path resolution first (O(1) lookup)
+    for (const moduleVariant of moduleVariants) {
+      const candidates = [
+        path.resolve(sourceDir, moduleVariant + extension),
+        path.resolve(sourceDir, moduleVariant, 'index' + extension),
+        path.resolve(sourceDir, moduleVariant + '.py'),
+        path.resolve(sourceDir, moduleVariant + '.ts'),
+        path.resolve(sourceDir, moduleVariant + '.js'),
+      ];
+      
+      for (const candidate of candidates) {
+        const normalized = path.normalize(candidate);
+        const normalizedLower = normalized.toLowerCase();
+        const match = byNormalizedPath.get(normalizedLower);
+        if (match) return match;
+        if (normalizedPathSet.has(normalizedLower)) {
+          return byNormalizedPath.get(normalizedLower) || normalized;
+        }
+      }
+    }
+    
+    // Try basename index (O(1) average)
+    for (const moduleVariant of moduleVariants) {
+      const filesWithBasename = byBasename.get(moduleVariant.toLowerCase());
+      if (filesWithBasename && filesWithBasename.length > 0) {
+        // If only one match, return it
+        if (filesWithBasename.length === 1) {
+          return filesWithBasename[0];
+        }
+        
+        // Multiple matches: prefer files in same directory or package
+        for (const file of filesWithBasename) {
+          if (path.dirname(file) === sourceDir) {
+            return file;
+          }
+        }
+        
+        // For package imports, prefer matching package structure
+        if (module.includes('.')) {
+          const parts = module.split('.');
+          for (const file of filesWithBasename) {
+            if (file.includes(parts[0])) {
+              return file;
+            }
+          }
+        }
+        
+        // Return first match as fallback
+        return filesWithBasename[0];
+      }
+    }
+
+    // Try package/path index for dotted imports and slash/path-alias imports.
+    const packageKeys = new Set<string>();
+    if (module.includes('.')) {
+      packageKeys.add(module.replace(/\./g, '/'));
+    }
+    for (const variant of moduleVariants) {
+      const normalizedVariant = variant.replace(/\\/g, '/');
+      if (normalizedVariant.includes('/') && !normalizedVariant.startsWith('.')) {
+        packageKeys.add(normalizedVariant);
+
+        // Scoped imports: @scope/pkg/path
+        if (normalizedVariant.startsWith('@')) {
+          packageKeys.add(normalizedVariant.slice(1));
+          const segs = normalizedVariant.split('/');
+          if (segs.length >= 2) {
+            packageKeys.add(segs.slice(1).join('/'));
+          }
+        }
+      }
+    }
+
+    for (const key of packageKeys) {
+      const keyNoExt = stripKnownExt(key).replace(/^\//, '');
+      const keyLower = keyNoExt.toLowerCase();
+      const matches = byPackagePath.get(keyLower);
+      if (matches && matches.length > 0) {
+        const chosen = chooseBestCandidate(matches);
+        if (chosen) return chosen;
+      }
+    }
+    
+    return null;
+  }
+
+  /**
+   * Fast call target resolution using cached file contents.
+   * Searches only files that might match based on basename heuristics.
+   */
+  private resolveCallTargetFast(callee: string, sourceFile: string): string | null {
+    if (!this.fileIndex) {
+      return null;
+    }
+    
+    // Extract the module part from callee (e.g., "module.function" -> "module")
+    const parts = callee.split('.');
+    if (parts.length < 2) {
+      return null; // Not a qualified call
+    }
+    
+    const moduleName = parts[0];
+    
+    // Try to find files matching the module name (O(1) lookup)
+    const candidateFiles = this.fileIndex.byBasename.get(moduleName) || [];
+    
+    // Search only candidate files instead of all files
+    const patterns = [
+      new RegExp(`def\\s+${parts[parts.length - 1]}\\s*\\(`, 'i'),
+      new RegExp(`function\\s+${parts[parts.length - 1]}\\s*\\(`, 'i'),
+      new RegExp(`${parts[parts.length - 1]}\\s*\\(.*\\)\\s*{`, 'i'),
+      new RegExp(`${parts[parts.length - 1]}\\s*=\\s*\\(`, 'i'),
+    ];
+    
+    for (const file of candidateFiles) {
+      const content = this.workspaceFiles.get(file);
+      if (content && patterns.some(pattern => pattern.test(content))) {
+        return file;
+      }
+    }
+    
+    return null;
+  }
+
+  /**
    * Detect if a function call is likely external
    */
   private isLikelyExternalCall(callExpr: string, fileExtension: string): boolean {
@@ -659,7 +936,7 @@ export class DependencyAnalyzer {
    * Load file contents into cache using fast filesystem reads.
    * Uses parallel batching for performance on large workspaces.
    */
-  private async loadFileContents(files: string[]): Promise<void> {
+  private async loadFileContents(files: string[], onProgress?: DependencyProgressCallback): Promise<void> {
     this.workspaceFiles.clear();
     
     // Process in parallel batches for performance
@@ -680,6 +957,9 @@ export class DependencyAnalyzer {
         }
         // Skip failed files silently
       }
+      
+      // Report progress
+      onProgress?.(Math.min(i + BATCH_SIZE, files.length), files.length, `Reading files (${Math.min(i + BATCH_SIZE, files.length)}/${files.length})...`);
     }
   }
 }

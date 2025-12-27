@@ -7,7 +7,6 @@
 
 import * as vscode from 'vscode';
 import { AspectCodeCommands, AspectCodeCodeActionProvider } from './commands';
-import { SmartValidationService } from './services/SmartValidationService';
 import { PromptGenerationService } from './services/PromptGenerationService';
 import { AspectCodeState } from './state';
 import { detectAssistants, AssistantId } from './assistants/detection';
@@ -29,7 +28,6 @@ export function activateNewCommands(
   const channel = outputChannel ?? vscode.window.createOutputChannel('Aspect Code');
   const commands = new AspectCodeCommands(context, state);
   const codeActionProvider = new AspectCodeCodeActionProvider(commands);
-  const smartValidationService = new SmartValidationService(channel);
   const promptGenerationService = new PromptGenerationService(channel);
 
   // Register commands
@@ -256,6 +254,22 @@ export function activateNewCommands(
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
     if (!workspaceRoot) {return;}
 
+    // The setup warning is shown in sync with '+' after the dependency graph is ready (PanelProvider).
+    // Avoid popping a separate startup toast here.
+    return;
+    
+    const panelProvider = (state as any)._panelProvider;
+    // If the panel exists but hasn't finished its initial graph load yet, don't pop warnings.
+    // The panel UI will present the setup action once it's ready.
+    if (panelProvider) {
+      const setupInProgress = typeof panelProvider.isSetupInProgress === 'function' && panelProvider.isSetupInProgress();
+      const graphNotReady = typeof panelProvider.isGraphReady === 'function' && !panelProvider.isGraphReady();
+      if (setupInProgress || graphNotReady) {
+        outputChannel.appendLine(`[Startup] Panel still loading (setupInProgress=${setupInProgress}, graphNotReady=${graphNotReady}); suppressing startup warning`);
+        return;
+      }
+    }
+
     const detected = await detectAssistants(workspaceRoot);
     const hasAspectKB = detected.has('aspectKB');
     
@@ -270,7 +284,6 @@ export function activateNewCommands(
     
     if (!setupComplete) {
       // Update panel if available
-      const panelProvider = (state as any)._panelProvider;
       if (panelProvider && typeof panelProvider.post === 'function') {
         panelProvider.post({ type: 'INSTRUCTION_FILES_STATUS', hasFiles: false });
       }
@@ -651,26 +664,14 @@ async function handleGenerateInstructionFiles(
         title: 'Aspect Code',
         cancellable: false
       }, async (progress) => {
-        const baseUrl = getBaseUrl();
-        const isLocalServer = /(^|\/\/)(localhost|127\.0\.0\.1)(:|\/|$)/i.test(baseUrl);
-
-        // IMPORTANT: /index requires the repo to exist on the server filesystem.
-        // For remote servers (default), it cannot see your local paths and may take ~60s to fail.
-        if (isLocalServer) {
-          const tIndex = Date.now();
-          progress.report({ message: 'Indexing repository...' });
-          await vscode.commands.executeCommand('aspectcode.index');
-          outputChannel.appendLine(`[Perf][Instructions][cmd] INDEX tookMs=${Date.now() - tIndex}`);
-        } else {
-          outputChannel.appendLine(`[Instructions] Skipping INDEX (serverBaseUrl=${baseUrl} cannot access local filesystem)`);
-        }
+        // INDEX is disabled for remote servers (always the case now)
+        // Just run EXAMINE which sends file contents to the server
         
         const tExam = Date.now();
         progress.report({ message: 'Running examination...' });
-        // Remote validation can be slow. For instruction generation, structure-only is usually sufficient
+        // For instruction generation, structure-only is usually sufficient
         // (entry points, data models, external integrations) and is typically faster.
-        const examineModes = isLocalServer ? undefined : ['structure'];
-        await vscode.commands.executeCommand('aspectcode.examine', { modes: examineModes });
+        await vscode.commands.executeCommand('aspectcode.examine', { modes: ['structure'] });
         outputChannel.appendLine(`[Perf][Instructions][cmd] EXAMINE tookMs=${Date.now() - tExam}`);
       });
       
@@ -720,37 +721,16 @@ async function handleGenerateInstructionFiles(
       outputChannel.appendLine(`[Perf][Instructions][cmd] generateInstructionFiles tookMs=${Date.now() - tGen}`);
     }
 
-    // Save cache after generating files (ensures cache is in sync with KB)
+    // Mark KB as fresh after generation
     try {
-      const { getCacheManager, getIncrementalIndexer } = await import('./extension');
-      const cacheManager = getCacheManager();
-      const incrementalIndexer = getIncrementalIndexer();
-      
-      if (cacheManager && incrementalIndexer) {
-        outputChannel.appendLine('[Cache] Saving cache after KB generation...');
-        // IMPORTANT: Avoid hashing the entire workspace here (can take 30-60s on Windows).
-        // Prefer reusing existing cache signatures when available.
-        const existingCache = cacheManager.getCache();
-        const signatures = existingCache
-          ? new Map(Object.entries(existingCache.files))
-          : new Map();
-        const cachedFindings = cacheManager.findingsToCache(state.s.findings || []);
-        const dependencies = cacheManager.dependenciesToCache(incrementalIndexer.getReverseDependencyGraph());
-        const lastValidate = state.s.lastValidate ? {
-          total: state.s.lastValidate.total,
-          fixable: state.s.lastValidate.fixable,
-          tookMs: state.s.lastValidate.tookMs
-        } : undefined;
-        if (signatures.size === 0) {
-          outputChannel.appendLine('[Cache] No existing cache signatures available; skipping signatures update after KB generation');
-        }
-        await cacheManager.saveCache(signatures, cachedFindings, dependencies, lastValidate);
-        outputChannel.appendLine(`[Cache] Saved ${cachedFindings.length} findings to cache`);
-      } else {
-        outputChannel.appendLine('[Cache] Cache manager or indexer not available, skipping cache save');
+      const { getWorkspaceFingerprint } = await import('./extension');
+      const fingerprint = getWorkspaceFingerprint();
+      if (fingerprint) {
+        await fingerprint.markKbFresh();
+        outputChannel.appendLine('[KB] Marked KB as fresh');
       }
-    } catch (cacheError) {
-      outputChannel.appendLine(`[Cache] Failed to save cache (non-critical): ${cacheError}`);
+    } catch (e) {
+      outputChannel.appendLine(`[KB] Failed to mark KB fresh (non-critical): ${e}`);
     }
 
     // DISABLED: ALIGNMENTS.json feature - never generate this file

@@ -195,31 +195,11 @@
           "default": 5,
           "description": "Maximum dependency depth for smart examination"
         },
-        "aspectcode.incremental.enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable incremental re-indexing on file save for faster examination"
-        },
-        "aspectcode.incremental.debounceMs": {
-          "type": "number",
-          "default": 300,
-          "minimum": 0,
-          "maximum": 5000,
-          "description": "Debounce time for file save examination (milliseconds)"
-        },
-        "aspectcode.incremental.maxAffectedFiles": {
-          "type": "number",
-          "default": 50,
-          "minimum": 1,
-          "maximum": 500,
-          "description": "Maximum files to re-examine incrementally (falls back to manual examination above this)"
-        },
-        "aspectcode.incremental.maxTransitiveDepth": {
-          "type": "number",
-          "default": 3,
-          "minimum": 1,
-          "maximum": 10,
-          "description": "Maximum dependency depth for incremental examination propagation"
+        "aspectcode.autoRegenerateKb": {
+          "type": "string",
+          "enum": ["off", "idle"],
+          "default": "off",
+          "description": "Auto-regenerate KB files: 'off' = manual only (show stale indicator), 'idle' = regenerate after 30s of inactivity"
         },
         "aspectcode.promptGeneration.enabled": {
           "type": "boolean",

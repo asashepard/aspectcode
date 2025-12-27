@@ -10,9 +10,7 @@ import { AspectCodeState } from './state';
 import { post, fetchCapabilities, initHttp, getHeaders, handleHttpError, getBaseUrl } from './http';
 import Parser from 'web-tree-sitter';
 import { activateNewCommands } from './newCommandsIntegration';
-import { IncrementalIndexer } from './services/IncrementalIndexer';
-import { DependencyAnalyzer } from './panel/DependencyAnalyzer';
-import { CacheManager } from './services/CacheManager';
+import { WorkspaceFingerprint } from './services/WorkspaceFingerprint';
 
 let examineOnSave = false;
 const diag = vscode.languages.createDiagnosticCollection('aspectcode');
@@ -23,29 +21,18 @@ let outputChannel: vscode.OutputChannel;
 // Status bar item
 let statusBarItem: vscode.StatusBarItem;
 
-// Incremental indexer instance
-let incrementalIndexer: IncrementalIndexer | null = null;
-
-// Cache manager instance
-let cacheManager: CacheManager | null = null;
+// Workspace fingerprint for KB staleness detection
+let workspaceFingerprint: WorkspaceFingerprint | null = null;
 
 // Extension version from package.json
 const EXTENSION_VERSION = '0.0.1';
 
 /**
- * Get the incremental indexer instance.
+ * Get the workspace fingerprint service.
  * Returns null if not yet initialized.
  */
-export function getIncrementalIndexer(): IncrementalIndexer | null {
-  return incrementalIndexer;
-}
-
-/**
- * Get the cache manager instance.
- * Returns null if not yet initialized.
- */
-export function getCacheManager(): CacheManager | null {
-  return cacheManager;
+export function getWorkspaceFingerprint(): WorkspaceFingerprint | null {
+  return workspaceFingerprint;
 }
 
 // Dev logging helper
@@ -1154,10 +1141,11 @@ function sendProgressToPanel(state: AspectCodeState | undefined, phase: string, 
 }
 
 // Repository indexing functions
+// NOTE: INDEX is disabled for remote servers (always the case now).
+// The /index endpoint requires repo files on the server filesystem which remote servers cannot access.
 async function indexRepository(force: boolean = false, state?: AspectCodeState) {
   const root = await getWorkspaceRoot();
   if (!root) {
-    vscode.window.showErrorMessage('No workspace root found');
     return;
   }
 
@@ -1165,15 +1153,10 @@ async function indexRepository(force: boolean = false, state?: AspectCodeState) 
   const isLocalServer = /(^|\/\/)(localhost|127\.0\.0\.1)(:|\/|$)/i.test(apiUrl);
 
   // /index requires that the repo path exists on the server filesystem.
-  // When apiUrl points to a remote server, it cannot access local paths and will often take ~60s to fail.
+  // Remote servers cannot access local paths, so INDEX is always skipped.
   if (!isLocalServer) {
-    outputChannel?.appendLine(`[indexRepository] Skipping INDEX for remote serverBaseUrl=${apiUrl} (cannot access local filesystem path ${root})`);
-    vscode.window.showWarningMessage(
-      'Aspect Code INDEX requires a local server. Configure aspectcode.serverBaseUrl to a local endpoint (e.g. http://localhost:PORT) or run EXAMINE only.'
-    );
-    if (state) {
-      state.update({ busy: false, error: `Index skipped: remote server cannot access local repo path (${apiUrl})` });
-    }
+    // Silently skip - no warning needed since this is expected behavior
+    outputChannel?.appendLine(`[indexRepository] Skipping INDEX for remote server (use EXAMINE instead)`);
     return;
   }
 
@@ -1359,88 +1342,86 @@ async function examineFullRepository(
       outputChannel?.appendLine(`[Perf][EXAMINE] discoverWorkspaceSourceFiles tookMs=${Date.now() - tDiscover}`);
       
       // Read file contents (with size limit to prevent memory issues)
+      // Use parallel batching to avoid antivirus slowdowns
       const maxFileSize = 100 * 1024; // 100KB per file
       const maxTotalSize = 10 * 1024 * 1024; // 10MB total
       const filesData: { path: string; content: string; language?: string }[] = [];
       let totalSize = 0;
 
       const tReadLoopStart = Date.now();
-      let statSlowCount = 0;
-      let readSlowCount = 0;
-      let statSlowLogged = 0;
-      let readSlowLogged = 0;
-      let processed = 0;
       
-      for (const filePath of sourceFiles) {
-        try {
-          const uri = vscode.Uri.file(filePath);
+      // Helper to detect language from extension
+      const detectLanguage = (filePath: string): string | undefined => {
+        if (filePath.endsWith('.py')) return 'python';
+        if (filePath.endsWith('.ts') || filePath.endsWith('.tsx')) return 'typescript';
+        if (filePath.endsWith('.js') || filePath.endsWith('.jsx') || filePath.endsWith('.mjs') || filePath.endsWith('.cjs')) return 'javascript';
+        if (filePath.endsWith('.java')) return 'java';
+        if (filePath.endsWith('.cs')) return 'csharp';
+        return undefined;
+      };
 
-          const tStat = Date.now();
-          const stat = await vscode.workspace.fs.stat(uri);
-          const statMs = Date.now() - tStat;
-          if (statMs > 500) {
-            statSlowCount++;
-            if (statSlowLogged < 25) {
-              statSlowLogged++;
-              outputChannel?.appendLine(`[Perf][EXAMINE] SLOW stat tookMs=${statMs} path=${filePath}`);
+      // Process files in parallel batches for better performance
+      const BATCH_SIZE = 20;
+      let processedCount = 0;
+      let skippedLarge = 0;
+      
+      for (let i = 0; i < sourceFiles.length && totalSize < maxTotalSize; i += BATCH_SIZE) {
+        const batch = sourceFiles.slice(i, i + BATCH_SIZE);
+        
+        const batchResults = await Promise.allSettled(
+          batch.map(async (filePath) => {
+            const uri = vscode.Uri.file(filePath);
+            const stat = await vscode.workspace.fs.stat(uri);
+            
+            // Skip files that are too large
+            if (stat.size > maxFileSize) {
+              return { skipped: true, size: stat.size, path: filePath };
+            }
+            
+            const content = await vscode.workspace.fs.readFile(uri);
+            const text = new TextDecoder().decode(content);
+            const relativePath = path.relative(root, filePath);
+            
+            return {
+              skipped: false,
+              size: stat.size,
+              data: {
+                path: relativePath,
+                content: text,
+                language: detectLanguage(filePath)
+              }
+            };
+          })
+        );
+        
+        // Collect results
+        for (const result of batchResults) {
+          if (result.status === 'fulfilled') {
+            const value = result.value;
+            if (value.skipped) {
+              skippedLarge++;
+            } else if (totalSize + value.size <= maxTotalSize) {
+              filesData.push(value.data!);
+              totalSize += value.size;
             }
           }
-          
-          // Skip files that are too large
-          if (stat.size > maxFileSize) {
-            outputChannel?.appendLine(`[examineFullRepository] Skipping large file: ${filePath} (${stat.size} bytes)`);
-            continue;
-          }
-          
-          // Check total size limit
-          if (totalSize + stat.size > maxTotalSize) {
-            outputChannel?.appendLine(`[examineFullRepository] Reached total size limit, skipping remaining files`);
-            break;
-          }
-          
-          const tRead = Date.now();
-          const content = await vscode.workspace.fs.readFile(uri);
-          const readMs = Date.now() - tRead;
-          if (readMs > 500) {
-            readSlowCount++;
-            if (readSlowLogged < 25) {
-              readSlowLogged++;
-              outputChannel?.appendLine(`[Perf][EXAMINE] SLOW readFile tookMs=${readMs} path=${filePath}`);
-            }
-          }
-          const text = new TextDecoder().decode(content);
-          
-          // Determine relative path from root
-          const relativePath = path.relative(root, filePath);
-          
-          // Detect language from extension
-          let language: string | undefined;
-          if (filePath.endsWith('.py')) language = 'python';
-          else if (filePath.endsWith('.ts') || filePath.endsWith('.tsx')) language = 'typescript';
-          else if (filePath.endsWith('.js') || filePath.endsWith('.jsx') || filePath.endsWith('.mjs') || filePath.endsWith('.cjs')) language = 'javascript';
-          else if (filePath.endsWith('.java')) language = 'java';
-          else if (filePath.endsWith('.cs')) language = 'csharp';
-          
-          filesData.push({
-            path: relativePath,
-            content: text,
-            language
-          });
-          
-          totalSize += stat.size;
-          processed++;
-
-          if (processed % 10 === 0) {
-            const elapsed = Date.now() - tReadLoopStart;
-            outputChannel?.appendLine(`[Perf][EXAMINE] readLoop progress filesAdded=${filesData.length} examined=${processed}/${sourceFiles.length} totalKB=${(totalSize / 1024).toFixed(1)} elapsedMs=${elapsed}`);
-          }
-        } catch (err) {
-          // Skip files that can't be read
-          outputChannel?.appendLine(`[examineFullRepository] Error reading file ${filePath}: ${err}`);
+          // Skip failed files silently
+        }
+        
+        processedCount += batch.length;
+        
+        // Log progress every 50 files
+        if (processedCount % 50 === 0 || i + BATCH_SIZE >= sourceFiles.length) {
+          const elapsed = Date.now() - tReadLoopStart;
+          outputChannel?.appendLine(`[Perf][EXAMINE] readLoop progress filesAdded=${filesData.length} examined=${processedCount}/${sourceFiles.length} totalKB=${(totalSize / 1024).toFixed(1)} elapsedMs=${elapsed}`);
         }
       }
 
-      outputChannel?.appendLine(`[Perf][EXAMINE] readLoop end filesAdded=${filesData.length} examined=${processed}/${sourceFiles.length} totalKB=${(totalSize / 1024).toFixed(1)} tookMs=${Date.now() - tReadLoopStart} slowStat=${statSlowCount} slowRead=${readSlowCount}`);
+      if (skippedLarge > 0) {
+        outputChannel?.appendLine(`[examineFullRepository] Skipped ${skippedLarge} files exceeding ${maxFileSize / 1024}KB limit`);
+      }
+
+      outputChannel?.appendLine(`[Perf][EXAMINE] readLoop end filesAdded=${filesData.length} examined=${processedCount}/${sourceFiles.length} totalKB=${(totalSize / 1024).toFixed(1)} tookMs=${Date.now() - tReadLoopStart}`);
       
       outputChannel?.appendLine(`[examineFullRepository] Prepared ${filesData.length} files (${(totalSize / 1024).toFixed(1)} KB) for remote validation`);
 
@@ -1593,27 +1574,13 @@ async function examineFullRepository(
         try {
           const { autoRegenerateKBFiles } = await import('./assistants/kb');
           await autoRegenerateKBFiles(state, outputChannel!, context);
+          
+          // Mark KB as fresh after successful regeneration
+          if (workspaceFingerprint) {
+            await workspaceFingerprint.markKbFresh();
+          }
         } catch (kbError) {
           outputChannel?.appendLine(`[KB] Auto-regeneration failed (non-critical): ${kbError}`);
-        }
-      }
-
-      // Persist cache for instant startup next time
-      if (cacheManager && state && incrementalIndexer) {
-        try {
-          outputChannel?.appendLine('[Cache] Saving examination cache...');
-          const signatures = await cacheManager.buildFileSignatures(filesData.map(f => f.path));
-          const cachedFindings = cacheManager.findingsToCache(state.s.findings || []);
-          const dependencies = cacheManager.dependenciesToCache(incrementalIndexer.getReverseDependencyGraph());
-          const lastValidate = state.s.lastValidate ? {
-            total: state.s.lastValidate.total,
-            fixable: state.s.lastValidate.fixable,
-            tookMs: state.s.lastValidate.tookMs
-          } : undefined;
-          await cacheManager.saveCache(signatures, cachedFindings, dependencies, lastValidate);
-          outputChannel?.appendLine(`[Cache] Saved ${cachedFindings.length} findings to cache`);
-        } catch (cacheError) {
-          outputChannel?.appendLine(`[Cache] Failed to save cache (non-critical): ${cacheError}`);
         }
       }
 
@@ -2221,101 +2188,37 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // Initialize incremental indexer (will be initialized after first INDEX)
-  incrementalIndexer = new IncrementalIndexer(
-    state,
-    new DependencyAnalyzer(),
-    outputChannel
-  );
-  context.subscriptions.push(incrementalIndexer);
-
-  // Initialize cache manager and load cached findings
+  // Initialize workspace fingerprint for KB staleness detection
   const workspaceRoot = await getWorkspaceRoot();
   if (workspaceRoot) {
-    cacheManager = new CacheManager(workspaceRoot, EXTENSION_VERSION, outputChannel);
+    workspaceFingerprint = new WorkspaceFingerprint(workspaceRoot, EXTENSION_VERSION, outputChannel);
+    context.subscriptions.push(workspaceFingerprint);
     
-    // Link cache manager to incremental indexer for persistence
-    incrementalIndexer.setCacheManager(cacheManager);
+    // Connect fingerprint staleness to panel indicator
+    workspaceFingerprint.onStaleStateChanged(stale => {
+      panelProvider.setKbStale(stale);
+    });
     
-    // Try to load cached findings for instant startup
-    const cacheResult = await cacheManager.loadCache();
-    if (cacheResult.cache) {
-      const cachedData = cacheResult.cache;
-      outputChannel.appendLine('[Startup] Loading cached findings...');
-      
-      // Convert cached findings to absolute paths and populate state
-      const findings = cacheManager.findingsFromCache(cachedData.findings);
-      state.update({
-        findings,
-        lastEXAMINE: cachedData.lastValidate ? {
-          ...cachedData.lastValidate,
-          byCode: {} // Add required field
-        } : undefined
-      });
-      
-      outputChannel.appendLine(`[Startup] Loaded ${findings.length} cached findings`);
-      
-      // Mark cache as loaded to skip automatic INDEX/VALIDATE
-      panelProvider.setCacheLoaded(true);
-      
-      // Restore dependency graph to incremental indexer
-      if (cachedData.dependencies && incrementalIndexer) {
-        const deps = cacheManager.dependenciesFromCache(cachedData.dependencies);
-        incrementalIndexer.restoreDependencyGraph(deps);
+    // Set up KB regeneration callback for idle auto-regeneration
+    workspaceFingerprint.setKbRegenerateCallback(async () => {
+      try {
+        outputChannel.appendLine('[KB] Auto-regenerating KB (idle trigger)...');
+        const { autoRegenerateKBFiles } = await import('./assistants/kb');
+        await autoRegenerateKBFiles(state, outputChannel, context);
+        await workspaceFingerprint?.markKbFresh();
+        outputChannel.appendLine('[KB] Auto-regeneration complete');
+      } catch (e) {
+        outputChannel.appendLine(`[KB] Auto-regeneration failed: ${e}`);
       }
-      
-      // Detect changes and run incremental examination in background
-      setTimeout(async () => {
-        try {
-          const changes = await cacheManager!.detectChanges();
-          if (changes.valid) {
-            const changedCount = changes.added.size + changes.modified.size + changes.deleted.size;
-            if (changedCount > 0) {
-              outputChannel.appendLine(`[Startup] Detected ${changedCount} file changes, running incremental examination...`);
-              
-              // Combine all changed files
-              const allChanged = [...changes.added, ...changes.modified];
-              
-              // Handle deleted files - remove their findings from state
-              if (changes.deleted.size > 0) {
-                const currentFindings = state.s.findings || [];
-                const remainingFindings = currentFindings.filter(
-                  f => !changes.deleted.has(f.file)
-                );
-                state.update({ findings: remainingFindings });
-              }
-              
-              // Run incremental examination on changed files
-              if (allChanged.length > 0 && incrementalIndexer?.isInitialized()) {
-                await incrementalIndexer.handleBulkChange(allChanged);
-              } else if (allChanged.length > 0) {
-                // Indexer not initialized - need full index first
-                outputChannel.appendLine('[Startup] Incremental indexer not ready, needs INDEX first');
-              }
-            } else {
-              outputChannel.appendLine('[Startup] No file changes detected, cache is up to date');
-            }
-          }
-        } catch (error) {
-          outputChannel.appendLine(`[Startup] Change detection failed: ${error}`);
-        }
-      }, 1000); // Delay to let UI render first
+    });
+    
+    // Check KB staleness on startup and update panel
+    const isStale = await workspaceFingerprint.isKbStale();
+    panelProvider.setKbStale(isStale);
+    if (isStale) {
+      outputChannel.appendLine('[Startup] KB may be stale - will show indicator');
     } else {
-      // Cache invalid - log reason and let auto-processing handle regeneration
-      if (cacheResult.invalidReason === 'extension_version') {
-        outputChannel.appendLine('[Startup] Extension version changed - full cache regeneration required');
-        outputChannel.appendLine(`[Startup] ${cacheResult.invalidDetails}`);
-      } else if (cacheResult.invalidReason === 'cache_version') {
-        outputChannel.appendLine('[Startup] Cache schema version changed - full cache regeneration required');
-        outputChannel.appendLine(`[Startup] ${cacheResult.invalidDetails}`);
-      } else if (cacheResult.invalidReason === 'workspace_changed') {
-        outputChannel.appendLine('[Startup] Workspace changed - full cache regeneration required');
-      } else if (cacheResult.invalidReason === 'not_found') {
-        outputChannel.appendLine('[Startup] No cache found - will run initial INDEX and EXAMINE');
-      } else {
-        outputChannel.appendLine(`[Startup] Cache invalid (${cacheResult.invalidReason}) - will regenerate`);
-      }
-      // panelProvider.setCacheLoaded(false) is default, so auto-processing will trigger
+      outputChannel.appendLine('[Startup] KB is up to date');
     }
   }
 
@@ -2439,23 +2342,6 @@ export async function activate(context: vscode.ExtensionContext) {
         await indexRepository(true, state); // force = true to bypass cache
         outputChannel?.appendLine(`=== INDEX: Repository indexed in ${Date.now() - t1}ms ===`);
         
-        // Initialize incremental indexer after successful index
-        if (incrementalIndexer) {
-          try {
-            outputChannel?.appendLine('=== INDEX: Initializing incremental indexer ===');
-            const t2 = Date.now();
-            const allFiles = await discoverWorkspaceSourceFiles();
-            outputChannel?.appendLine(`=== INDEX: Discovered ${allFiles.length} files in ${Date.now() - t2}ms ===`);
-            
-            const t3 = Date.now();
-            await incrementalIndexer.initialize(allFiles);
-            outputChannel?.appendLine(`=== INDEX: Incremental indexer initialized in ${Date.now() - t3}ms ===`);
-          } catch (error) {
-            outputChannel?.appendLine(`INDEX: Incremental indexer initialization failed: ${error}`);
-            // Continue anyway - incremental indexing is optional
-          }
-        }
-        
         outputChannel?.appendLine(`=== INDEX: Total time ${Date.now() - indexStartTime}ms ===`);
         
       } catch (error) {
@@ -2532,19 +2418,7 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('aspectcode.forceReindex', async () => {
       try {
-        outputChannel?.appendLine('=== FORCE REINDEX: Clearing cache and reindexing ===');
-        
-        // Clear the cache
-        if (cacheManager) {
-          await cacheManager.clearCache();
-          outputChannel?.appendLine('=== FORCE REINDEX: Cache cleared ===');
-        }
-        
-        // Reset incremental indexer
-        if (incrementalIndexer) {
-          incrementalIndexer.dispose();
-          outputChannel?.appendLine('=== FORCE REINDEX: Incremental indexer reset ===');
-        }
+        outputChannel?.appendLine('=== FORCE REINDEX: Clearing state and reindexing ===');
         
         // Clear state and run full index + examine
         state.update({
@@ -2557,13 +2431,6 @@ export async function activate(context: vscode.ExtensionContext) {
         
         // Run full index (force = true bypasses cache)
         await indexRepository(true, state);
-        
-        // Re-initialize incremental indexer
-        if (incrementalIndexer) {
-          const allFiles = await discoverWorkspaceSourceFiles();
-          await incrementalIndexer.initialize(allFiles);
-          outputChannel?.appendLine('=== FORCE REINDEX: Incremental indexer re-initialized ===');
-        }
         
         // Run full validation
         await examineFullRepository(state, context);
@@ -2608,67 +2475,8 @@ export async function activate(context: vscode.ExtensionContext) {
     outputChannel.appendLine(`Tree-sitter initialization failed: ${error}`);
   });
 
-  // Hook into file save events for incremental examination
-  context.subscriptions.push(
-    vscode.workspace.onDidSaveTextDocument(async (document) => {
-      // Only process source files
-      const ext = path.extname(document.fileName).toLowerCase();
-      const sourceExtensions = ['.py', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.java', '.cpp', '.c', '.cs', '.go', '.rs'];
-      
-      if (sourceExtensions.includes(ext) && incrementalIndexer?.isInitialized()) {
-        await incrementalIndexer.handleFileSave(document);
-      }
-    })
-  );
-
-  // Handle file creation - trigger incremental examination
-  context.subscriptions.push(
-    vscode.workspace.onDidCreateFiles(async (event) => {
-      const sourceExtensions = ['.py', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.java', '.cpp', '.c', '.cs', '.go', '.rs'];
-      const sourceFiles = event.files.filter(f => {
-        const ext = path.extname(f.fsPath).toLowerCase();
-        return sourceExtensions.includes(ext);
-      });
-      
-      if (sourceFiles.length > 0 && incrementalIndexer?.isInitialized()) {
-        outputChannel?.appendLine(`[FileCreate] ${sourceFiles.length} source file(s) created, triggering validation`);
-        try {
-          await incrementalIndexer.handleBulkChange(sourceFiles.map(f => f.fsPath));
-        } catch (error) {
-          outputChannel?.appendLine(`[FileCreate] Incremental Examination failed: ${error}`);
-        }
-      }
-    })
-  );
-
-  // Handle file deletion - trigger incremental examination to remove stale findings
-  context.subscriptions.push(
-    vscode.workspace.onDidDeleteFiles(async (event) => {
-      const sourceExtensions = ['.py', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.java', '.cpp', '.c', '.cs', '.go', '.rs'];
-      const sourceFiles = event.files.filter(f => {
-        const ext = path.extname(f.fsPath).toLowerCase();
-        return sourceExtensions.includes(ext);
-      });
-      
-      if (sourceFiles.length > 0 && incrementalIndexer?.isInitialized()) {
-        outputChannel?.appendLine(`[FileDelete] ${sourceFiles.length} source file(s) deleted, triggering validation`);
-        try {
-          // For deleted files, we need to Re-examine their dependents
-          await incrementalIndexer.handleBulkChange(sourceFiles.map(f => f.fsPath));
-        } catch (error) {
-          outputChannel?.appendLine(`[FileDelete] Incremental Examination failed: ${error}`);
-        }
-      }
-    })
-  );
-
-  // Bulk file change detection for git operations (git checkout, git reset, git stash pop, etc.)
-  // This detects when multiple files change simultaneously without being saved (e.g., git discard)
-  let bulkChangeTimer: NodeJS.Timeout | null = null;
-  let pendingFileChanges = new Set<string>();
-  const BULK_CHANGE_THRESHOLD = 3; // 3+ files changing at once = likely git operation
-  const BULK_CHANGE_DEBOUNCE = 500; // 500ms window to collect changes
-  
+  // Hook into file change events for KB staleness detection
+  // Only track edits to mark KB as potentially stale (no server calls)
   context.subscriptions.push(
     vscode.workspace.onDidChangeTextDocument(async (event) => {
       const ext = path.extname(event.document.fileName).toLowerCase();
@@ -2678,37 +2486,9 @@ export async function activate(context: vscode.ExtensionContext) {
         return;
       }
       
-      // Track files with unsaved changes (for detecting git operations)
-      // Git operations change multiple files at once without saving
+      // Notify fingerprint service that a file was edited (for idle detection)
       if (event.contentChanges.length > 0) {
-        pendingFileChanges.add(event.document.fileName);
-        
-        // Debounce to collect all changes in a batch
-        if (bulkChangeTimer) {
-          clearTimeout(bulkChangeTimer);
-        }
-        
-        bulkChangeTimer = setTimeout(async () => {
-          const changeCount = pendingFileChanges.size;
-          const changedFiles = Array.from(pendingFileChanges);
-          
-          // Only trigger for bulk changes (3+ files) - indicates git operation
-          // Single file changes are handled by onDidSaveTextDocument
-          if (changeCount >= BULK_CHANGE_THRESHOLD && incrementalIndexer?.isInitialized()) {
-            outputChannel?.appendLine(`[GitOperation] Detected ${changeCount} files changed simultaneously`);
-            outputChannel?.appendLine(`[GitOperation] Changed files: ${changedFiles.map(f => path.basename(f)).join(', ')}`);
-            
-            try {
-              await incrementalIndexer.handleBulkChange(changedFiles);
-              outputChannel?.appendLine(`[GitOperation] Incremental Examination completed`);
-            } catch (error) {
-              outputChannel?.appendLine(`[GitOperation] Incremental Examination failed: ${error}`);
-            }
-          }
-          
-          // Clear the tracked changes
-          pendingFileChanges.clear();
-        }, BULK_CHANGE_DEBOUNCE);
+        workspaceFingerprint?.onFileEdited();
       }
     })
   );

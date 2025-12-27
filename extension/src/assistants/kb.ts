@@ -71,6 +71,39 @@ function enforceLineBudget(content: string, maxLines: number, fileName: string):
 }
 
 /**
+ * Pre-load all file contents into a cache to avoid repeated file reads.
+ * This is a major performance optimization - we read each file once and
+ * share the content across all KB generators.
+ */
+async function preloadFileContents(files: string[]): Promise<Map<string, string>> {
+  const cache = new Map<string, string>();
+  const BATCH_SIZE = 30;
+  
+  for (let i = 0; i < files.length; i += BATCH_SIZE) {
+    const batch = files.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(
+      batch.map(async (file) => {
+        try {
+          const uri = vscode.Uri.file(file);
+          const content = await vscode.workspace.fs.readFile(uri);
+          return { file, content: Buffer.from(content).toString('utf8') };
+        } catch {
+          return { file, content: '' };
+        }
+      })
+    );
+    
+    for (const result of results) {
+      if (result.status === 'fulfilled' && result.value.content) {
+        cache.set(result.value.file, result.value.content);
+      }
+    }
+  }
+  
+  return cache;
+}
+
+/**
  * Ensures .aspect/ and AGENTS.md are added to .gitignore.
  * If .gitignore doesn't exist, prompts the user to create one.
  */
@@ -290,31 +323,45 @@ export async function generateKnowledgeBase(
   // Ensure .aspect/ is in .gitignore
   await ensureGitignore(workspaceRoot, outputChannel);
 
+  const kbStart = Date.now();
   outputChannel.appendLine('[KB] Generating V3 knowledge base in .aspect/');
 
   // Load tree-sitter grammars if context is available
   let grammars: LoadedGrammars | null = null;
   if (context) {
     try {
+      const tGrammar = Date.now();
       grammars = await loadGrammarsOnce(context, outputChannel);
-      outputChannel.appendLine('[KB] Tree-sitter grammars loaded for enhanced symbol extraction');
+      outputChannel.appendLine(`[KB] Tree-sitter grammars loaded (${Date.now() - tGrammar}ms)`);
     } catch (e) {
       outputChannel.appendLine(`[KB] Tree-sitter grammars not available, using regex fallback: ${e}`);
     }
   }
 
   // Pre-fetch shared data
+  const tDiscover = Date.now();
   const files = await discoverWorkspaceFiles(workspaceRoot);
-  const { stats: depData, links: allLinks } = await getDetailedDependencyData(workspaceRoot, files, outputChannel);
+  outputChannel.appendLine(`[KB][Perf] discoverWorkspaceFiles: ${files.length} files in ${Date.now() - tDiscover}ms`);
+  
+  // Pre-load all file contents once to avoid repeated reads (major perf optimization)
+  const tCache = Date.now();
+  const fileContentCache = await preloadFileContents(files);
+  outputChannel.appendLine(`[KB][Perf] preloadFileContents: ${fileContentCache.size} files cached in ${Date.now() - tCache}ms`);
+  
+  const tDeps = Date.now();
+  const { stats: depData, links: allLinks } = await getDetailedDependencyData(workspaceRoot, files, outputChannel, fileContentCache);
+  outputChannel.appendLine(`[KB][Perf] getDetailedDependencyData: ${allLinks.length} links in ${Date.now() - tDeps}ms`);
 
   // Generate all KB files in parallel (V3: 3 files)
+  const tGen = Date.now();
   await Promise.all([
-    generateArchitectureFile(aspectCodeDir, state, workspaceRoot, files, depData, allLinks, outputChannel),
-    generateMapFile(aspectCodeDir, state, workspaceRoot, files, depData, allLinks, outputChannel, grammars),
-    generateContextFile(aspectCodeDir, state, workspaceRoot, files, allLinks, outputChannel)
+    generateArchitectureFile(aspectCodeDir, state, workspaceRoot, files, depData, allLinks, outputChannel, fileContentCache),
+    generateMapFile(aspectCodeDir, state, workspaceRoot, files, depData, allLinks, outputChannel, grammars, fileContentCache),
+    generateContextFile(aspectCodeDir, state, workspaceRoot, files, allLinks, outputChannel, fileContentCache)
   ]);
+  outputChannel.appendLine(`[KB][Perf] generateFiles (parallel): ${Date.now() - tGen}ms`);
 
-  outputChannel.appendLine('[KB] Knowledge base generation complete (3 files)');
+  outputChannel.appendLine(`[KB] Knowledge base generation complete (3 files) in ${Date.now() - kbStart}ms`);
 }
 
 // ============================================================================
@@ -339,7 +386,8 @@ async function generateArchitectureFile(
   files: string[],
   depData: Map<string, { inDegree: number; outDegree: number }>,
   allLinks: DependencyLink[],
-  outputChannel: vscode.OutputChannel
+  outputChannel: vscode.OutputChannel,
+  fileContentCache: Map<string, string>
 ): Promise<void> {
   let content = '# Architecture\n\n';
   content += '_Read this first. Describes the project layout and "Do Not Break" zones._\n\n';
@@ -480,7 +528,7 @@ async function generateArchitectureFile(
       .filter(f => classifyFile(f.file, workspaceRoot.fsPath) === 'app');
     
     // Use content-based detection for accurate categorization
-    const contentBasedEntryPoints = await detectEntryPointsWithContent(appFiles, workspaceRoot.fsPath);
+    const contentBasedEntryPoints = detectEntryPointsWithContent(appFiles, workspaceRoot.fsPath, fileContentCache);
     
     if (ruleEntryPoints.length > 0 || contentBasedEntryPoints.length > 0) {
       content += '## Entry Points\n\n';
@@ -729,7 +777,8 @@ async function generateMapFile(
   depData: Map<string, { inDegree: number; outDegree: number }>,
   allLinks: DependencyLink[],
   outputChannel: vscode.OutputChannel,
-  grammars?: LoadedGrammars | null
+  grammars: LoadedGrammars | null | undefined,
+  fileContentCache: Map<string, string>
 ): Promise<void> {
   let content = '# Map\n\n';
   content += '_Symbol index with signatures and conventions. Use to find types, functions, and coding patterns._\n\n';
@@ -768,23 +817,12 @@ async function generateMapFile(
       ...interfaces.slice(0, 15).map(m => ({ model: m, type: 'interface' }))
     ];
     
-    const signatureResults = await Promise.allSettled(
-      allModelsToExtract.map(async ({ model }) => {
-        const modelInfo = model.message.replace('Data model: ', '').replace('ORM model: ', '');
-        const signature = await extractModelSignature(model.file, modelInfo);
-        return { file: model.file, modelInfo, signature };
-      })
-    );
-    
-    // Build lookup map for signatures
+    // Extract signatures synchronously using cached content
     const signatureMap = new Map<string, { modelInfo: string; signature: string | null }>();
-    for (const result of signatureResults) {
-      if (result.status === 'fulfilled') {
-        signatureMap.set(result.value.file, { 
-          modelInfo: result.value.modelInfo, 
-          signature: result.value.signature 
-        });
-      }
+    for (const { model } of allModelsToExtract) {
+      const modelInfo = model.message.replace('Data model: ', '').replace('ORM model: ', '');
+      const signature = extractModelSignature(model.file, modelInfo, fileContentCache);
+      signatureMap.set(model.file, { modelInfo, signature });
     }
 
     // Show models with enhanced signatures
@@ -897,17 +935,14 @@ async function generateMapFile(
       .slice(0, 40)
       .map(([file]) => file);
 
-    // Extract symbols in parallel for all files (much faster than sequential)
-    const symbolExtractionResults = await Promise.allSettled(
-      sortedFiles.map(file => 
-        extractFileSymbolsWithSignatures(file, allLinks, workspaceRoot.fsPath, grammars)
-          .then(symbols => ({ file, symbols }))
-      )
-    );
+    // Extract symbols synchronously using cached content
+    const symbolExtractionResults: Array<{ file: string; symbols: Array<{ name: string; kind: string; signature: string | null; calledBy: string[] }> }> = [];
+    for (const file of sortedFiles) {
+      const symbols = extractFileSymbolsWithSignatures(file, allLinks, workspaceRoot.fsPath, grammars, fileContentCache);
+      symbolExtractionResults.push({ file, symbols });
+    }
     
-    for (const result of symbolExtractionResults) {
-      if (result.status !== 'fulfilled') continue;
-      const { file, symbols } = result.value;
+    for (const { file, symbols } of symbolExtractionResults) {
       if (symbols.length === 0) continue;
       
       const relPath = makeRelativePath(file, workspaceRoot.fsPath);
@@ -993,11 +1028,10 @@ async function generateMapFile(
 /**
  * Extract model signature (first line/fields) from a file
  */
-async function extractModelSignature(filePath: string, modelName: string): Promise<string | null> {
+function extractModelSignature(filePath: string, modelName: string, fileContentCache: Map<string, string>): string | null {
   try {
-    const uri = vscode.Uri.file(filePath);
-    const content = await vscode.workspace.fs.readFile(uri);
-    const text = Buffer.from(content).toString('utf-8');
+    const text = fileContentCache.get(filePath);
+    if (!text) return null;
     const lines = text.split('\n');
     const ext = path.extname(filePath).toLowerCase();
     
@@ -1154,18 +1188,18 @@ async function extractModelSignature(filePath: string, modelName: string): Promi
  * Uses tree-sitter AST parsing when grammars are available for accurate multi-line support.
  * Falls back to regex for backwards compatibility.
  */
-async function extractFileSymbolsWithSignatures(
+function extractFileSymbolsWithSignatures(
   filePath: string,
   allLinks: DependencyLink[],
   workspaceRoot: string,
-  grammars?: LoadedGrammars | null
-): Promise<Array<{ name: string; kind: string; signature: string | null; calledBy: string[] }>> {
+  grammars: LoadedGrammars | null | undefined,
+  fileContentCache: Map<string, string>
+): Array<{ name: string; kind: string; signature: string | null; calledBy: string[] }> {
   const symbols: Array<{ name: string; kind: string; signature: string | null; calledBy: string[] }> = [];
   
   try {
-    const uri = vscode.Uri.file(filePath);
-    const content = await vscode.workspace.fs.readFile(uri);
-    const text = Buffer.from(content).toString('utf-8');
+    const text = fileContentCache.get(filePath);
+    if (!text) return symbols;
     const ext = path.extname(filePath).toLowerCase();
     
     // Try tree-sitter extraction if grammars available
@@ -1468,7 +1502,8 @@ async function generateContextFile(
   workspaceRoot: vscode.Uri,
   files: string[],
   allLinks: DependencyLink[],
-  outputChannel: vscode.OutputChannel
+  outputChannel: vscode.OutputChannel,
+  fileContentCache: Map<string, string>
 ): Promise<void> {
   let content = '# Context\n\n';
   content += '_Data flow and co-location context. Use to understand which files work together._\n\n';
@@ -1530,7 +1565,7 @@ async function generateContextFile(
     // DEPENDENCY CHAINS (top 3-10 chains, prefer starting from entry points)
     // ============================================================
     // Detect entry points for chain prioritization
-    const entryPointsForChains = await detectEntryPointsWithContent(appFiles, workspaceRoot.fsPath);
+    const entryPointsForChains = detectEntryPointsWithContent(appFiles, workspaceRoot.fsPath, fileContentCache);
     const runtimeEntryPaths = entryPointsForChains
       .filter(e => e.category === 'runtime')
       .map(e => e.path);
@@ -3047,6 +3082,13 @@ interface DetectedEntryPoint {
  * - TS/JS: Next.js API routes, Express/Nest servers
  * - C#: ASP.NET Program.cs with WebApplication
  * - Java: Spring Boot @SpringBootApplication, @RestController
+/**
+ * Detect entry points from file content using cache.
+ * 
+ * Runtime Entry Points (🔴):
+ * - FastAPI/Flask/Express route handlers
+ * - main() functions, if __name__ == "__main__"
+ * - Lambda/cloud function handlers
  * 
  * Runnable Scripts/Tooling (🟡):
  * - Python: if __name__ == "__main__"
@@ -3056,45 +3098,29 @@ interface DetectedEntryPoint {
  * Barrel/Index Exports (🟡):
  * - index.ts/tsx/js, __init__.py that primarily re-export
  */
-async function detectEntryPointsWithContent(
+function detectEntryPointsWithContent(
   files: string[], 
-  workspaceRoot: string
-): Promise<DetectedEntryPoint[]> {
+  workspaceRoot: string,
+  fileContentCache: Map<string, string>
+): DetectedEntryPoint[] {
   const entryPoints: DetectedEntryPoint[] = [];
   const processedPaths = new Set<string>();
   
-  // Read files in parallel (batch of 20)
-  const batchSize = 20;
-  for (let i = 0; i < files.length; i += batchSize) {
-    const batch = files.slice(i, i + batchSize);
-    const results = await Promise.allSettled(
-      batch.map(async (file) => {
-        const relPath = makeRelativePath(file, workspaceRoot);
-        if (processedPaths.has(relPath)) return null;
-        processedPaths.add(relPath);
-        
-        const ext = path.extname(file).toLowerCase();
-        const basename = path.basename(file, ext).toLowerCase();
-        
-        // Read file content for content-based detection
-        let content = '';
-        try {
-          const uri = vscode.Uri.file(file);
-          const bytes = await vscode.workspace.fs.readFile(uri);
-          content = Buffer.from(bytes).toString('utf-8');
-        } catch {
-          // Skip unreadable files
-          return null;
-        }
-        
-        return analyzeFileForEntryPoint(relPath, basename, ext, content);
-      })
-    );
+  for (const file of files) {
+    const relPath = makeRelativePath(file, workspaceRoot);
+    if (processedPaths.has(relPath)) continue;
+    processedPaths.add(relPath);
     
-    for (const result of results) {
-      if (result.status === 'fulfilled' && result.value) {
-        entryPoints.push(result.value);
-      }
+    const ext = path.extname(file).toLowerCase();
+    const basename = path.basename(file, ext).toLowerCase();
+    
+    // Use cached content
+    const content = fileContentCache.get(file) || '';
+    if (!content) continue;
+    
+    const result = analyzeFileForEntryPoint(relPath, basename, ext, content);
+    if (result) {
+      entryPoints.push(result);
     }
   }
   
@@ -3640,7 +3666,8 @@ function analyzeTestOrganization(files: string[], workspaceRoot: string): {
 async function getDetailedDependencyData(
   workspaceRoot: vscode.Uri,
   files: string[],
-  outputChannel: vscode.OutputChannel
+  outputChannel: vscode.OutputChannel,
+  fileContentCache?: Map<string, string>
 ): Promise<{
   stats: Map<string, { inDegree: number; outDegree: number }>;
   links: DependencyLink[];
@@ -3652,6 +3679,10 @@ async function getDetailedDependencyData(
     if (files.length === 0) return { stats, links };
 
     const analyzer = new DependencyAnalyzer();
+    // Use cached content if available to avoid reading files again
+    if (fileContentCache && fileContentCache.size > 0) {
+      analyzer.setFileContentsCache(fileContentCache);
+    }
     links = await analyzer.analyzeDependencies(files);
 
     for (const file of files) {

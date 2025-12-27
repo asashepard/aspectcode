@@ -92,6 +92,9 @@ If MCP is configured, query the dependency graph programmatically:
 
 /**
  * Generates or updates instruction files for configured AI assistants.
+ * 
+ * Note: KB files should already be generated before calling this function.
+ * Call autoRegenerateKBFiles() first if KB needs regeneration.
  */
 export async function generateInstructionFiles(
   workspaceRoot: vscode.Uri,
@@ -100,8 +103,20 @@ export async function generateInstructionFiles(
   outputChannel: vscode.OutputChannel,
   context?: vscode.ExtensionContext
 ): Promise<void> {
-  // Always generate KB files first
-  await generateKnowledgeBase(workspaceRoot, state, scoreResult, outputChannel, context);
+  // Check if KB files exist; if not, generate them
+  const aspectCodeDir = vscode.Uri.joinPath(workspaceRoot, '.aspect');
+  const architectureFile = vscode.Uri.joinPath(aspectCodeDir, 'architecture.md');
+  let needsKbGeneration = false;
+  try {
+    await vscode.workspace.fs.stat(architectureFile);
+  } catch {
+    needsKbGeneration = true;
+  }
+  
+  if (needsKbGeneration) {
+    outputChannel.appendLine('[Instructions] KB files not found, generating...');
+    await generateKnowledgeBase(workspaceRoot, state, scoreResult, outputChannel, context);
+  }
 
   // Read assistant settings
   const config = vscode.workspace.getConfiguration('aspectcode.assistants');

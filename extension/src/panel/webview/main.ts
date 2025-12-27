@@ -10,6 +10,7 @@ type PanelReadyMsg = { type: 'PANEL_READY' };
 type AutofixOneMsg = { type: 'AUTOFIX_ONE'; id: string };
 type OpenFindingMsg = { type: 'OPEN_FINDING'; file: string; line?: number; column?: number };
 type FixSafeMsg = { type: 'FIX_SAFE' };
+type RegenerateKbMsg = { type: 'REGENERATE_KB' };
 
 type FromExt =
   | { type: 'STATE_UPDATE'; state: StateSnapshot }
@@ -59,6 +60,7 @@ export type StateSnapshot = {
   totalFiles?: number;
   processingPhase?: string;
   progress?: number;
+  kbStale?: boolean;
   score?: {
     overall: number;
     breakdown: {
@@ -606,6 +608,7 @@ function handleStateUpdate(state: StateSnapshot) {
   
   updateStats(state);
   updateFindingsDisplay();
+  updateKbStaleIndicator(state.kbStale ?? false);
   
   // Generate mock dependency graph for demonstration
   if (state.findings.length > 0) {
@@ -660,12 +663,43 @@ function generateMockDependencyGraph(state: StateSnapshot) {
   updateDependencyGraph({ nodes, links });
 }
 
+/**
+ * Update KB stale indicator in the UI.
+ */
+function updateKbStaleIndicator(isStale: boolean) {
+  const indicator = document.getElementById('kb-stale-indicator');
+  if (!indicator) return;
+  
+  if (isStale) {
+    indicator.style.display = 'flex';
+  } else {
+    indicator.style.display = 'none';
+  }
+}
+
+/**
+ * Handle regenerate KB button click.
+ */
+function handleRegenerateKb() {
+  vscode.postMessage({ type: 'REGENERATE_KB' } as RegenerateKbMsg);
+}
+
 // Initialize on script load
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', () => {
+    // Wire up regenerate button
+    const regenBtn = document.getElementById('btn-regenerate-kb');
+    if (regenBtn) {
+      regenBtn.addEventListener('click', handleRegenerateKb);
+    }
     vscode.postMessage({ type: 'PANEL_READY' });
   });
 } else {
+  // Wire up regenerate button
+  const regenBtn = document.getElementById('btn-regenerate-kb');
+  if (regenBtn) {
+    regenBtn.addEventListener('click', handleRegenerateKb);
+  }
   vscode.postMessage({ type: 'PANEL_READY' });
 }
 
