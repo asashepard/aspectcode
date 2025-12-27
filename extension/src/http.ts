@@ -6,6 +6,26 @@ let extensionVersion = "0.0.0";
 // Secret storage reference - set during extension activation
 let secretStorage: vscode.SecretStorage | undefined;
 
+export type ApiKeyAuthStatus = 'unknown' | 'ok' | 'invalid' | 'revoked';
+
+let apiKeyAuthStatus: ApiKeyAuthStatus = 'unknown';
+const apiKeyAuthStatusEmitter = new vscode.EventEmitter<ApiKeyAuthStatus>();
+export const onDidChangeApiKeyAuthStatus = apiKeyAuthStatusEmitter.event;
+
+export function getApiKeyAuthStatus(): ApiKeyAuthStatus {
+  return apiKeyAuthStatus;
+}
+
+export function resetApiKeyAuthStatus(): void {
+  setApiKeyAuthStatus('unknown');
+}
+
+function setApiKeyAuthStatus(next: ApiKeyAuthStatus): void {
+  if (apiKeyAuthStatus === next) return;
+  apiKeyAuthStatus = next;
+  apiKeyAuthStatusEmitter.fire(next);
+}
+
 /**
  * Initialize the HTTP module with the extension context.
  * Must be called during extension activation.
@@ -71,6 +91,7 @@ export async function getHeaders(): Promise<Record<string, string>> {
  */
 export function handleHttpError(status: number, statusText: string): never {
   if (status === 401) {
+    setApiKeyAuthStatus('invalid');
     vscode.window.showErrorMessage(
       "Aspect Code: API key is missing or invalid. Please enter a valid API key.",
       "Enter API Key"
@@ -83,6 +104,7 @@ export function handleHttpError(status: number, statusText: string): never {
   }
   
   if (status === 403) {
+    setApiKeyAuthStatus('revoked');
     vscode.window.showErrorMessage(
       "Aspect Code: Your API key has been revoked. Please contact support for a new key.",
       "Enter New API Key"
@@ -133,6 +155,7 @@ export async function post<T>(path: string, body: any): Promise<T> {
     if (!res.ok) {
       handleHttpError(res.status, res.statusText);
     }
+    setApiKeyAuthStatus('ok');
     return res.json() as Promise<T>;
   } catch (error) {
     clearTimeout(timeoutId);
@@ -156,6 +179,7 @@ export async function get<T>(path: string): Promise<T> {
     if (!res.ok) {
       handleHttpError(res.status, res.statusText);
     }
+    setApiKeyAuthStatus('ok');
     return res.json() as Promise<T>;
   } catch (error) {
     clearTimeout(timeoutId);

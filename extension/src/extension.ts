@@ -7,7 +7,7 @@ import { loadGrammarsOnce, getLoadedGrammarsSummary } from './tsParser';
 import { extractPythonImports, extractTSJSImports } from './importExtractors';
 import { AspectCodePanelProvider } from './panel/PanelProvider';
 import { AspectCodeState } from './state';
-import { post, fetchCapabilities, initHttp, getHeaders, handleHttpError, getBaseUrl } from './http';
+import { post, fetchCapabilities, initHttp, getHeaders, handleHttpError, getBaseUrl, resetApiKeyAuthStatus } from './http';
 import Parser from 'web-tree-sitter';
 import { activateNewCommands } from './newCommandsIntegration';
 import { WorkspaceFingerprint } from './services/WorkspaceFingerprint';
@@ -1538,7 +1538,7 @@ async function examineFullRepository(
           
           state.update({
             findings,
-            lastEXAMINE: validateStats,
+            lastValidate: validateStats,
             error: undefined,
             busy: false,
             ui: { ...(state.s.ui ?? {}), activeTab: (state.s.ui?.activeTab ?? "overview") }
@@ -2297,6 +2297,9 @@ export async function activate(context: vscode.ExtensionContext) {
         // Store the API key in SecretStorage
         await context.secrets.store('aspectcode.apiKey', apiKey.trim());
 
+        // Key changed: clear any previous invalid/revoked banner until we validate again.
+        resetApiKeyAuthStatus();
+
         outputChannel?.appendLine('[Auth] API key stored successfully');
 
         vscode.window.showInformationMessage(
@@ -2333,6 +2336,9 @@ export async function activate(context: vscode.ExtensionContext) {
         await context.secrets.delete('aspectcode.apiKey');
         outputChannel?.appendLine('[Auth] API key cleared from SecretStorage');
 
+        // Key changed: clear any previous invalid/revoked banner.
+        resetApiKeyAuthStatus();
+
         const configApiKey = vscode.workspace.getConfiguration('aspectcode').get<string>('apiKey');
         if (configApiKey && configApiKey.trim().length > 0) {
           vscode.window.showInformationMessage(
@@ -2365,7 +2371,7 @@ export async function activate(context: vscode.ExtensionContext) {
         state.update({
           busy: false,
           findings: [],
-          lastEXAMINE: undefined,
+          lastValidate: undefined,
           capabilities: undefined,
           error: undefined
         });
@@ -2457,7 +2463,7 @@ export async function activate(context: vscode.ExtensionContext) {
         state.update({
           busy: false,
           findings: [],
-          lastEXAMINE: undefined,
+          lastValidate: undefined,
           capabilities: undefined,
           error: undefined
         });

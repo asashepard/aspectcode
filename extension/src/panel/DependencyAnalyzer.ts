@@ -290,13 +290,36 @@ export class DependencyAnalyzer {
    */
   private parsePythonImports(line: string, lineNum: number): ImportStatement[] {
     const imports: ImportStatement[] = [];
+
+    const cleanSymbol = (raw: string): string => {
+      // Remove aliases and surrounding punctuation from multi-line imports.
+      let s = raw.trim();
+      // Drop inline comments.
+      const hashIndex = s.indexOf('#');
+      if (hashIndex >= 0) s = s.slice(0, hashIndex).trim();
+      // Remove alias portion.
+      s = s.split(' as ')[0].trim();
+      // Strip common wrapper characters.
+      s = s.replace(/^[({\[]+/, '').replace(/[)}\]]+$/, '').trim();
+      // Remove trailing commas.
+      s = s.replace(/,+$/, '').trim();
+      return s;
+    };
+
+    const cleanSymbolsList = (symbolsStr: string): string[] => {
+      return symbolsStr
+        .split(',')
+        .map(cleanSymbol)
+        .filter((s) => s.length > 0)
+        .filter((s) => s !== '(' && s !== ')' && s !== '[' && s !== ']' && s !== '{' && s !== '}');
+    };
     
     // from module import symbols
     const fromImportMatch = line.match(/from\s+([\w.]+)\s+import\s+(.+)/);
     if (fromImportMatch) {
       let module = fromImportMatch[1];
       const symbolsStr = fromImportMatch[2];
-      const symbols = symbolsStr.split(',').map(s => s.trim().split(' as ')[0]);
+      const symbols = cleanSymbolsList(symbolsStr);
       
       // Handle package imports like "acme_shop.cycle_simple_b"
       // Extract the last part as the module name for resolution

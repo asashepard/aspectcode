@@ -2,6 +2,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { AspectCodeState } from '../state';
+import { getApiKeyAuthStatus, onDidChangeApiKeyAuthStatus, resetApiKeyAuthStatus, type ApiKeyAuthStatus } from '../http';
 // NOTE: ScoreEngine imports kept but not used - score calculation disabled for performance
 // import { ScoreEngine, ScoreResult } from '../scoring/scoreEngine';
 // import { defaultScoreConfig } from '../scoring/scoreConfig';
@@ -31,6 +32,8 @@ type StateSnapshot = {
   byRule: Record<string, number>;
   history: Array<{ ts: string; filesChanged: number; diffBytes: number }>;
   lastDiffMeta?: { files: number; hunks: number };
+    hasApiKey?: boolean;
+        apiKeyAuthStatus?: ApiKeyAuthStatus;
   totalFiles?: number;
   processingPhase?: string;
   progress?: number;
@@ -42,6 +45,12 @@ type StateSnapshot = {
 type DependencyGraphData = {
   nodes: Array<{ id: string; label: string; type: 'hub' | 'file'; importance: number; file?: string }>;
   links: Array<{ source: string; target: string; strength: number }>;
+};
+
+type DependencyGraphStats = {
+    totalFiles: number;
+    totalDeps?: number;
+    totalCycles?: number;
 };
 
 export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
@@ -75,6 +84,9 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
   private _isProcessingNodeClick: boolean = false; // Flag to indicate node click is being processed
   private _cacheCleanupInterval: NodeJS.Timeout | null = null; // Periodic cache cleanup
   private _kbStale: boolean = false; // Track KB staleness for UI indicator
+
+    private _globalGraphStats: DependencyGraphStats | null = null;
+    private _globalGraphStatsAt = 0;
 
   constructor(
     private readonly _context: vscode.ExtensionContext,
@@ -119,6 +131,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         lastDiffMeta: this._bridgeState.lastDiffMeta,
         fixableRulesCount: this._state.getCapabilities()?.fixable_rules?.length ?? 0,
         lastAction: this._bridgeState.lastAction,
+                hasApiKey: this._bridgeState.hasApiKey,
+            apiKeyAuthStatus: this._bridgeState.apiKeyAuthStatus,
         totalFiles: totalFiles,
         processingPhase: this._bridgeState.processingPhase,
         progress: this._bridgeState.progress,
@@ -150,6 +164,37 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
       })();
     });
 
+        // Initialize and live-update API key auth status.
+        this._bridgeState.apiKeyAuthStatus = getApiKeyAuthStatus();
+
+        this._context.subscriptions.push(
+            onDidChangeApiKeyAuthStatus((status: ApiKeyAuthStatus) => {
+                this._bridgeState.apiKeyAuthStatus = status;
+                this.pushState();
+            })
+        );
+
+        // Keep API key presence + auth status in sync when changed outside the panel.
+        this._context.subscriptions.push(
+            this._context.secrets.onDidChange((e) => {
+                if (e.key !== 'aspectcode.apiKey') return;
+                resetApiKeyAuthStatus();
+                this._bridgeState.apiKeyAuthStatus = getApiKeyAuthStatus();
+                void this.refreshApiKeyStatus();
+                this.pushState();
+            })
+        );
+
+        this._context.subscriptions.push(
+            vscode.workspace.onDidChangeConfiguration((e) => {
+                if (!e.affectsConfiguration('aspectcode.apiKey')) return;
+                resetApiKeyAuthStatus();
+                this._bridgeState.apiKeyAuthStatus = getApiKeyAuthStatus();
+                void this.refreshApiKeyStatus();
+                this.pushState();
+            })
+        );
+
     // Set up periodic cache cleanup (every 60 seconds)
     this._cacheCleanupInterval = setInterval(() => {
       const now = Date.now();
@@ -162,6 +207,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           this._dependencyCache.clear();
           this._workspaceFilesCache = null;
           this._cacheTimestamp = 0;
+                    this._globalGraphStats = null;
+                    this._globalGraphStatsAt = 0;
         }
       }
     }, 60000); // Every 60 seconds
@@ -263,6 +310,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     lastDiffMeta?: { files: number; hunks: number };
     fixableRulesCount?: number;
     lastAction?: string;
+        hasApiKey?: boolean;
+        apiKeyAuthStatus?: ApiKeyAuthStatus;
     totalFiles?: number;
     processingPhase?: string;
     progress?: number;
@@ -281,6 +330,27 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     this._bridgeState.kbStale = stale;
     this.pushState();
   }
+
+    private async computeHasApiKey(): Promise<boolean> {
+        try {
+            const configApiKey = vscode.workspace.getConfiguration('aspectcode').get<string>('apiKey');
+            if (configApiKey && configApiKey.trim().length > 0) {
+                return true;
+            }
+            const secretKey = await this._context.secrets.get('aspectcode.apiKey');
+            return !!(secretKey && secretKey.trim().length > 0);
+        } catch {
+            return false;
+        }
+    }
+
+    private async refreshApiKeyStatus(): Promise<void> {
+        const hasApiKey = await this.computeHasApiKey();
+        if (this._bridgeState.hasApiKey !== hasApiKey) {
+            this._bridgeState.hasApiKey = hasApiKey;
+            this.pushState();
+        }
+    }
 
     private getAutoRegenerateKbMode(): 'off' | 'onSave' | 'idle' {
         const value = vscode.workspace.getConfiguration('aspectcode').get<string>('autoRegenerateKb', 'onSave');
@@ -339,6 +409,98 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
       }
     }
   }
+
+    private ensureGlobalGraphStats(allFiles: string[], allDependencies: DependencyLink[]): DependencyGraphStats {
+        // Recompute only when the underlying cache epoch changes.
+        if (this._globalGraphStats && this._globalGraphStatsAt === this._cacheTimestamp) {
+            return this._globalGraphStats;
+        }
+
+        const totalFiles = allFiles.length;
+        const totalDeps = allDependencies.length;
+        const totalCycles = this.computeCycleGroupCountFromLinks(allFiles, allDependencies);
+
+        this._globalGraphStats = { totalFiles, totalDeps, totalCycles };
+        this._globalGraphStatsAt = this._cacheTimestamp;
+        return this._globalGraphStats;
+    }
+
+    private bestEffortStats(): DependencyGraphStats | undefined {
+        const files = this._workspaceFilesCache;
+        if (!files) return undefined;
+        const deps = this._dependencyCache.get('all') as DependencyLink[] | undefined;
+        if (deps) {
+            return this.ensureGlobalGraphStats(files, deps);
+        }
+        return { totalFiles: files.length };
+    }
+
+    private computeCycleGroupCountFromLinks(files: string[], links: DependencyLink[]): number {
+        try {
+            const nodeIds = files.map((f) => path.normalize(f));
+            const indexMap = new Map<string, number>();
+            for (let i = 0; i < nodeIds.length; i++) {
+                indexMap.set(nodeIds[i].toLowerCase(), i);
+            }
+
+            const adj: number[][] = Array.from({ length: nodeIds.length }, () => []);
+            for (const link of links) {
+                const s = path.normalize(link.source).toLowerCase();
+                const t = path.normalize(link.target).toLowerCase();
+                const si = indexMap.get(s);
+                const ti = indexMap.get(t);
+                if (si === undefined || ti === undefined) continue;
+                if (si === ti) continue;
+                adj[si].push(ti);
+            }
+
+            // Tarjan SCC count (only SCCs of size > 1 count as a cycle group)
+            let idx = 0;
+            const indices = new Array(nodeIds.length).fill(-1);
+            const lowlink = new Array(nodeIds.length).fill(0);
+            const onStack = new Array(nodeIds.length).fill(false);
+            const stack: number[] = [];
+            let cycleGroups = 0;
+
+            const strongconnect = (v: number) => {
+                indices[v] = idx;
+                lowlink[v] = idx;
+                idx++;
+                stack.push(v);
+                onStack[v] = true;
+
+                for (const w of adj[v]) {
+                    if (indices[w] === -1) {
+                        strongconnect(w);
+                        lowlink[v] = Math.min(lowlink[v], lowlink[w]);
+                    } else if (onStack[w]) {
+                        lowlink[v] = Math.min(lowlink[v], indices[w]);
+                    }
+                }
+
+                if (lowlink[v] === indices[v]) {
+                    let w: number;
+                    let size = 0;
+                    do {
+                        w = stack.pop()!;
+                        onStack[w] = false;
+                        size++;
+                    } while (w !== v);
+                    if (size > 1) cycleGroups++;
+                }
+            };
+
+            for (let v = 0; v < nodeIds.length; v++) {
+                if (indices[v] === -1) {
+                    strongconnect(v);
+                }
+            }
+
+            return cycleGroups;
+        } catch {
+            return 0;
+        }
+    }
 
     private async maybeShowSetupWarningAfterGraphReady(): Promise<void> {
         if (this._startupSetupWarningShown) return;
@@ -429,12 +591,19 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     
     if (this._graphCache.has(cacheKey) && (now - this._cacheTimestamp) < this._cacheTimeout) {
       const cachedGraph = this._graphCache.get(cacheKey)!;
+
+            const cachedAllFiles = this._workspaceFilesCache;
+            const cachedAllDeps = this._dependencyCache.get('all') as DependencyLink[] | undefined;
+            const stats = (cachedAllFiles && cachedAllDeps)
+                ? this.ensureGlobalGraphStats(cachedAllFiles, cachedAllDeps)
+                : this._globalGraphStats;
       
       // Use consistent message type (UPPERCASE)
       try {
         this._view?.webview.postMessage({
           type: 'DEPENDENCY_GRAPH',
-          graph: { ...cachedGraph, focusMode: true, centerFile: normalizedFile }
+                    graph: { ...cachedGraph, focusMode: true, centerFile: normalizedFile },
+                    stats
         });
 
                 // If the first graph was satisfied by cache, we still need to enable UI.
@@ -486,6 +655,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
       
       if (!allFiles.includes(normalizedFile)) {
         console.error(`[Dependency Graph] File still not found after rescan. Showing empty graph.`);
+                const stats = this.bestEffortStats();
         // Send empty graph centered on this file anyway
         this._view?.webview.postMessage({
                     type: 'DEPENDENCY_GRAPH',
@@ -504,7 +674,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             links: [],
             focusMode: true,
             centerFile: normalizedFile
-          }
+                    },
+                                        stats
         });
         return;
       }
@@ -521,6 +692,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
       });
       this._dependencyCache.set('all', allDependencies);
     }
+
+        const stats = this.ensureGlobalGraphStats(allFiles, allDependencies as DependencyLink[]);
     
     // Filter to get only dependencies involving the active file (using actual file path)
     const relevantDependencies = allDependencies.filter(dep => 
@@ -615,7 +788,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     while (retries <= maxRetries && !sent) {
       const result = this.post({ 
         type: 'DEPENDENCY_GRAPH', 
-        graph: graphData
+                graph: graphData,
+                stats
       });
       
       sent = result !== false; // post returns false on error, otherwise Thenable or true
@@ -680,7 +854,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
       // No files at all - send empty graph
       this.post({ 
         type: 'DEPENDENCY_GRAPH', 
-        graph: { nodes: [], links: [], focusMode: true, centerFile: null } 
+                graph: { nodes: [], links: [], focusMode: true, centerFile: null },
+                stats: { totalFiles: 0, totalDeps: 0, totalCycles: 0 }
       });
       return;
     }
@@ -717,7 +892,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     }
     
     if (selectedFiles.length === 0) {
-      this.post({ type: 'DEPENDENCY_GRAPH', graph: { nodes: [], links: [] } });
+            this.post({ type: 'DEPENDENCY_GRAPH', graph: { nodes: [], links: [] }, stats: { totalFiles: 0, totalDeps: 0, totalCycles: 0 } });
       return;
     }
     
@@ -795,7 +970,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           circularDependencies: allDependencies.filter(d => d.type === 'circular').length,
           analysisTimestamp: new Date().toISOString()
         }
-      } 
+            },
+            stats: this.ensureGlobalGraphStats(selectedFiles, allDependencies as DependencyLink[])
     });
   }
   
@@ -984,6 +1160,9 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     this._view = view;
     view.webview.options = { enableScripts: true };
     view.webview.html = this.getHtml();
+
+        // Best-effort refresh of API key status for the bottom banner.
+        void this.refreshApiKeyStatus();
     
     // Reset auto-processing flag when webview is resolved/recreated
     this._autoProcessingStarted = false;
@@ -994,6 +1173,9 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     view.webview.onDidReceiveMessage(async (msg: any) => {
       switch (msg?.type) {
         case 'PANEL_READY':
+                    // Ensure API key status is known before first STATE_UPDATE.
+                    this._bridgeState.hasApiKey = await this.computeHasApiKey();
+                                        this._bridgeState.apiKeyAuthStatus = getApiKeyAuthStatus();
           // Check if .aspect/ KB and instruction files exist (single detectAssistants call)
           const workspaceRootForKB = vscode.workspace.workspaceFolders?.[0]?.uri;
           let hasAspectKB = false;
@@ -1038,6 +1220,15 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                         autoRegenerateKb: this.getAutoRegenerateKbMode()
           };
           this.post({ type: 'STATE_UPDATE', state: webviewState });
+
+                    // Startup reliability: proactively build/sent the initial dependency graph.
+                    // This avoids a confusing state where footer totals and top status stay blank
+                    // until an editor-change event happens.
+                    if (!this._initialGraphSent) {
+                        void this.sendDependencyGraph().catch((e) => {
+                            console.error('[Aspect Code:panel] Failed to send initial dependency graph:', e);
+                        });
+                    }
           
           // Send current active file for findings sorting (only real files)
           const activeEditor = vscode.window.activeTextEditor;
@@ -1210,7 +1401,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         case 'FORCE_REINDEX':
           // Show native VS Code confirmation dialog
           const confirmed = await vscode.window.showWarningMessage(
-            'Clear cache and reindex the entire workspace? This may take a moment.',
+                        'Rebuild analysis caches and re-index the workspace? This rebuilds the dependency/indexing data and may take a moment.',
             { modal: true },
             'Reindex'
           );
@@ -1228,6 +1419,9 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                         }
                         try {
                             await vscode.commands.executeCommand(msg.command);
+                            if (msg.command === 'aspectcode.enterApiKey' || msg.command === 'aspectcode.clearApiKey') {
+                                await this.refreshApiKeyStatus();
+                            }
                         } finally {
                             if (perfEnabled) {
                                 this._outputChannel?.appendLine(`[Perf][PanelProvider][COMMAND] end cmd=${msg.command} tookMs=${Date.now() - t0}`);
@@ -1235,6 +1429,55 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                         }
           }
           break;
+
+                case 'OPEN_KB': {
+                    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+                    if (!root) {
+                        vscode.window.showInformationMessage('No workspace folder is open.');
+                        break;
+                    }
+
+                    const toUri = (relPath: string) => vscode.Uri.joinPath(root, ...relPath.split('/').filter(Boolean));
+
+                    const candidates = [
+                        '.aspect/architecture.md',
+                        'architecture.md',
+                        'docs/architecture.md',
+                        'server/docs/architecture.md'
+                    ];
+
+                    let target: vscode.Uri | undefined;
+                    for (const rel of candidates) {
+                        const uri = toUri(rel);
+                        try {
+                            await vscode.workspace.fs.stat(uri);
+                            target = uri;
+                            break;
+                        } catch {
+                            // continue
+                        }
+                    }
+
+                    if (!target) {
+                        try {
+                            const found = await vscode.workspace.findFiles('**/architecture.md', '**/node_modules/**', 1);
+                            if (found.length > 0) {
+                                target = found[0];
+                            }
+                        } catch {
+                            // ignore
+                        }
+                    }
+
+                    if (!target) {
+                        vscode.window.showInformationMessage('architecture.md not found in this workspace.');
+                        break;
+                    }
+
+                    const doc = await vscode.workspace.openTextDocument(target);
+                    await vscode.window.showTextDocument(doc, { preview: true });
+                    break;
+                }
 
         case 'REQUEST_OVERVIEW_GRAPH':
           // 3D graph disabled - code kept for future use
@@ -1797,7 +2040,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         
         .view-toggle {
             display: flex;
-            justify-content: space-between;
+            justify-content: center;
             align-items: center;
             padding: 4px 12px 6px 12px;
             background: var(--vscode-sideBar-background);
@@ -1835,8 +2078,10 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             position: relative;
             display: flex;
             align-items: center;
+            justify-content: center;
             gap: 8px;
             margin-top: 2px;
+            width: 100%;
         }
         
         /* Generate AI Instructions button - attention-grabbing */
@@ -2032,7 +2277,9 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             gap: 16px;
             background: var(--vscode-sideBar-background);
             min-height: 0; /* Allow flex shrinking */
-            padding-bottom: 20px; /* Offset to visually center accounting for header */
+            padding-top: 44px; /* Balance bottom padding so centered controls don't look too high */
+            padding-bottom: 44px; /* Leave space for the fixed bottom status bar */
+            position: relative; /* Anchor absolute loading text/spinner */
         }
         
         body.simple-mode .main-content {
@@ -2102,12 +2349,16 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         
         .simple-view-spinner {
             position: absolute;
+            top: 8px;
             left: 12px;
+            width: 22px;
+            height: 22px;
             display: none;
             align-items: center;
             justify-content: center;
             padding: 4px;
             opacity: 0.8;
+            box-sizing: border-box;
         }
         
         .simple-view-spinner.active {
@@ -2115,15 +2366,128 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         }
 
         .simple-loading-text {
-            margin-top: 6px;
+            position: absolute;
+            top: 8px;
+            left: 40px;
+            right: 40px;
+            height: 22px;
+            line-height: 22px;
             font-size: 12px;
             color: var(--vscode-descriptionForeground);
             text-align: center;
-            max-width: 260px;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
             display: none;
+        }
+
+        .simple-open-kb {
+            position: absolute;
+            top: 30px;
+            left: 40px;
+            right: 40px;
+            height: 18px;
+            line-height: 18px;
+            font-size: 11px;
+            text-align: center;
+            color: var(--vscode-descriptionForeground);
+            cursor: pointer;
+            user-select: none;
+            display: none;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .simple-open-kb:hover {
+            text-decoration: underline;
+        }
+
+        /* Graph header: prompt action slot (button OR spinner, same footprint) */
+        .prompt-action-slot {
+            width: 28px;
+            height: 28px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .prompt-action-slot .validation-spinner {
+            position: static;
+            pointer-events: none;
+        }
+
+        /* Fixed-width KB label in graph header */
+        #complex-auto-regen-kb-text {
+            display: inline-block;
+            width: 86px;
+            text-align: center;
+            white-space: nowrap;
+        }
+
+        /* Fixed bottom status bar */
+        .panel-status-bar {
+            position: fixed;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 10px;
+            background: var(--vscode-sideBar-background);
+            border-top: 1px solid var(--vscode-panel-border);
+            color: var(--vscode-descriptionForeground);
+            font-size: 11px;
+            z-index: 9999;
+            box-sizing: border-box;
+        }
+
+        .panel-status-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            white-space: nowrap;
+            overflow: hidden;
+        }
+
+        .panel-status-right {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .panel-status-warning {
+            color: var(--vscode-notificationsWarningIcon-foreground);
+        }
+
+        .panel-status-api-key-missing {
+            flex: 1;
+            height: 100%;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 0 10px;
+            box-sizing: border-box;
+            cursor: pointer;
+            user-select: none;
+            color: var(--vscode-notificationsErrorIcon-foreground, var(--vscode-errorForeground));
+            background: transparent;
+            border-top: none;
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .panel-status-api-key-missing:focus {
+            outline: 1px solid var(--vscode-focusBorder);
+            outline-offset: -1px;
         }
 
         /* Graph view content */
@@ -2873,6 +3237,103 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             filter: drop-shadow(0 0 6px var(--vscode-focusBorder));
         }
 
+        /* Graph legend overlay */
+        .graph-legend-toggle {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            /* Keep below full-screen modals (which use z-index: 10001) */
+            z-index: 9999;
+            background: transparent;
+            border: 1px solid var(--vscode-panel-border);
+            color: var(--vscode-foreground);
+            font-size: 11px;
+            padding: 2px 8px;
+            cursor: pointer;
+            border-radius: 4px;
+            opacity: 0.9;
+        }
+
+        .graph-legend-toggle:hover {
+            opacity: 1;
+        }
+
+        .graph-legend {
+            position: absolute;
+            top: 34px;
+            right: 8px;
+            z-index: 10002;
+            background: var(--vscode-sideBar-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 6px;
+            padding: 10px;
+            width: 240px;
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+            box-sizing: border-box;
+        }
+
+        .graph-legend.hidden {
+            display: none;
+        }
+
+        .graph-legend-title {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+
+        .graph-legend-title-text {
+            color: var(--vscode-foreground);
+            font-weight: 600;
+            font-size: 11px;
+        }
+
+        .graph-legend-close {
+            background: none;
+            border: none;
+            color: var(--vscode-foreground);
+            cursor: pointer;
+            padding: 0;
+            width: 18px;
+            height: 18px;
+            line-height: 18px;
+            font-size: 14px;
+            opacity: 0.9;
+        }
+
+        .graph-legend-close:hover {
+            opacity: 1;
+        }
+
+        .graph-legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin: 6px 0;
+        }
+
+        .legend-swatch {
+            width: 22px;
+            height: 0;
+            border-top-width: 3px;
+            border-top-style: solid;
+            flex: 0 0 auto;
+        }
+
+        .legend-import { border-top-color: var(--vscode-symbolIcon-moduleForeground); }
+        .legend-call { border-top-color: var(--vscode-symbolIcon-functionForeground); border-top-style: dashed; }
+        .legend-circular { border-top-color: var(--vscode-errorForeground); border-top-style: dashed; }
+        .legend-export { border-top-color: var(--vscode-symbolIcon-keywordForeground); }
+        .legend-inherit { border-top-color: var(--vscode-symbolIcon-classForeground); border-top-style: dashed; }
+
+        .graph-legend-note {
+            margin-top: 8px;
+            color: var(--vscode-descriptionForeground);
+            font-size: 10px;
+        }
+
         /* Link type specific colors and arrows */
         .graph-link.link-import {
             stroke: var(--vscode-symbolIcon-moduleForeground);
@@ -3044,7 +3505,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         }
     </style>
 </head>
-<body>
+<body class="simple-mode">
     <div class="header-bar score-hidden" id="header-bar">
         <div class="score-container" id="score-container" style="display: none;">
             <div class="score-number" id="score">—</div>
@@ -3086,7 +3547,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         <button id="btn-regenerate-kb" class="kb-stale-btn">Regenerate KB</button>
     </div>
     
-    <!-- Simple View (minimal mode - default) -->
+    <!-- No-Graph View (default) -->
     <div class="simple-view" id="simple-view">
         <div class="simple-view-spinner" id="simple-view-spinner" title="Processing...">
             <svg viewBox="0 0 16 16" width="14" height="14">
@@ -3096,29 +3557,36 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             </svg>
         </div>
         <div class="simple-loading-text" id="simple-loading-text"></div>
+        <div class="simple-open-kb" id="simple-open-kb" role="button" tabindex="0" title="Open architecture.md">open kb</div>
         <div class="simple-view-buttons">
-            <button id="simple-generate-btn" class="simple-view-btn primary" title="Generate AI instruction files" style="display: none;">
-                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5">
+            <button id="simple-generate-btn" class="generate-instructions-btn" title="Generate AI instruction files" style="display: none;">
+                <svg class="action-icon" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5">
                     <path d="M12 5v14M5 12h14"/>
                 </svg>
             </button>
-            <button id="simple-propose-btn" class="simple-view-btn" title="Plan with Structure">
+            <button id="simple-propose-btn" class="action-button icon-only" title="Plan with Structure">
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M12 20h9"></path>
                     <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
                 </svg>
             </button>
-            <button id="simple-auto-regen-kb-btn" class="simple-view-btn" title="KB auto-regeneration: —">KB: —</button>
-            <button id="simple-expand-btn" class="view-mode-toggle" title="Show findings & graph">
+            <button id="simple-auto-regen-kb-btn" class="action-button icon-only" title="KB auto-regeneration: —">
+                <svg class="action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="9"/>
+                    <path d="M12 7v6l4 2"/>
+                </svg>
+            </button>
+            <span id="simple-auto-regen-kb-text" class="view-toggle-count">KB: —</span>
+            <button id="simple-reindex-btn" class="action-button icon-only" title="Rebuild analysis (clear caches)">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+                </svg>
+            </button>
+            <button id="simple-expand-btn" class="action-button icon-only" title="Show graph">
                 <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor">
                     <rect x="2" y="3" width="12" height="2" rx="0.5"/>
                     <rect x="2" y="7" width="12" height="2" rx="0.5"/>
                     <rect x="2" y="11" width="12" height="2" rx="0.5"/>
-                </svg>
-            </button>
-            <button id="simple-reindex-btn" class="view-mode-toggle" title="Reindex workspace (clear cache)">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
                 </svg>
             </button>
         </div>
@@ -3144,13 +3612,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                             <path d="M12 5v14M5 12h14"/>
                         </svg>
                     </button>
-                    <div class="validation-spinner" id="validation-spinner" title="Validating...">
-                        <svg viewBox="0 0 16 16" width="14" height="14">
-                            <circle cx="8" cy="8" r="6" stroke="var(--vscode-charts-orange)" stroke-width="2" fill="none" stroke-dasharray="18.85" stroke-dashoffset="9.42" stroke-linecap="round">
-                                <animateTransform attributeName="transform" type="rotate" from="0 8 8" to="360 8 8" dur="0.8s" repeatCount="indefinite"/>
-                            </circle>
-                        </svg>
-                    </div>
                     <!-- TEMPORARILY DISABLED: Align button (ALIGNMENTS.json feature)
                     <button id="align-button" class="action-button icon-only" title="Align - Report AI issue" style="display: none;">
                         <svg class="action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
@@ -3169,23 +3630,28 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                         </svg>
                     </button>
                     -->
-                    <button id="propose-button" class="action-button icon-only" title="Plan with Structure">
-                        <svg class="action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M12 20h9"></path>
-                            <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
-                        </svg>
-                    </button>
+                    <div class="prompt-action-slot" id="prompt-action-slot" title="Plan with Structure">
+                        <button id="propose-button" class="action-button icon-only" title="Plan with Structure">
+                            <svg class="action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 20h9"></path>
+                                <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
+                            </svg>
+                        </button>
+                        <div class="validation-spinner" id="validation-spinner" title="Processing...">
+                            <svg viewBox="0 0 16 16" width="14" height="14">
+                                <circle cx="8" cy="8" r="6" stroke="var(--vscode-charts-orange)" stroke-width="2" fill="none" stroke-dasharray="18.85" stroke-dashoffset="9.42" stroke-linecap="round">
+                                    <animateTransform attributeName="transform" type="rotate" from="0 8 8" to="360 8 8" dur="0.8s" repeatCount="indefinite"/>
+                                </circle>
+                            </svg>
+                        </div>
+                    </div>
                     <button id="complex-auto-regen-kb-btn" class="action-button icon-only" title="KB auto-regeneration: —">
                         <svg class="action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+                            <circle cx="12" cy="12" r="9"/>
+                            <path d="M12 7v6l4 2"/>
                         </svg>
                     </button>
                     <span id="complex-auto-regen-kb-text" class="view-toggle-count">KB: —</span>
-                    <button class="action-button icon-only" id="complex-reindex-btn" title="Reindex workspace (clear cache)">
-                        <svg class="action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
-                        </svg>
-                    </button>
                     <div class="settings-menu hidden" id="settings-menu">
                         <div class="settings-section">
                             <button class="action-button settings-action-button" id="regenerate-assistant-files">
@@ -3196,7 +3662,12 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                             </button>
                         </div>
                     </div>
-                    <button id="collapse-view-btn" class="view-mode-toggle" title="Switch to simple view">
+                    <button class="action-button icon-only" id="complex-reindex-btn" title="Rebuild analysis (clear caches)">
+                        <svg class="action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+                        </svg>
+                    </button>
+                    <button id="collapse-view-btn" class="action-button icon-only" title="Hide graph">
                         <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor">
                             <rect x="2" y="5" width="12" height="2" rx="0.5"/>
                             <rect x="2" y="9" width="12" height="2" rx="0.5"/>
@@ -3208,6 +3679,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             <!-- Dependency Graph View -->
             <div class="view-content active" id="graph-view">
                 <div class="graph-view-content">
+                    <button id="graph-legend-toggle" class="graph-legend-toggle" title="Open legend">Legend</button>
                     <div class="empty-graph" id="empty-graph">
                         <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5">
                             <circle cx="12" cy="12" r="3"></circle>
@@ -3245,6 +3717,21 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         </div>
     </div>
 
+    <!-- Bottom status (fixed) -->
+    <div class="panel-status-bar" id="panel-status-bar">
+        <div class="panel-status-left">
+            <span id="panel-status-files">Files: —</span>
+            <span id="panel-status-deps">Deps: —</span>
+            <span id="panel-status-cycles">Cycles: —</span>
+        </div>
+        <div class="panel-status-right">
+            <span id="panel-status-kb-warning" class="panel-status-warning" style="display: none;"></span>
+        </div>
+        <div id="panel-status-api-key-missing" class="panel-status-api-key-missing" role="button" tabindex="0" title="Click to enter your Aspect Code API key">
+            Missing API key • Click to enter
+        </div>
+    </div>
+
     <script>
         const vscode = acquireVsCodeApi();
         
@@ -3252,6 +3739,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         let currentGraph = { nodes: [], links: [] }; // Legacy - will be replaced
         let focusedGraph = { nodes: [], links: [] }; // 2D focused graph data
         let overviewGraph = { nodes: [], links: [] }; // 3D overview graph data
+        let latestGraphForStatus = null;
+        let globalStatsForStatus = null;
         let activeTab = 'graph'; // Default to dependency graph tab (kept for compatibility)
         let manualProcessingActive = false; // Track manual processing to prevent score flashing
         let currentActiveFile = ''; // Track currently active file for findings sorting
@@ -3260,16 +3749,10 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         let graphReady = false; // Track if initial dependency graph has loaded
         let pendingInstructionFilesStatus = null; // Store instruction files status until graph is ready
         
-        // View mode: 'simple' (default) or 'full'
+        // View mode: default screen is always Simple.
+        // Intentionally do not restore persisted viewMode to avoid surprising startup states.
         let viewMode = 'simple';
-        const savedState = vscode.getState();
-        if (savedState && savedState.viewMode) {
-            viewMode = savedState.viewMode;
-        }
-        // Apply initial view mode
-        if (viewMode === 'simple') {
-            document.body.classList.add('simple-mode');
-        }
+        document.body.classList.add('simple-mode');
         
         function toggleViewMode() {
             viewMode = viewMode === 'simple' ? 'full' : 'simple';
@@ -3282,9 +3765,33 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     setTimeout(() => renderDependencyGraph(currentGraph), 100);
                 }
             }
-            // Persist state
-            const currentSavedState = vscode.getState() || {};
-            vscode.setState({ ...currentSavedState, viewMode });
+            updateStatusBar();
+            updateSimpleTopStatusIfIdle();
+        }
+
+        function setSimpleOpenKbVisible(visible) {
+            const openKb = document.getElementById('simple-open-kb');
+            if (!openKb) return;
+            openKb.style.display = visible ? 'block' : 'none';
+        }
+
+        function syncSimpleOpenKbVisibility() {
+            try {
+                if (viewMode !== 'simple') {
+                    setSimpleOpenKbVisible(false);
+                    return;
+                }
+                const el = document.getElementById('simple-loading-text');
+                if (!el) {
+                    setSimpleOpenKbVisible(false);
+                    return;
+                }
+                const text = (el.textContent || '').trim();
+                const isVisible = el.style.display !== 'none';
+                setSimpleOpenKbVisible(isVisible && text === 'Aspect Code • Up to date');
+            } catch {
+                setSimpleOpenKbVisible(false);
+            }
         }
         
         // Simple view button handlers
@@ -3301,6 +3808,54 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         
         document.getElementById('simple-expand-btn').addEventListener('click', toggleViewMode);
         document.getElementById('collapse-view-btn').addEventListener('click', toggleViewMode);
+
+        // Simple view: open KB link
+        function handleOpenKb() {
+            vscode.postMessage({ type: 'OPEN_KB' });
+        }
+        document.getElementById('simple-open-kb')?.addEventListener('click', handleOpenKb);
+        document.getElementById('simple-open-kb')?.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                handleOpenKb();
+            }
+        });
+
+        // Graph legend: open as a full-screen scrollable modal (same pattern as link analysis)
+        function showLegendModal() {
+            // Remove any existing legend modal
+            document.getElementById('legend-analysis')?.remove();
+
+            const panel = document.createElement('div');
+            panel.id = 'legend-analysis';
+            panel.className = 'link-analysis';
+
+            const header = document.createElement('div');
+            header.className = 'analysis-header';
+            header.innerHTML = '<h4>Legend</h4><button class="close-btn" title="Close">×</button>';
+
+            const content = document.createElement('div');
+            content.className = 'analysis-content';
+            content.innerHTML =
+                '<div class="analysis-section">' +
+                    '<h5>Edges</h5>' +
+                    '<div class="graph-legend-item"><span class="legend-swatch legend-import"></span><span>Import / require</span></div>' +
+                    '<div class="graph-legend-item"><span class="legend-swatch legend-export"></span><span>Export</span></div>' +
+                    '<div class="graph-legend-item"><span class="legend-swatch legend-call"></span><span>Function call</span></div>' +
+                    '<div class="graph-legend-item"><span class="legend-swatch legend-inherit"></span><span>Inheritance</span></div>' +
+                    '<div class="graph-legend-item"><span class="legend-swatch legend-circular"></span><span>Circular dependency</span></div>' +
+                    '<div class="graph-legend-note">Click a line to inspect details.</div>' +
+                '</div>';
+
+            const closeBtn = header.querySelector('button.close-btn');
+            closeBtn?.addEventListener('click', () => panel.remove());
+
+            panel.appendChild(header);
+            panel.appendChild(content);
+            document.body.appendChild(panel);
+        }
+
+        document.getElementById('graph-legend-toggle')?.addEventListener('click', showLegendModal);
         
         // Reindex button handlers (both simple and complex views)
         // Note: confirm() doesn't work in webviews, so we send message to extension which shows native dialog
@@ -3324,8 +3879,12 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
 
             const simpleBtn = document.getElementById('simple-auto-regen-kb-btn');
             if (simpleBtn) {
-                simpleBtn.textContent = 'KB: ' + label;
                 simpleBtn.title = 'KB auto-regeneration: ' + label + ' (click to change)';
+            }
+
+            const simpleText = document.getElementById('simple-auto-regen-kb-text');
+            if (simpleText) {
+                simpleText.textContent = 'KB: ' + label;
             }
 
             const complexBtn = document.getElementById('complex-auto-regen-kb-btn');
@@ -3337,6 +3896,287 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 complexText.textContent = 'KB: ' + label;
             }
         }
+
+        // Default no-graph top-line status (only when not actively processing).
+        // Kept deliberately defensive: any failure here must not break the panel.
+        function updateSimpleTopStatusIfIdle() {
+            try {
+                if (viewMode !== 'simple') return;
+
+                const el = document.getElementById('simple-loading-text');
+                if (!el) return;
+
+                // Don't override explicit progress/loading text.
+                const existing = (el.textContent || '').trim();
+                const isVisible = el.style.display !== 'none';
+                const spinner = document.getElementById('simple-view-spinner');
+                const spinnerActive = !!(spinner && spinner.classList && spinner.classList.contains('active'));
+                if (spinnerActive) return;
+                if (currentState && currentState.busy) return;
+                const ownedStatuses = new Set([
+                    'Aspect Code • KB might be stale',
+                    'Aspect Code • Up to date',
+                    'KB might be stale',
+                    'Up to date'
+                ]);
+                // Allow updating our own status line (prevents getting stuck on stale).
+                if (existing.length > 0 && isVisible && !ownedStatuses.has(existing)) return;
+
+                // Only claim "up to date" when we have a state snapshot and the graph has loaded.
+                if (!currentState || !graphReady) {
+                    return;
+                }
+
+                // Keep this short; no timestamps.
+                el.textContent = currentState.kbStale
+                    ? 'Aspect Code • KB might be stale'
+                    : 'Aspect Code • Up to date';
+                el.style.display = 'block';
+                syncSimpleOpenKbVisibility();
+            } catch (e) {
+                console.error('[Panel] updateSimpleTopStatusIfIdle failed:', e);
+            }
+        }
+
+        function syncBusyUi() {
+            try {
+                const validationSpinner = document.getElementById('validation-spinner');
+                const simpleSpinner = document.getElementById('simple-view-spinner');
+                const graphSpinnerActive = !!(validationSpinner && validationSpinner.classList && validationSpinner.classList.contains('active'));
+                const simpleSpinnerActive = !!(simpleSpinner && simpleSpinner.classList && simpleSpinner.classList.contains('active'));
+                const isBusy = !!(currentState && currentState.busy) || graphSpinnerActive || simpleSpinnerActive;
+
+                // Replace graph prompt-generation button with spinner when spinner is active.
+                const proposeBtn = document.getElementById('propose-button');
+                if (proposeBtn) {
+                    proposeBtn.style.display = graphSpinnerActive ? 'none' : '';
+                }
+
+                // Gray out/disable relevant buttons while processing.
+                const ids = [
+                    // Simple view
+                    'simple-generate-btn',
+                    'simple-propose-btn',
+                    'simple-auto-regen-kb-btn',
+                    'simple-expand-btn',
+                    'simple-reindex-btn',
+                    // Graph view header
+                    'generate-instructions-btn',
+                    'propose-button',
+                    'complex-auto-regen-kb-btn',
+                    'collapse-view-btn',
+                    'complex-reindex-btn',
+                    // Menus
+                    'regenerate-assistant-files',
+                    // View toggle
+                    'view-toggle-btn',
+                ];
+
+                for (const id of ids) {
+                    const el = document.getElementById(id);
+                    if (!el) continue;
+                    if ('disabled' in el) {
+                        // Avoid fighting other code that may temporarily disable buttons.
+                        // Only re-enable buttons that we disabled due to busy state.
+                        const hadFlag = !!(el.dataset && el.dataset.disabledByBusy === '1');
+
+                        if (isBusy) {
+                            // @ts-ignore - webview DOM typing
+                            if (!el.disabled) {
+                                // @ts-ignore - webview DOM typing
+                                el.disabled = true;
+                                if (el.dataset) el.dataset.disabledByBusy = '1';
+                            }
+                        } else {
+                            if (hadFlag) {
+                                // @ts-ignore - webview DOM typing
+                                el.disabled = false;
+                                if (el.dataset) delete el.dataset.disabledByBusy;
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error('[Panel] syncBusyUi failed:', e);
+            }
+        }
+
+        function computeCycleGroupCount(graph) {
+            try {
+                if (!graph || !Array.isArray(graph.nodes) || !Array.isArray(graph.links)) {
+                    return 0;
+                }
+                const nodeIds = graph.nodes.map(n => n.id).filter(Boolean);
+                const indexMap = new Map();
+                nodeIds.forEach((id, i) => indexMap.set(id, i));
+
+                const adj = nodeIds.map(() => []);
+                for (const link of graph.links) {
+                    const s = typeof link.source === 'string' ? link.source : link.source?.id;
+                    const t = typeof link.target === 'string' ? link.target : link.target?.id;
+                    if (!s || !t) continue;
+                    const si = indexMap.get(s);
+                    const ti = indexMap.get(t);
+                    if (si === undefined || ti === undefined) continue;
+                    if (si === ti) continue;
+                    adj[si].push(ti);
+                }
+
+                // Tarjan SCC count (only SCCs of size > 1 count as a cycle group)
+                let index = 0;
+                const indices = new Array(nodeIds.length).fill(-1);
+                const lowlink = new Array(nodeIds.length).fill(0);
+                const onStack = new Array(nodeIds.length).fill(false);
+                const stack = [];
+                let cycleGroups = 0;
+
+                function strongconnect(v) {
+                    indices[v] = index;
+                    lowlink[v] = index;
+                    index++;
+                    stack.push(v);
+                    onStack[v] = true;
+
+                    for (const w of adj[v]) {
+                        if (indices[w] === -1) {
+                            strongconnect(w);
+                            lowlink[v] = Math.min(lowlink[v], lowlink[w]);
+                        } else if (onStack[w]) {
+                            lowlink[v] = Math.min(lowlink[v], indices[w]);
+                        }
+                    }
+
+                    if (lowlink[v] === indices[v]) {
+                        // Start a new SCC
+                        let w;
+                        let size = 0;
+                        do {
+                            w = stack.pop();
+                            onStack[w] = false;
+                            size++;
+                        } while (w !== v);
+                        if (size > 1) {
+                            cycleGroups++;
+                        }
+                    }
+                }
+
+                for (let v = 0; v < nodeIds.length; v++) {
+                    if (indices[v] === -1) {
+                        strongconnect(v);
+                    }
+                }
+
+                return cycleGroups;
+            } catch (e) {
+                console.error('[Panel] Failed to compute cycles:', e);
+                return 0;
+            }
+        }
+
+        function updateStatusBar() {
+            const statusBarEl = document.getElementById('panel-status-bar');
+            const leftEl = statusBarEl ? statusBarEl.querySelector('.panel-status-left') : null;
+            const rightEl = statusBarEl ? statusBarEl.querySelector('.panel-status-right') : null;
+            const apiKeyMissingEl = document.getElementById('panel-status-api-key-missing');
+            const filesEl = document.getElementById('panel-status-files');
+            const depsEl = document.getElementById('panel-status-deps');
+            const cyclesEl = document.getElementById('panel-status-cycles');
+            const kbWarnEl = document.getElementById('panel-status-kb-warning');
+
+            // If API key is missing/invalid/revoked, replace the entire footer row with a clickable banner.
+            const hasApiKey = currentState?.hasApiKey;
+            const authStatus = currentState?.apiKeyAuthStatus;
+            const showMissing = hasApiKey === false;
+            const showInvalid = !showMissing && (authStatus === 'invalid' || authStatus === 'revoked');
+
+            if (showMissing || showInvalid) {
+                if (leftEl) leftEl.style.display = 'none';
+                if (rightEl) rightEl.style.display = 'none';
+                if (apiKeyMissingEl) {
+                    const message = showMissing
+                        ? '⚠ API key missing • Click to enter'
+                        : (authStatus === 'revoked'
+                            ? '⚠ API key revoked • Click to re-enter'
+                            : '⚠ API key invalid • Click to re-enter');
+                    apiKeyMissingEl.textContent = message;
+                    apiKeyMissingEl.title = showMissing
+                        ? 'Aspect Code requires an API key. Click to enter your API key.'
+                        : 'Your API key was rejected by the server. Click to re-enter your API key.';
+                    apiKeyMissingEl.style.display = 'flex';
+                }
+                return;
+            } else {
+                if (leftEl) leftEl.style.display = '';
+                if (rightEl) rightEl.style.display = '';
+                if (apiKeyMissingEl) apiKeyMissingEl.style.display = 'none';
+            }
+
+            const graph = latestGraphForStatus;
+
+            const totalFiles = globalStatsForStatus?.totalFiles ?? (currentState?.totalFiles ?? null);
+            const totalDeps = globalStatsForStatus?.totalDeps ?? null;
+            const totalCycles = globalStatsForStatus?.totalCycles ?? null;
+
+            const focusedFiles = graph?.nodes?.length ?? null;
+            const focusedDeps = graph?.links?.length ?? null;
+            const focusedCycles = graph ? computeCycleGroupCount(graph) : null;
+
+            if (viewMode === 'simple') {
+                if (filesEl) filesEl.textContent = 'Files: ' + (totalFiles === null ? '—' : String(totalFiles));
+                if (depsEl) depsEl.textContent = 'Deps: ' + (totalDeps === null ? '—' : String(totalDeps));
+                if (cyclesEl) cyclesEl.textContent = 'Cycles: ' + (totalCycles === null ? '—' : String(totalCycles));
+            } else {
+                const filesText = (focusedFiles === null || totalFiles === null) ? (focusedFiles === null ? '—' : String(focusedFiles)) : (String(focusedFiles) + '/' + String(totalFiles));
+                const depsText = (focusedDeps === null || totalDeps === null) ? (focusedDeps === null ? '—' : String(focusedDeps)) : (String(focusedDeps) + '/' + String(totalDeps));
+                const cyclesText = (focusedCycles === null || totalCycles === null) ? (focusedCycles === null ? '—' : String(focusedCycles)) : (String(focusedCycles) + '/' + String(totalCycles));
+                if (filesEl) filesEl.textContent = 'Files: ' + filesText;
+                if (depsEl) depsEl.textContent = 'Deps: ' + depsText;
+                if (cyclesEl) cyclesEl.textContent = 'Cycles: ' + cyclesText;
+            }
+
+            const kbStale = !!currentState?.kbStale;
+            const kbMode = currentState?.autoRegenerateKb;
+            const kbRegenOff = kbMode === 'off';
+
+            if (kbWarnEl) {
+                if (kbStale || kbRegenOff) {
+                    // Keep this short; footer is space constrained.
+                    if (kbStale && kbRegenOff) {
+                        kbWarnEl.textContent = '⚠ KB stale + regen off';
+                        kbWarnEl.title = 'Knowledge base may be stale (files changed since last generation), and auto-regeneration is off so it will not update automatically. Regenerate KB to refresh project context.';
+                    } else if (kbStale) {
+                        kbWarnEl.textContent = '⚠ KB might be stale';
+                        kbWarnEl.title = 'Knowledge base may be stale because files changed since the last generation. Regenerate KB to refresh project context.';
+                    } else {
+                        kbWarnEl.textContent = '⚠ KB regen is off';
+                        kbWarnEl.title = 'Auto-regeneration is off, so the knowledge base will not update automatically. Regenerate KB manually when the project changes.';
+                    }
+                    kbWarnEl.style.display = '';
+                } else {
+                    kbWarnEl.textContent = '';
+                    kbWarnEl.title = '';
+                    kbWarnEl.style.display = 'none';
+                }
+            }
+        }
+
+        function handleEnterApiKey() {
+            try {
+                vscode.postMessage({ type: 'COMMAND', command: 'aspectcode.enterApiKey' });
+            } catch (e) {
+                console.error('[Panel] Failed to trigger enterApiKey:', e);
+            }
+        }
+        document.getElementById('panel-status-api-key-missing')?.addEventListener('click', handleEnterApiKey);
+        document.getElementById('panel-status-api-key-missing')?.addEventListener('keydown', (e) => {
+            if (!e) return;
+            const key = e.key;
+            if (key === 'Enter' || key === ' ') {
+                e.preventDefault();
+                handleEnterApiKey();
+            }
+        });
 
         function handleCycleAutoRegenKb() {
             vscode.postMessage({ type: 'CYCLE_AUTO_REGENERATE_KB' });
@@ -4162,14 +5002,14 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 if (link.type === 'circular') {
                     const warningDiv = document.createElement('div');
                     warningDiv.className = 'tooltip-warning';
-                    warningDiv.innerHTML = '⚠️ Circular';
+                    warningDiv.innerHTML = 'Circular dependency';
                     content.appendChild(warningDiv);
                 }
                 
                 // Add action hint
                 const actionDiv = document.createElement('div');
                 actionDiv.className = 'tooltip-action';
-                actionDiv.textContent = 'click to inspect';
+                actionDiv.textContent = 'Click to inspect';
                 content.appendChild(actionDiv);
                 
                 tooltip.appendChild(header);
@@ -4271,8 +5111,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 let details = '<div class="analysis-section">' +
                     '<div class="detail-row"><span class="label">From:</span> <span class="value">' + (link.source.label || 'Unknown') + '</span></div>' +
                     '<div class="detail-row"><span class="label">To:</span> <span class="value">' + (link.target.label || 'Unknown') + '</span></div>' +
-                    '<div class="detail-row"><span class="label">Type:</span> <span class="value dependency-type-' + link.type + '">' + getDependencyTypeDescription(link.type) + '</span></div>' +
-                    '<div class="detail-row"><span class="label">Strength:</span> <span class="value">' + Math.round(link.strength * 100) + '%</span></div>';
+                    '<div class="detail-row"><span class="label">Type:</span> <span class="value dependency-type-' + link.type + '">' + getDependencyTypeDescription(link.type) + '</span></div>';
                 
                 // Add metadata if available
                 if (link.metadata) {
@@ -4311,13 +5150,13 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             
             function getDependencyTypeDescription(type) {
                 const types = {
-                    'import': '📥 Import/Require',
-                    'call': '📞 Function Call',
-                    'circular': '🔄 Circular Dependency',
-                    'export': '📤 Export',
-                    'inherit': '🧬 Inheritance'
+                    'import': 'Import / require',
+                    'call': 'Function call',
+                    'circular': 'Circular dependency',
+                    'export': 'Export',
+                    'inherit': 'Inheritance'
                 };
-                return types[type] || '🔗 ' + type;
+                return types[type] || String(type || 'Dependency');
             }
             
             function getDependencyInsights(link) {
@@ -4325,23 +5164,23 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 
                 switch (link.type) {
                     case 'circular':
-                        insights += '<div class="insight warning">⚠️ Circular dependency detected. Consider refactoring to break the cycle.</div>';
+                        insights += '<div class="insight warning">This edge is part of a dependency cycle.</div>';
                         break;
                     case 'import':
                         if (link.strength > 0.8) {
-                            insights += '<div class="insight info">💡 Strong import relationship. Core dependency.</div>';
+                            insights += '<div class="insight info">Strong import relationship.</div>';
                         }
                         break;
                     case 'call':
-                        insights += '<div class="insight info">🔍 Function call relationship. Runtime dependency.</div>';
+                        insights += '<div class="insight info">Function call relationship.</div>';
                         break;
                 }
                 
                 if (link.metadata && link.metadata.bidirectional) {
-                    insights += '<div class="insight warning">⚠️ Bidirectional dependency may indicate tight coupling.</div>';
+                    insights += '<div class="insight warning">Bidirectional dependency (two-way coupling).</div>';
                 }
                 
-                return insights || '<div class="insight info">📊 Standard dependency relationship.</div>';
+                return insights || '<div class="insight info">Dependency relationship.</div>';
             }
 
             // Helper function to update link positions after layout change
@@ -4957,10 +5796,17 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             switch (msg.type) {
                 case 'STATE_UPDATE':
                     render(msg.state);
+                    updateSimpleTopStatusIfIdle();
                     break;
                 case 'DEPENDENCY_GRAPH':
                     // Any graph payload means graph loading is done for this request
                     hideGraphLoading();
+                    latestGraphForStatus = msg.graph;
+                    if (msg.stats) {
+                        globalStatsForStatus = msg.stats;
+                    }
+                    updateStatusBar();
+                    updateSimpleTopStatusIfIdle();
                     // Store graph data based on focus mode
                     if (msg.graph.focusMode) {
                         focusedGraph = msg.graph;
@@ -5025,6 +5871,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     // Dependency graph has loaded - now we can show the UI
                     graphReady = true;
                     hideGraphLoading();
+                    updateSimpleTopStatusIfIdle();
+                    updateStatusBar();
                     // Now show the + button if instruction files don't exist
                     if (pendingInstructionFilesStatus === false) {
                         const generateBtn = document.getElementById('generate-instructions-btn');
@@ -5048,6 +5896,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                         simpleLoadingText.textContent = msg.phase;
                         simpleLoadingText.style.display = 'block';
                     }
+                    setSimpleOpenKbVisible(false);
                     // Ensure spinner is visible during loading
                     showGraphLoading();
                     break;
@@ -5086,6 +5935,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                         simpleLoadingText.textContent = message;
                         simpleLoadingText.style.display = 'block';
                     }
+                    setSimpleOpenKbVisible(false);
+                    syncBusyUi();
                 } else if (percentage >= 100 || percentage === 0) {
                     validationSpinner?.classList.remove('active');
                     simpleSpinner?.classList.remove('active');
@@ -5093,6 +5944,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                         simpleLoadingText.textContent = '';
                         simpleLoadingText.style.display = 'none';
                     }
+                    syncBusyUi();
+                    updateSimpleTopStatusIfIdle();
                 }
             }
             
@@ -5136,6 +5989,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             const simpleSpinner = document.getElementById('simple-view-spinner');
             validationSpinner?.classList.add('active');
             simpleSpinner?.classList.add('active');
+            syncBusyUi();
         }
         
         // Hide graph loading indicator
@@ -5149,6 +6003,9 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 simpleLoadingText.textContent = '';
                 simpleLoadingText.style.display = 'none';
             }
+            setSimpleOpenKbVisible(false);
+            syncBusyUi();
+            updateSimpleTopStatusIfIdle();
             // Update the details text now that graph is ready
             const detailsEl = document.getElementById('score-details');
             if (detailsEl && pendingInstructionFilesStatus === false) {
@@ -5195,6 +6052,9 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         function render(state) {
             currentState = state; // Store for later use
             updateAutoRegenKbUi(state);
+            updateStatusBar();
+            updateSimpleTopStatusIfIdle();
+            syncBusyUi();
             const previousFindingsCount = currentFindings.length;
             currentFindings = (state.findings || []).slice();
             
