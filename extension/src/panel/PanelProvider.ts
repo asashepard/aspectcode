@@ -4929,15 +4929,17 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 labelsGroup.innerHTML = '';
                 
                 nodes.forEach(node => {
+                    const isCenter = !!(currentGraph && currentGraph.centerFile && node.id === currentGraph.centerFile);
                     // Create node circle
                     const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
                     circle.setAttribute('cx', node.x);
                     circle.setAttribute('cy', node.y);
                     circle.setAttribute('r', node.radius);
                     circle.setAttribute('class', 'graph-node enhanced');
-                    circle.setAttribute('fill', node.color);
-                    circle.setAttribute('stroke', node.strokeColor);
-                    circle.setAttribute('stroke-width', node.type === 'hub' ? '3' : '1.5');
+                    // Node styling: center node is solid orange with light border; outer nodes are solid grey with darker border.
+                    circle.setAttribute('fill', isCenter ? '#f9731c' : '#3a3a3a');
+                    circle.setAttribute('stroke', '#c7c7c7');
+                    circle.setAttribute('stroke-width', isCenter ? '2.5' : '2');
                     circle.setAttribute('data-node-id', node.id.replace(/[\\\/]/g, '_')); // For position preservation
                     
                     // Enhanced hover effects
@@ -4979,19 +4981,14 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
 
             // Enhanced color functions
             function getNodeColor(node) {
-                if (node.type === 'hub') return 'var(--vscode-charts-orange)';
-                
-                const importance = node.importance || 0;
-                if (importance > 10) return 'var(--vscode-charts-orange)';
-                if (importance > 5) return 'var(--vscode-charts-yellow)';
-                if (importance > 2) return 'var(--vscode-charts-blue)';
-                return '#282828';
+                // Keep for compatibility with older cached node objects, but avoid per-node color meaning.
+                if (currentGraph && currentGraph.centerFile && node.id === currentGraph.centerFile) return '#f9731c';
+                return 'var(--vscode-editorWidget-background)';
             }
             
             function getNodeStrokeColor(node) {
-                if (node.highSeverity > 0) return 'var(--vscode-errorForeground)';
-                if ((node.importance || 0) > 3) return 'var(--vscode-notificationsWarningIcon-foreground)';
-                return 'var(--vscode-foreground)';
+                if (currentGraph && currentGraph.centerFile && node.id === currentGraph.centerFile) return '#f9731c';
+                return 'var(--vscode-panel-border)';
             }
 
             // Enhanced tooltip system
@@ -5009,13 +5006,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 
                 const content = document.createElement('div');
                 content.className = 'tooltip-content';
-                
-                // Only show findings if > 0
-                if (node.importance > 0) {
-                    const findingsDiv = document.createElement('div');
-                    findingsDiv.innerHTML = '<span class="tooltip-value">' + (node.importance || 0) + ' finding' + (node.importance !== 1 ? 's' : '') + '</span>';
-                    content.appendChild(findingsDiv);
-                }
                 
                 tooltip.appendChild(header);
                 tooltip.appendChild(content);
