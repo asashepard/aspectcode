@@ -1747,18 +1747,40 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
   /**
    * Parse file path from either structured format or location strings.
    */
-   private parseFileFromFinding(f: any): string {
-    const directFile = f.file ?? f.filePath ?? f.file_path;
-    if (directFile) {
-      return directFile;
+     private resolveWorkspaceFilePath(filePath: string): string {
+        try {
+            const trimmed = (filePath ?? '').trim();
+            if (!trimmed) return '';
+
+            // Already absolute (covers Windows drive letters and UNC paths too).
+            if (path.isAbsolute(trimmed)) {
+                return path.normalize(trimmed);
+            }
+
+            const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!root) {
+                return path.normalize(trimmed);
+            }
+
+            // The server often reports workspace-relative paths like "backend\\app\\utils.py".
+            return path.normalize(path.join(root, trimmed));
+        } catch {
+            return filePath;
+        }
     }
+
+     private parseFileFromFinding(f: any): string {
+        const directFile = f.file ?? f.filePath ?? f.file_path;
+        if (directFile) {
+            return this.resolveWorkspaceFilePath(String(directFile));
+        }
 
     if (f.locations && Array.isArray(f.locations) && f.locations.length > 0) {
       const location = f.locations[0];
       if (typeof location === 'string') {
         const match = location.match(/^(.+):(\d+):(\d+)-(\d+):(\d+)$/);
         if (match) {
-          return match[1];
+                    return this.resolveWorkspaceFilePath(match[1]);
         }
       }
     }
@@ -2273,11 +2295,11 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             flex: 1;
             flex-direction: column;
             align-items: center;
-            justify-content: center;
+            justify-content: flex-start;
             gap: 16px;
             background: var(--vscode-sideBar-background);
             min-height: 0; /* Allow flex shrinking */
-            padding-top: 44px; /* Balance bottom padding so centered controls don't look too high */
+            padding-top: 72px; /* Reserve space for spinner/status + open kb in small panels */
             padding-bottom: 44px; /* Leave space for the fixed bottom status bar */
             position: relative; /* Anchor absolute loading text/spinner */
         }
@@ -2292,8 +2314,33 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         
         .simple-view-buttons {
             display: flex;
-            gap: 8px;
+            gap: 6px;
             align-items: center;
+            background: var(--vscode-toolbar-hoverBackground);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 4px;
+            padding: 4px;
+        }
+
+        /* Make hover/focus states read clearly inside the toolbar container */
+        .simple-view-buttons .action-button {
+            border-color: transparent;
+        }
+
+        .simple-view-buttons .action-button:hover:not(:disabled) {
+            background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground));
+            border-color: var(--vscode-charts-orange);
+            box-shadow: inset 0 0 0 1px var(--vscode-charts-orange);
+        }
+
+        .simple-view-buttons .action-button:active:not(:disabled) {
+            background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
+            opacity: 1;
+        }
+
+        .simple-view-buttons .action-button:focus-visible {
+            outline: 1px solid var(--vscode-focusBorder);
+            outline-offset: 1px;
         }
         
         .simple-view-btn {
@@ -2425,6 +2472,14 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             white-space: nowrap;
         }
 
+        /* Fixed-width KB label in simple view (match graph header) */
+        #simple-auto-regen-kb-text {
+            display: inline-block;
+            width: 86px;
+            text-align: center;
+            white-space: nowrap;
+        }
+
         /* Fixed bottom status bar */
         .panel-status-bar {
             position: fixed;
@@ -2462,7 +2517,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         }
 
         .panel-status-warning {
-            color: var(--vscode-notificationsWarningIcon-foreground);
+            color: var(--vscode-charts-);
         }
 
         .panel-status-api-key-missing {
