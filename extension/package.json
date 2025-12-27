@@ -197,9 +197,9 @@
         },
         "aspectcode.autoRegenerateKb": {
           "type": "string",
-          "enum": ["off", "idle"],
-          "default": "off",
-          "description": "Auto-regenerate KB files: 'off' = manual only (show stale indicator), 'idle' = regenerate after 30s of inactivity"
+          "enum": ["off", "onSave", "idle"],
+          "default": "onSave",
+          "description": "Auto-regenerate KB files: 'off' = manual only (show stale indicator), 'onSave' = regenerate on file save (debounced), 'idle' = regenerate after 30s of inactivity"
         },
         "aspectcode.promptGeneration.enabled": {
           "type": "boolean",

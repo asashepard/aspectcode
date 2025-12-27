@@ -47,10 +47,22 @@ export class WorkspaceFingerprint implements vscode.Disposable {
   private lastEditTime: number = 0;
   private readonly IDLE_DEBOUNCE_MS = 30000; // 30 seconds
   private readonly STALE_THRESHOLD_PERCENT = 5; // 5% of files changed = stale
+
+  // onSave debounce (shorter than idle)
+  private saveTimer: NodeJS.Timeout | null = null;
+  private readonly SAVE_DEBOUNCE_MS = 2000; // 2 seconds after last save
   
   // Cached fingerprint
   private cachedFingerprint: string | null = null;
   private cachedFileCount: number = 0;
+
+  // Track whether we've already notified the UI that KB is stale.
+  private staleNotified: boolean = false;
+  private lastStaleLogAt: number = 0;
+  private readonly STALE_LOG_DEBOUNCE_MS = 5000;
+
+  // Track if regeneration is in progress to avoid overlapping runs
+  private regenerationInProgress: boolean = false;
   
   // Event emitter for stale state changes
   private readonly _onStaleStateChanged = new vscode.EventEmitter<boolean>();
@@ -68,6 +80,9 @@ export class WorkspaceFingerprint implements vscode.Disposable {
   dispose(): void {
     if (this.idleTimer) {
       clearTimeout(this.idleTimer);
+    }
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
     }
     this._onStaleStateChanged.dispose();
   }
@@ -155,8 +170,9 @@ export class WorkspaceFingerprint implements vscode.Disposable {
       this.outputChannel.appendLine(
         `[WorkspaceFingerprint] Marked KB fresh: ${fingerprint.fileCount} files`
       );
-      
+
       // Notify listeners that KB is no longer stale
+      this.staleNotified = false;
       this._onStaleStateChanged.fire(false);
     } catch (e) {
       this.outputChannel.appendLine(`[WorkspaceFingerprint] Error marking KB fresh: ${e}`);
@@ -176,7 +192,7 @@ export class WorkspaceFingerprint implements vscode.Disposable {
 
     // Check if auto-regenerate is enabled
     const config = vscode.workspace.getConfiguration('aspectcode');
-    const autoRegen = config.get<string>('autoRegenerateKb', 'off');
+    const autoRegen = config.get<string>('autoRegenerateKb', 'onSave');
     
     if (autoRegen === 'idle' && this.kbRegenerateCallback) {
       this.idleTimer = setTimeout(async () => {
@@ -185,8 +201,77 @@ export class WorkspaceFingerprint implements vscode.Disposable {
       }, this.IDLE_DEBOUNCE_MS);
     }
 
-    // Notify that KB may be stale (debounced)
-    this._onStaleStateChanged.fire(true);
+    // Notify that KB may be stale (only on transition to avoid spam)
+    if (!this.staleNotified) {
+      this.staleNotified = true;
+
+      const now = Date.now();
+      if (now - this.lastStaleLogAt > this.STALE_LOG_DEBOUNCE_MS) {
+        this.lastStaleLogAt = now;
+        this.outputChannel.appendLine('[WorkspaceFingerprint] Workspace changed; KB may be stale');
+      }
+
+      this._onStaleStateChanged.fire(true);
+    }
+  }
+
+  /**
+   * Notify that a file was saved.
+   * This triggers debounced KB regeneration if autoRegenerateKb === 'onSave'.
+   */
+  onFileSaved(filePath: string): void {
+    this.lastEditTime = Date.now();
+
+    // Check if auto-regenerate is enabled for onSave
+    const config = vscode.workspace.getConfiguration('aspectcode');
+    const autoRegen = config.get<string>('autoRegenerateKb', 'onSave');
+
+    if (autoRegen !== 'onSave' || !this.kbRegenerateCallback) {
+      // Still mark stale if not auto-regenerating
+      this.onFileEdited();
+      return;
+    }
+
+    // Mark stale immediately
+    if (!this.staleNotified) {
+      this.staleNotified = true;
+      this._onStaleStateChanged.fire(true);
+    }
+
+    // Reset save debounce timer
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+    }
+
+    this.saveTimer = setTimeout(async () => {
+      this.saveTimer = null;
+      await this.onSaveTimeout(filePath);
+    }, this.SAVE_DEBOUNCE_MS);
+  }
+
+  /**
+   * Called after save debounce expires - triggers KB regeneration.
+   */
+  private async onSaveTimeout(lastSavedFile: string): Promise<void> {
+    if (this.regenerationInProgress) {
+      this.outputChannel.appendLine('[WorkspaceFingerprint] Skipping onSave regen (already in progress)');
+      return;
+    }
+
+    try {
+      this.regenerationInProgress = true;
+      const startTime = Date.now();
+      this.outputChannel.appendLine(`[WorkspaceFingerprint] Auto-regenerating KB (onSave trigger, file: ${path.basename(lastSavedFile)})...`);
+      
+      await this.kbRegenerateCallback!();
+      
+      const duration = Date.now() - startTime;
+      this.outputChannel.appendLine(`[WorkspaceFingerprint] KB regenerated in ${duration}ms`);
+    } catch (e) {
+      this.outputChannel.appendLine(`[WorkspaceFingerprint] onSave regeneration failed: ${e}`);
+    } finally {
+      this.regenerationInProgress = false;
+    }
   }
 
   /**
@@ -212,14 +297,25 @@ export class WorkspaceFingerprint implements vscode.Disposable {
 
   private async onIdleTimeout(): Promise<void> {
     try {
+      if (this.regenerationInProgress) {
+        this.outputChannel.appendLine('[WorkspaceFingerprint] Skipping idle regen (already in progress)');
+        return;
+      }
+
       const isStale = await this.isKbStale();
       
       if (isStale && this.kbRegenerateCallback) {
+        this.regenerationInProgress = true;
+        const startTime = Date.now();
         this.outputChannel.appendLine(`[WorkspaceFingerprint] Idle timeout + KB stale, auto-regenerating...`);
         await this.kbRegenerateCallback();
+        const duration = Date.now() - startTime;
+        this.outputChannel.appendLine(`[WorkspaceFingerprint] KB regenerated in ${duration}ms`);
       }
     } catch (e) {
       this.outputChannel.appendLine(`[WorkspaceFingerprint] Idle regeneration failed: ${e}`);
+    } finally {
+      this.regenerationInProgress = false;
     }
   }
 

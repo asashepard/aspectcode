@@ -2188,6 +2188,26 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
 
+  // Ensure key settings are written into workspace settings.json so users can see/tweak them.
+  // VS Code does not write default values into settings.json automatically.
+  try {
+    const root = await getWorkspaceRoot();
+    if (root) {
+      const cfg = vscode.workspace.getConfiguration('aspectcode');
+      const inspected = cfg.inspect<string>('autoRegenerateKb');
+      const isUnsetEverywhere =
+        inspected?.globalValue === undefined &&
+        inspected?.workspaceValue === undefined &&
+        inspected?.workspaceFolderValue === undefined;
+      if (isUnsetEverywhere) {
+        await cfg.update('autoRegenerateKb', 'onSave', vscode.ConfigurationTarget.Workspace);
+        outputChannel.appendLine("[Settings] Set 'aspectcode.autoRegenerateKb' = 'onSave' in workspace settings");
+      }
+    }
+  } catch (e) {
+    outputChannel.appendLine(`[Settings] Failed to auto-populate 'aspectcode.autoRegenerateKb': ${e}`);
+  }
+
   // Initialize workspace fingerprint for KB staleness detection
   const workspaceRoot = await getWorkspaceRoot();
   if (workspaceRoot) {
@@ -2199,14 +2219,27 @@ export async function activate(context: vscode.ExtensionContext) {
       panelProvider.setKbStale(stale);
     });
     
-    // Set up KB regeneration callback for idle auto-regeneration
+    // Set up KB regeneration callback for idle/onSave auto-regeneration
     workspaceFingerprint.setKbRegenerateCallback(async () => {
       try {
-        outputChannel.appendLine('[KB] Auto-regenerating KB (idle trigger)...');
+        const regenStart = Date.now();
+        outputChannel.appendLine('[KB] Auto-regenerating (examine + KB)...');
+
+        // Ensure server-backed analysis is up to date before regenerating KB.
+        // This keeps the KB accurate over time even if only auto-regeneration runs.
+        await vscode.commands.executeCommand('aspectcode.examine');
+
         const { autoRegenerateKBFiles } = await import('./assistants/kb');
         await autoRegenerateKBFiles(state, outputChannel, context);
         await workspaceFingerprint?.markKbFresh();
-        outputChannel.appendLine('[KB] Auto-regeneration complete');
+        
+        // Invalidate dependency graph cache so next render picks up new structure
+        panelProvider.invalidateDependencyCache();
+        
+        // Trigger a dependency graph refresh if panel is visible
+        panelProvider.refreshDependencyGraph();
+
+        outputChannel.appendLine(`[KB] Auto-regeneration complete in ${Date.now() - regenStart}ms`);
       } catch (e) {
         outputChannel.appendLine(`[KB] Auto-regeneration failed: ${e}`);
       }
@@ -2490,6 +2523,19 @@ export async function activate(context: vscode.ExtensionContext) {
       if (event.contentChanges.length > 0) {
         workspaceFingerprint?.onFileEdited();
       }
+    })
+  );
+
+  // Also mark stale on save (users expect this signal on save).
+  // If autoRegenerateKb === 'onSave', this will trigger debounced KB regeneration.
+  context.subscriptions.push(
+    vscode.workspace.onDidSaveTextDocument((doc) => {
+      const ext = path.extname(doc.fileName).toLowerCase();
+      const sourceExtensions = ['.py', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.java', '.cpp', '.c', '.cs', '.go', '.rs'];
+      if (!sourceExtensions.includes(ext)) {
+        return;
+      }
+      workspaceFingerprint?.onFileSaved(doc.fileName);
     })
   );
 

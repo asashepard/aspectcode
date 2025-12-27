@@ -34,6 +34,8 @@ type StateSnapshot = {
   totalFiles?: number;
   processingPhase?: string;
   progress?: number;
+    kbStale?: boolean;
+    autoRegenerateKb?: 'off' | 'onSave' | 'idle';
   score?: any;  // Score calculation disabled
 };
 
@@ -120,6 +122,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         totalFiles: totalFiles,
         processingPhase: this._bridgeState.processingPhase,
         progress: this._bridgeState.progress,
+                kbStale: this._bridgeState.kbStale,
       };
       
       this.pushState();
@@ -251,6 +254,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     processingPhase?: string;
     progress?: number;
     kbStale?: boolean;
+        autoRegenerateKb?: 'off' | 'onSave' | 'idle';
   } = { busy: false, findings: [], byRule: {}, history: [] };
 
   // (optional) helper to show the view from activate()
@@ -264,6 +268,14 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     this._bridgeState.kbStale = stale;
     this.pushState();
   }
+
+    private getAutoRegenerateKbMode(): 'off' | 'onSave' | 'idle' {
+        const value = vscode.workspace.getConfiguration('aspectcode').get<string>('autoRegenerateKb', 'onSave');
+        if (value === 'off' || value === 'onSave' || value === 'idle') {
+            return value;
+        }
+        return 'onSave';
+    }
 
   private mapSeverity(severity: string): 'critical' | 'high' | 'medium' | 'low' | 'info' {
     const severityMap: { [key: string]: 'critical' | 'high' | 'medium' | 'low' | 'info' } = {
@@ -1009,7 +1021,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           // Send state with workspace root without modifying the original state
           const webviewState = {
             ...this._bridgeState,
-            workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''
+                        workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '',
+                        autoRegenerateKb: this.getAutoRegenerateKbMode()
           };
           this.post({ type: 'STATE_UPDATE', state: webviewState });
           
@@ -1051,7 +1064,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'REQUEST_STATE':
-          this.post({ type: 'STATE_UPDATE', state: this._bridgeState });
+                    this.pushState();
           break;
 
         case 'RUN_FLOW':
@@ -1160,6 +1173,26 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             console.error('[PanelProvider] Failed to regenerate KB:', e);
           }
           break;
+
+                case 'CYCLE_AUTO_REGENERATE_KB': {
+                    const current = this.getAutoRegenerateKbMode();
+                    const next: 'off' | 'onSave' | 'idle' = current === 'off'
+                        ? 'onSave'
+                        : current === 'onSave'
+                            ? 'idle'
+                            : 'off';
+                    try {
+                        await vscode.workspace.getConfiguration('aspectcode').update(
+                            'autoRegenerateKb',
+                            next,
+                            vscode.ConfigurationTarget.Workspace
+                        );
+                    } catch (e) {
+                        console.error('[PanelProvider] Failed to update autoRegenerateKb:', e);
+                    }
+                    this.pushState();
+                    break;
+                }
 
         case 'FORCE_REINDEX':
           // Show native VS Code confirmation dialog
@@ -1279,7 +1312,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
   }
 
   public resetBridgeState() {
-    this._bridgeState = { busy: false, findings: [], byRule: {}, history: [], lastDiffMeta: undefined };
+        this._bridgeState = { busy: false, findings: [], byRule: {}, history: [], lastDiffMeta: undefined, kbStale: this._bridgeState.kbStale };
     this.pushState();
   }
 
@@ -1307,6 +1340,37 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     public isGraphReady(): boolean {
         return this._initialGraphSent;
     }
+
+  /**
+   * Invalidate the dependency cache so next graph render fetches fresh data.
+   * Called after KB regeneration or when files change.
+   */
+  public invalidateDependencyCache(): void {
+    this._dependencyCache.clear();
+    this._graphCache.clear();
+    this._workspaceFilesCache = null;
+    this._cacheTimestamp = 0;
+    this._outputChannel?.appendLine('[PanelProvider] Dependency cache invalidated');
+  }
+
+  /**
+   * Trigger a dependency graph refresh if the panel is visible.
+   * Called after KB regeneration to update the graph.
+   */
+  public refreshDependencyGraph(): void {
+    if (!this._view) {
+      return;
+    }
+    // Async refresh - don't block the caller
+    (async () => {
+      try {
+        await this.sendDependencyGraph();
+        this._outputChannel?.appendLine('[PanelProvider] Dependency graph refreshed');
+      } catch (e) {
+        this._outputChannel?.appendLine(`[PanelProvider] Graph refresh failed: ${e}`);
+      }
+    })();
+  }
 
   public __setBridgeStateFromSnapshot(snap: any) {
     this._bridgeState.findings = new Array(snap.renderedFindings || 0)
@@ -1416,7 +1480,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
   private pushState() { 
     const webviewState = {
       ...this._bridgeState,
-      workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''
+            workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '',
+            autoRegenerateKb: this.getAutoRegenerateKbMode()
     };
     this.post({ type: 'STATE_UPDATE', state: webviewState }); 
   }
@@ -3028,6 +3093,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
                 </svg>
             </button>
+            <button id="simple-auto-regen-kb-btn" class="simple-view-btn" title="KB auto-regeneration: —">KB: —</button>
             <button id="simple-expand-btn" class="view-mode-toggle" title="Show findings & graph">
                 <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor">
                     <rect x="2" y="3" width="12" height="2" rx="0.5"/>
@@ -3094,6 +3160,12 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                             <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
                         </svg>
                     </button>
+                    <button id="complex-auto-regen-kb-btn" class="action-button icon-only" title="KB auto-regeneration: —">
+                        <svg class="action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+                        </svg>
+                    </button>
+                    <span id="complex-auto-regen-kb-text" class="view-toggle-count">KB: —</span>
                     <button class="action-button icon-only" id="complex-reindex-btn" title="Reindex workspace (clear cache)">
                         <svg class="action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
@@ -3221,6 +3293,41 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             vscode.postMessage({ type: 'FORCE_REINDEX' });
         }
         document.getElementById('simple-reindex-btn')?.addEventListener('click', handleReindex);
+
+        function modeLabel(mode) {
+            switch (mode) {
+                case 'off': return 'Off';
+                case 'idle': return 'Idle';
+                case 'onSave': return 'On Save';
+                default: return 'On Save';
+            }
+        }
+
+        function updateAutoRegenKbUi(state) {
+            const mode = state && state.autoRegenerateKb ? state.autoRegenerateKb : 'onSave';
+            const label = modeLabel(mode);
+
+            const simpleBtn = document.getElementById('simple-auto-regen-kb-btn');
+            if (simpleBtn) {
+                simpleBtn.textContent = 'KB: ' + label;
+                simpleBtn.title = 'KB auto-regeneration: ' + label + ' (click to change)';
+            }
+
+            const complexBtn = document.getElementById('complex-auto-regen-kb-btn');
+            if (complexBtn) {
+                complexBtn.title = 'KB auto-regeneration: ' + label + ' (click to change)';
+            }
+            const complexText = document.getElementById('complex-auto-regen-kb-text');
+            if (complexText) {
+                complexText.textContent = 'KB: ' + label;
+            }
+        }
+
+        function handleCycleAutoRegenKb() {
+            vscode.postMessage({ type: 'CYCLE_AUTO_REGENERATE_KB' });
+        }
+        document.getElementById('simple-auto-regen-kb-btn')?.addEventListener('click', handleCycleAutoRegenKb);
+        document.getElementById('complex-auto-regen-kb-btn')?.addEventListener('click', handleCycleAutoRegenKb);
         document.getElementById('complex-reindex-btn')?.addEventListener('click', handleReindex);
         
         // Action button handlers
@@ -5072,6 +5179,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         
         function render(state) {
             currentState = state; // Store for later use
+            updateAutoRegenKbUi(state);
             const previousFindingsCount = currentFindings.length;
             currentFindings = (state.findings || []).slice();
             
