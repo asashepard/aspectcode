@@ -1,17 +1,16 @@
 import time
 import sys
 import os
-import importlib.util
 import hashlib
 import asyncio
+import uuid
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Depends, Request, Body
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 from pydantic import BaseModel, EmailStr
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
 
 from .models import (
     ValidateResponse, IndexRequest, IndexResult, ValidateFullRequest, SnapshotInfo
@@ -21,8 +20,8 @@ from .settings import settings, DATABASE_URL
 from .auth import get_current_user, UserContext
 from .admin import router as admin_router
 from .mcp import router as mcp_router
-from .rate_limit import limiter
 from . import db
+from . import limits
 
 # Import tree-sitter engine
 try:
@@ -50,7 +49,18 @@ async def lifespan(app: FastAPI):
             print("[startup] Database-backed authentication will not be available")
     else:
         print("[startup] No DATABASE_URL configured - running without database")
+    
+    # Initialize rate limiter
+    try:
+        await limits.init_limiter()
+        print(f"[startup] Rate limiter initialized ({limits.get_limiter_type()})")
+    except Exception as e:
+        print(f"[startup] WARNING: Failed to initialize rate limiter: {e}")
+    
     yield
+    
+    # Shutdown: close rate limiter
+    await limits.close_limiter()
     # Shutdown: close database pool
     await db.close_pool()
 
@@ -65,10 +75,6 @@ app.include_router(admin_router)
 
 # Include MCP router for LLM agent tool access
 app.include_router(mcp_router)
-
-# Add rate limiter to app state
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS configuration from settings
 # If no origins configured, allow localhost for development
@@ -86,6 +92,149 @@ app.add_middleware(
     allow_headers=["Content-Type", "X-API-Key", "Authorization", "X-AspectCode-Client-Version"],
 )
 
+
+# --- Rate Limiting Middleware ---
+# Paths that should have rate limiting applied (billable endpoints)
+RATE_LIMITED_PATHS = {"/validate", "/validate_tree_sitter", "/index"}
+
+
+def _get_client_ip(request: Request) -> str:
+    """Extract real client IP, respecting X-Forwarded-For from trusted proxies."""
+    # Cloud Run sets X-Forwarded-For; take the first (client) IP
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    # Fallback to direct connection
+    if request.client:
+        return request.client.host
+    return "unknown"
+
+
+def _get_or_create_request_id(request: Request) -> str:
+    """Get request ID from header or generate one."""
+    return request.headers.get("X-Request-Id") or str(uuid.uuid4())
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """
+    Middleware that enforces per-API-key rate limits (RPM + concurrency + daily cap).
+    
+    For requests without an API key, uses client IP as the principal.
+    This protects against unauthenticated DDoS while still allowing
+    the auth layer to return proper 401 errors.
+    """
+    
+    async def dispatch(self, request: Request, call_next):
+        # Generate/get request ID for correlation
+        request_id = _get_or_create_request_id(request)
+        start_time = time.time()
+
+        # Stash on request for downstream logging
+        request.state.request_id = request_id
+        request.state.client_ip = _get_client_ip(request)
+        request.state.user_agent = request.headers.get("User-Agent")
+        
+        # Only apply rate limiting to billable paths
+        if request.url.path not in RATE_LIMITED_PATHS:
+            response = await call_next(request)
+            response.headers["X-Request-Id"] = request_id
+            return response
+        
+        limiter = limits.get_limiter()
+        if not limiter:
+            response = await call_next(request)
+            response.headers["X-Request-Id"] = request_id
+            return response
+        
+        # Extract API key from headers
+        api_key = request.headers.get("X-API-Key")
+        if not api_key:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.lower().startswith("bearer "):
+                api_key = auth_header[7:]
+        
+        # Compute principal ID (key hash or IP)
+        if api_key:
+            principal_id = limits.get_principal_id(api_key=api_key)
+        else:
+            client_ip = _get_client_ip(request)
+            principal_id = limits.get_principal_id(client_ip=client_ip)
+        
+        principal_hash = limits.hash_principal_for_logging(principal_id)
+        limited_reason = None
+        
+        try:
+            # 1. Check daily cap first (cheapest check)
+            daily_result = await limiter.check_daily_cap(principal_id)
+            if not daily_result.allowed:
+                limited_reason = "daily_cap"
+                print(f"[limits] 429 daily_cap principal={principal_hash} path={request.url.path} request_id={request_id}")
+                return JSONResponse(
+                    status_code=429,
+                    content=limits.make_rate_limit_response("daily_cap", daily_result, request_id),
+                    headers={
+                        "Retry-After": str(daily_result.retry_after),
+                        "X-Request-Id": request_id,
+                    },
+                )
+            
+            # 2. Check RPM
+            rpm_result = await limiter.check_rpm(principal_id)
+            if not rpm_result.allowed:
+                limited_reason = "rpm"
+                print(f"[limits] 429 rpm principal={principal_hash} path={request.url.path} request_id={request_id}")
+                return JSONResponse(
+                    status_code=429,
+                    content=limits.make_rate_limit_response("rpm", rpm_result, request_id),
+                    headers={
+                        "Retry-After": str(rpm_result.retry_after),
+                        "X-Request-Id": request_id,
+                    },
+                )
+            
+            # 3. Acquire concurrency slot
+            conc_result = await limiter.acquire_concurrency(principal_id, request_id)
+            if not conc_result.allowed:
+                limited_reason = "concurrency"
+                print(f"[limits] 429 concurrency principal={principal_hash} path={request.url.path} request_id={request_id}")
+                return JSONResponse(
+                    status_code=429,
+                    content=limits.make_rate_limit_response("concurrency", conc_result, request_id),
+                    headers={
+                        "Retry-After": str(conc_result.retry_after),
+                        "X-Request-Id": request_id,
+                    },
+                )
+            
+            # Process request
+            try:
+                response = await call_next(request)
+                
+                # Increment daily counter only on successful response (2xx)
+                if 200 <= response.status_code < 300:
+                    await limiter.increment_daily(principal_id)
+                
+                # Log successful request
+                duration_ms = int((time.time() - start_time) * 1000)
+                print(f"[request] principal={principal_hash} path={request.url.path} status={response.status_code} duration_ms={duration_ms} request_id={request_id}")
+                
+                response.headers["X-Request-Id"] = request_id
+                return response
+            finally:
+                await limiter.release_concurrency(principal_id, request_id)
+        
+        except Exception as e:
+            # Fail open: if limiter errors, allow request through
+            print(f"[limits] Middleware error: {e} request_id={request_id}")
+            response = await call_next(request)
+            response.headers["X-Request-Id"] = request_id
+            return response
+
+
+# Add rate limiting middleware
+app.add_middleware(RateLimitMiddleware)
+
+
 # Server version for health checks
 SERVER_VERSION = "1.0.0"
 
@@ -102,7 +251,55 @@ def health():
         "timestamp": int(time.time()),
         "auth_required": bool(settings.api_keys) or bool(DATABASE_URL),
         "mode": settings.mode,
+        "limiter": limits.get_limiter_type(),
     }
+
+
+@app.get("/limits")
+async def get_limits_status(
+    request: Request,
+    user: UserContext = Depends(get_current_user)
+):
+    """
+    Get current rate limit status for the authenticated user.
+    Useful for debugging and testing rate limits.
+    """
+    limiter = limits.get_limiter()
+    
+    if not limiter:
+        return {
+            "enabled": False,
+            "message": "Rate limiting is disabled",
+            "instance_id": limits.get_instance_id(),
+            "uptime_seconds": limits.get_uptime_seconds(),
+        }
+    
+    try:
+        # Use the same principal ID derivation as the middleware
+        principal_id = limits.get_principal_id(api_key=user.api_key)
+        usage = await limiter.get_usage(principal_id)
+        stats = limiter.get_stats()
+        return {
+            "enabled": True,
+            "limiter_type": limits.get_limiter_type(),
+            "note": "In-memory limits reset on deploy. Limits are per-instance.",
+            "instance_id": limits.get_instance_id(),
+            "uptime_seconds": limits.get_uptime_seconds(),
+            "config": {
+                "rpm_limit": settings.rate_limit,
+                "window_seconds": 60,
+                "max_concurrent": settings.max_concurrent,
+                "daily_cap": settings.daily_cap,
+            },
+            "your_usage": usage,
+            "stats": stats,
+        }
+    except Exception as e:
+        return {
+            "enabled": True,
+            "error": str(e),
+            "instance_id": limits.get_instance_id(),
+        }
 
 
 # --- Alpha Registration (disabled in production mode) ---
@@ -114,9 +311,7 @@ def health():
 
 
 @app.post("/index", response_model=IndexResult)
-@limiter.limit(f"{settings.rate_limit}/minute")
 def index_repository(
-    request: Request,
     req: IndexRequest = Body(...),
     user: UserContext = Depends(get_current_user)
 ):
@@ -144,7 +339,6 @@ def index_repository(
         )
 
 @app.post("/validate", response_model=ValidateResponse)
-@limiter.limit(f"{settings.rate_limit}/minute")
 async def validate_code(
     request: Request,
     req: ValidateFullRequest = Body(...),
@@ -156,17 +350,16 @@ async def validate_code(
     This is the main validation endpoint that should be used going forward.
     The '/validate_tree_sitter' endpoint is maintained for backward compatibility.
     """
-    return await validate_with_logging(req, user, "validate")
+    return await validate_with_logging(request, req, user, "validate")
 
 @app.post("/validate_tree_sitter", response_model=ValidateResponse)
-@limiter.limit(f"{settings.rate_limit}/minute")
 async def validate_with_tree_sitter(
     request: Request,
     req: ValidateFullRequest = Body(...),
     user: UserContext = Depends(get_current_user)
 ):
     """Validate using the tree-sitter engine."""
-    return await validate_with_logging(req, user, "validate_tree_sitter")
+    return await validate_with_logging(request, req, user, "validate_tree_sitter")
 
 
 def _detect_language(req: ValidateFullRequest) -> str:
@@ -199,7 +392,7 @@ def _calculate_lines_of_code(req: ValidateFullRequest) -> int:
     return 0
 
 
-async def validate_with_logging(req: ValidateFullRequest, user: UserContext, endpoint: str) -> ValidateResponse:
+async def validate_with_logging(request: Request, req: ValidateFullRequest, user: UserContext, endpoint: str) -> ValidateResponse:
     """Validate with metrics logging."""
     start_time = time.time()
     status = "success"
@@ -250,6 +443,10 @@ async def validate_with_logging(req: ValidateFullRequest, user: UserContext, end
                     error_type=error_type,
                     lines_of_code_examined=lines_of_code,
                     is_admin_key=user.is_admin,
+                    request_id=getattr(request.state, "request_id", None),
+                    client_ip=getattr(request.state, "client_ip", None),
+                    user_agent=getattr(request.state, "user_agent", None),
+                    token_hash=db.hash_token(user.api_key) if getattr(user, "api_key", None) else None,
                 )
             )
 
@@ -391,9 +588,7 @@ def validate_with_tree_sitter_internal(req: ValidateFullRequest):
                 pass
 
 @app.get("/snapshots", response_model=List[SnapshotInfo])
-@limiter.limit(f"{settings.rate_limit}/minute")
 def list_snapshots(
-    request: Request,
     user: UserContext = Depends(get_current_user)
 ):
     """List available snapshots for the extension."""
@@ -414,9 +609,7 @@ def list_snapshots(
         return []
 
 @app.get("/storage/stats")
-@limiter.limit(f"{settings.rate_limit}/minute")
 def get_storage_stats(
-    request: Request,
     user: UserContext = Depends(get_current_user)
 ):
     """Get storage statistics."""

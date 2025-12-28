@@ -125,6 +125,13 @@ class DetailedMetrics(BaseModel):
     error_stats: ErrorStats
 
 
+class DbInfoResponse(BaseModel):
+    """DB introspection for request logging."""
+    request_log_table: str
+    request_log_columns: List[dict]
+    recent_rows_24h: int
+
+
 # --- Admin Dependency ---
 
 
@@ -348,4 +355,20 @@ async def get_detailed_metrics(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to fetch detailed metrics.",
+        )
+
+
+@router.get("/db-info", response_model=DbInfoResponse)
+async def get_db_info(
+    admin: UserContext = Depends(require_admin),
+):
+    """Return which request-log table the server is using, and basic stats."""
+    try:
+        info = await db.get_request_log_db_info()
+        return DbInfoResponse(**info)
+    except Exception as e:
+        print(f"[admin] Error fetching db info: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch DB info.",
         )

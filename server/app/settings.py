@@ -16,12 +16,15 @@ class Settings(BaseSettings):
     Server configuration settings.
     
     Environment variables:
-    - ASPECT_CODE_API_KEYS_RAW: Comma-separated list of valid API keys (legacy/fallback)
+    - ASPECT_CODE_API_KEYS_RAW: Comma-separated list of valid API keys (admin/service)
     - ASPECT_CODE_ALLOWED_ORIGINS_RAW: Comma-separated list of allowed CORS origins
     - ASPECT_CODE_MIN_CLIENT_VERSION: Minimum extension version required (optional)
     - ASPECT_CODE_RATE_LIMIT: Requests per minute per API key (default: 60)
+    - ASPECT_CODE_MAX_CONCURRENT: Max concurrent requests per API key (default: 2)
+    - ASPECT_CODE_DAILY_CAP: Daily request cap per API key (default: 5000)
+    - ASPECT_CODE_LIMITS_ENABLED: Enable rate limiting (default: true)
     - ASPECT_CODE_DEBUG: Enable debug mode (default: false)
-    - ASPECT_CODE_MODE: Authentication mode - 'alpha', 'prod', or 'both' (default: alpha)
+    - ASPECT_CODE_MODE: Authentication mode - 'alpha', 'prod', or 'both' (default: both)
     - DATABASE_URL: PostgreSQL connection string for Neon DB
     """
     
@@ -38,8 +41,17 @@ class Settings(BaseSettings):
     # Client version enforcement (optional)
     min_client_version: Optional[str] = None
     
-    # Rate limiting
+    # Rate limiting - requests per minute
     rate_limit: int = 60  # requests per minute per API key
+    
+    # Max concurrent requests per API key (discourages key sharing)
+    max_concurrent: int = 2
+    
+    # Daily cap per API key (resets at midnight UTC)
+    daily_cap: int = 5000
+    
+    # Master switch for rate limiting
+    limits_enabled: bool = True
     
     # Debug mode
     debug: bool = False

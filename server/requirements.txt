@@ -12,9 +12,6 @@ pydantic-settings>=2.0.0,<3.0.0
 # HTTP client (for potential external API calls)
 httpx>=0.25.0,<1.0.0
 
-# Rate limiting
-slowapi>=0.1.9,<1.0.0
-
 # Database
 asyncpg>=0.29.0,<1.0.0
 

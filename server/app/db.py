@@ -548,6 +548,74 @@ async def get_platform_metrics() -> dict:
 # --- API Request Logging (Phase 2 Metrics) ---
 
 
+_api_request_table_name: Optional[str] = None
+_api_request_table_columns: dict[str, set[str]] = {}
+
+
+async def _get_api_request_table_name(conn) -> str:
+    """Resolve the API request log table name.
+
+    Preferred table is `api_request_logs`.
+    Some deployments may use `api_requests`.
+
+    This resolver is schema-aware: if the table exists outside `public`, it will
+    return a schema-qualified name like `some_schema.api_request_logs`.
+    """
+    global _api_request_table_name
+    if _api_request_table_name:
+        return _api_request_table_name
+
+    # Prefer api_request_logs, then api_requests. Look in any schema.
+    rows = await conn.fetch(
+        """
+        SELECT table_schema, table_name
+        FROM information_schema.tables
+        WHERE table_type = 'BASE TABLE'
+          AND table_name IN ('api_request_logs', 'api_requests')
+        """
+    )
+
+    def _pick(name: str) -> Optional[str]:
+        matches = [r for r in rows if r["table_name"] == name]
+        if not matches:
+            return None
+        # Prefer public if present; otherwise take the first match.
+        for r in matches:
+            if r["table_schema"] == "public":
+                return f"public.{name}"
+        r = matches[0]
+        return f"{r['table_schema']}.{name}"
+
+    _api_request_table_name = _pick("api_request_logs") or _pick("api_requests") or "public.api_request_logs"
+
+    return _api_request_table_name
+
+
+async def _get_api_request_table_columns(conn, table_name: str) -> set[str]:
+    cached = _api_request_table_columns.get(table_name)
+    if cached is not None:
+        return cached
+
+    if "." in table_name:
+        schema, bare = table_name.split(".", 1)
+    else:
+        schema, bare = "public", table_name
+
+    rows = await conn.fetch(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+                WHERE table_schema = $1
+                    AND table_name = $2
+        """,
+                schema,
+                bare,
+    )
+    cols = {r["column_name"] for r in rows}
+    _api_request_table_columns[table_name] = cols
+    return cols
+
+
 async def log_api_request(
     token_id: Optional[str],
     endpoint: str,
@@ -561,6 +629,10 @@ async def log_api_request(
     error_type: Optional[str] = None,
     lines_of_code_examined: int = 0,
     is_admin_key: bool = False,
+    request_id: Optional[str] = None,
+    client_ip: Optional[str] = None,
+    user_agent: Optional[str] = None,
+    token_hash: Optional[str] = None,
 ) -> None:
     """
     Log an API request for metrics tracking.
@@ -583,27 +655,50 @@ async def log_api_request(
     """
     try:
         async with get_connection() as conn:
+            table = await _get_api_request_table_name(conn)
+            cols = await _get_api_request_table_columns(conn, table)
+
+            # Build a schema-compatible insert. Different deployments may have
+            # different table names and optional columns.
+            values: dict[str, Any] = {
+                "id": str(uuid.uuid4()),
+                "token_id": token_id,
+                "endpoint": endpoint,
+                "repo_root": repo_root[:500] if repo_root else None,
+                "language": language,
+                "files_count": files_count,
+                "response_time_ms": response_time_ms,
+                "findings_count": findings_count,
+                "rule_ids": rule_ids,
+                "status": status,
+                "error_type": error_type,
+                "lines_of_code_examined": lines_of_code_examined,
+                "is_admin_key": is_admin_key,
+            }
+
+            if "request_id" in cols:
+                values["request_id"] = request_id
+            if "client_ip" in cols:
+                values["client_ip"] = client_ip
+            if "user_agent" in cols:
+                values["user_agent"] = user_agent
+            if "token_hash" in cols:
+                values["token_hash"] = token_hash
+            if "created_at" in cols:
+                values["created_at"] = datetime.utcnow()
+
+            insert_cols = [k for k in values.keys() if k in cols]
+            if not insert_cols:
+                return
+
+            placeholders = [f"${i}" for i in range(1, len(insert_cols) + 1)]
+            args = [values[c] for c in insert_cols]
+            col_sql = ", ".join(insert_cols)
+            ph_sql = ", ".join(placeholders)
+
             await conn.execute(
-                """
-                INSERT INTO api_request_logs (
-                    token_id, endpoint, repo_root, language, files_count,
-                    response_time_ms, findings_count,
-                    rule_ids, status, error_type, lines_of_code_examined,
-                    is_admin_key, created_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
-                """,
-                token_id,
-                endpoint,
-                repo_root[:500] if repo_root else None,
-                language,
-                files_count,
-                response_time_ms,
-                findings_count,
-                rule_ids,
-                status,
-                error_type,
-                lines_of_code_examined,
-                is_admin_key,
+                f"INSERT INTO {table} ({col_sql}) VALUES ({ph_sql})",
+                *args,
             )
     except Exception as e:
         # Log but don't fail - this is best-effort
@@ -613,12 +708,13 @@ async def log_api_request(
 async def get_top_triggered_rules(days: int = 30, limit: int = 10) -> list[dict]:
     """Get most frequently triggered rules in the last N days."""
     async with get_connection() as conn:
+        table = await _get_api_request_table_name(conn)
         rows = await conn.fetch(
-            """
+            f"""
             SELECT 
                 rule_id,
                 COUNT(*) as trigger_count
-            FROM api_request_logs,
+            FROM {table},
             LATERAL unnest(rule_ids) as rule_id
             WHERE created_at >= NOW() - ($1 * INTERVAL '1 day')
               AND status = 'success'
@@ -644,15 +740,16 @@ async def get_top_triggered_rules(days: int = 30, limit: int = 10) -> list[dict]
 async def get_response_time_stats(days: int = 30) -> dict:
     """Get response time statistics for the last N days."""
     async with get_connection() as conn:
+        table = await _get_api_request_table_name(conn)
         stats = await conn.fetchrow(
-            """
+            f"""
             SELECT 
                 COALESCE(AVG(response_time_ms), 0) as avg_ms,
                 COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY response_time_ms), 0) as p50_ms,
                 COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY response_time_ms), 0) as p95_ms,
                 COALESCE(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY response_time_ms), 0) as p99_ms,
                 COUNT(*) as sample_count
-            FROM api_request_logs
+            FROM {table}
             WHERE created_at >= NOW() - ($1 * INTERVAL '1 day')
               AND status = 'success'
             """,
@@ -671,12 +768,13 @@ async def get_response_time_stats(days: int = 30) -> dict:
 async def get_language_breakdown(days: int = 30) -> dict:
     """Get request count by language for the last N days."""
     async with get_connection() as conn:
+        table = await _get_api_request_table_name(conn)
         rows = await conn.fetch(
-            """
+            f"""
             SELECT 
                 COALESCE(language, 'unknown') as language,
                 COUNT(*) as request_count
-            FROM api_request_logs
+            FROM {table}
             WHERE created_at >= NOW() - ($1 * INTERVAL '1 day')
             GROUP BY language
             ORDER BY request_count DESC
@@ -697,14 +795,15 @@ async def get_language_breakdown(days: int = 30) -> dict:
 async def get_files_analyzed_stats(days: int = 30) -> dict:
     """Get statistics on files analyzed per request."""
     async with get_connection() as conn:
+        table = await _get_api_request_table_name(conn)
         stats = await conn.fetchrow(
-            """
+            f"""
             SELECT 
                 COALESCE(AVG(files_count), 0) as avg_files,
                 COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY files_count), 0) as median_files,
                 COALESCE(MAX(files_count), 0) as max_files,
                 COUNT(*) as sample_count
-            FROM api_request_logs
+            FROM {table}
             WHERE created_at >= NOW() - ($1 * INTERVAL '1 day')
               AND files_count > 0
             """,
@@ -722,12 +821,13 @@ async def get_files_analyzed_stats(days: int = 30) -> dict:
 async def get_error_timeout_rates(days: int = 30) -> dict:
     """Get error and timeout rate statistics."""
     async with get_connection() as conn:
+        table = await _get_api_request_table_name(conn)
         rows = await conn.fetch(
-            """
+            f"""
             SELECT 
                 status,
                 COUNT(*) as count
-            FROM api_request_logs
+            FROM {table}
             WHERE created_at >= NOW() - ($1 * INTERVAL '1 day')
             GROUP BY status
             """,
@@ -749,6 +849,65 @@ async def get_error_timeout_rates(days: int = 30) -> dict:
             "success_rate": round(100.0 * success / total, 1) if total > 0 else 0,
             "error_rate": round(100.0 * error / total, 1) if total > 0 else 0,
             "timeout_rate": round(100.0 * timeout / total, 1) if total > 0 else 0,
+        }
+
+
+async def get_request_log_db_info() -> dict:
+    """Introspect request-log table wiring for admin debugging."""
+    async with get_connection() as conn:
+        table = await _get_api_request_table_name(conn)
+        if "." in table:
+            schema, bare = table.split(".", 1)
+        else:
+            schema, bare = "public", table
+
+        # Pull full column metadata (types/defaults) for debugging.
+        col_rows = await conn.fetch(
+            """
+            SELECT
+                column_name,
+                data_type,
+                udt_name,
+                is_nullable,
+                column_default
+            FROM information_schema.columns
+            WHERE table_schema = $1
+              AND table_name = $2
+            ORDER BY ordinal_position
+            """,
+            schema,
+            bare,
+        )
+
+        cols_set = {r["column_name"] for r in col_rows}
+        cols = [
+            {
+                "name": r["column_name"],
+                "data_type": r["data_type"],
+                "udt_name": r["udt_name"],
+                "is_nullable": r["is_nullable"],
+                "default": r["column_default"],
+            }
+            for r in col_rows
+        ]
+
+        # Best-effort: count rows in last 24h.
+        recent_rows_24h = 0
+        try:
+            if "created_at" in cols_set:
+                recent_rows_24h = int(
+                    await conn.fetchval(
+                        f"SELECT COUNT(*) FROM {table} WHERE created_at >= NOW() - INTERVAL '24 hours'"
+                    )
+                    or 0
+                )
+        except Exception:
+            recent_rows_24h = 0
+
+        return {
+            "request_log_table": table,
+            "request_log_columns": cols,
+            "recent_rows_24h": recent_rows_24h,
         }
 
 

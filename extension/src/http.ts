@@ -26,24 +26,87 @@ function setApiKeyAuthStatus(next: ApiKeyAuthStatus): void {
   apiKeyAuthStatusEmitter.fire(next);
 }
 
+// --- Network Event Tracking (for debug info) ---
+
+interface NetworkEvent {
+  timestamp: number;
+  endpoint: string;
+  method: string;
+  status: number;
+  durationMs: number;
+  requestId?: string;
+  error?: string;
+  rateLimitReason?: string;
+}
+
+const networkEvents: NetworkEvent[] = [];
+const MAX_NETWORK_EVENTS = 20;
+
+function recordNetworkEvent(event: NetworkEvent): void {
+  networkEvents.push(event);
+  if (networkEvents.length > MAX_NETWORK_EVENTS) {
+    networkEvents.shift();
+  }
+}
+
+export function getNetworkEvents(): NetworkEvent[] {
+  return [...networkEvents];
+}
+
+// --- Backoff Configuration ---
+
+const BACKOFF_BASE_MS = 500;
+const BACKOFF_MAX_MS = 10000;
+const MAX_RETRIES = 3;
+
+function getJitter(maxMs: number): number {
+  return Math.random() * maxMs;
+}
+
+function calculateBackoff(attempt: number, retryAfterSecs?: number): number {
+  if (retryAfterSecs !== undefined && retryAfterSecs > 0) {
+    // Respect Retry-After header, but cap at 60 seconds
+    return Math.min(retryAfterSecs * 1000, 60000);
+  }
+  // Exponential backoff with jitter
+  const exponential = Math.min(BACKOFF_BASE_MS * Math.pow(2, attempt), BACKOFF_MAX_MS);
+  return exponential + getJitter(exponential * 0.2);
+}
+
+// --- Rate Limit Response Types ---
+
+interface RateLimitError {
+  error: 'rate_limited';
+  reason: 'rpm' | 'concurrency' | 'daily_cap';
+  retry_after_seconds: number;
+  request_id?: string;
+  daily_cap?: number;
+  used_today?: number;
+  reset_at_utc?: string;
+}
+
+function isRateLimitError(body: any): body is RateLimitError {
+  return body && body.error === 'rate_limited';
+}
+
 /**
  * Initialize the HTTP module with the extension context.
  * Must be called during extension activation.
  */
 export function initHttp(context: vscode.ExtensionContext): void {
   secretStorage = context.secrets;
-  // Read version from extension manifest (package.json)
   extensionVersion = context.extension.packageJSON.version ?? "0.0.0";
+}
+
+export function getExtensionVersion(): string {
+  return extensionVersion;
 }
 
 /**
  * Get the canonical base URL for the Aspect Code server.
- * Checks serverBaseUrl first (preferred), then apiUrl (legacy), then default.
- * Exported so all call sites can use a single source of truth.
  */
 export function getBaseUrl(): string {
   const config = vscode.workspace.getConfiguration("aspectcode");
-  // Prefer serverBaseUrl (canonical), fall back to apiUrl (legacy), then default
   return config.get<string>("serverBaseUrl")
     || config.get<string>("apiUrl")
     || "https://api.aspectcode.com";
@@ -55,27 +118,27 @@ const CONFIG_API_KEY = () => vscode.workspace.getConfiguration("aspectcode").get
  * Get the API key, preferring SecretStorage over config.
  */
 export async function getApiKey(): Promise<string> {
-  // First, try SecretStorage (alpha registration)
   if (secretStorage) {
     const secretKey = await secretStorage.get('aspectcode.apiKey');
     if (secretKey) {
       return secretKey;
     }
   }
-  
-  // Fall back to config setting (for testing or manual setup)
   return CONFIG_API_KEY();
 }
 
 /**
  * Build common headers for all requests including auth.
- * Exported for use by direct fetch calls that can't use post()/get().
  */
-export async function getHeaders(): Promise<Record<string, string>> {
+export async function getHeaders(requestId?: string): Promise<Record<string, string>> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "X-AspectCode-Client-Version": extensionVersion,
   };
+  
+  if (requestId) {
+    headers["X-Request-Id"] = requestId;
+  }
   
   const apiKey = await getApiKey();
   if (apiKey) {
@@ -87,13 +150,19 @@ export async function getHeaders(): Promise<Record<string, string>> {
 
 /**
  * Handle HTTP errors with user-friendly messages.
- * Exported for use by direct fetch calls.
+ * Returns retry info for retryable errors, throws for non-retryable.
  */
-export function handleHttpError(status: number, statusText: string): never {
+async function handleHttpError(
+  res: Response,
+  endpoint: string,
+  requestId: string
+): Promise<{ shouldRetry: boolean; retryAfterSecs?: number; isDailyCap?: boolean }> {
+  const status = res.status;
+  
   if (status === 401) {
     setApiKeyAuthStatus('invalid');
     vscode.window.showErrorMessage(
-      "Aspect Code: API key is missing or invalid. Please enter a valid API key.",
+      "Aspect Code: API key is missing or invalid.",
       "Enter API Key"
     ).then(choice => {
       if (choice === "Enter API Key") {
@@ -106,85 +175,212 @@ export function handleHttpError(status: number, statusText: string): never {
   if (status === 403) {
     setApiKeyAuthStatus('revoked');
     vscode.window.showErrorMessage(
-      "Aspect Code: Your API key has been revoked. Please contact support for a new key.",
+      "Aspect Code: Your API key has been revoked.",
       "Enter New API Key"
     ).then(choice => {
       if (choice === "Enter New API Key") {
         vscode.commands.executeCommand("aspectcode.enterApiKey");
       }
     });
-    throw new Error("Authentication failed: API key has been revoked");
+    throw new Error("Authentication failed: API key revoked");
   }
   
   if (status === 426) {
     vscode.window.showErrorMessage(
-      "Aspect Code: Your extension version is too old. Please update the Aspect Code extension.",
+      "Aspect Code: Extension version too old. Please update.",
       "Check for Updates"
     ).then(choice => {
       if (choice === "Check for Updates") {
         vscode.commands.executeCommand("workbench.extensions.action.checkForUpdates");
       }
     });
-    throw new Error("Client version too old: Please update the extension");
+    throw new Error("Client version too old");
   }
   
   if (status === 429) {
-    vscode.window.showWarningMessage(
-      "Aspect Code: Rate limit exceeded. Please wait a moment before trying again."
-    );
-    throw new Error("Rate limit exceeded");
+    try {
+      const body = await res.json();
+      if (isRateLimitError(body)) {
+        const retryAfterSecs = body.retry_after_seconds || parseInt(res.headers.get("Retry-After") || "5", 10);
+        
+        // Daily cap is NOT retryable automatically
+        if (body.reason === 'daily_cap') {
+          const resetTime = body.reset_at_utc ? new Date(body.reset_at_utc).toLocaleTimeString() : "midnight UTC";
+          vscode.window.showWarningMessage(
+            `Aspect Code: Daily limit reached (${body.used_today}/${body.daily_cap}). Resets at ${resetTime}.`
+          );
+          return { shouldRetry: false, isDailyCap: true };
+        }
+        
+        // RPM and concurrency are retryable
+        return { shouldRetry: true, retryAfterSecs };
+      }
+    } catch {
+      // Fallback if body parsing fails
+    }
+    const retryAfter = parseInt(res.headers.get("Retry-After") || "5", 10);
+    return { shouldRetry: true, retryAfterSecs: retryAfter };
   }
   
-  throw new Error(`${status} ${statusText}`);
+  if (status === 503) {
+    // Service unavailable - retryable
+    const retryAfter = parseInt(res.headers.get("Retry-After") || "5", 10);
+    return { shouldRetry: true, retryAfterSecs: retryAfter };
+  }
+  
+  // Other errors are not retryable
+  throw new Error(`HTTP ${status}: ${res.statusText}`);
+}
+
+/**
+ * Make a request with automatic retry for 429/503.
+ */
+async function fetchWithRetry<T>(
+  method: 'GET' | 'POST',
+  path: string,
+  body?: any,
+  timeoutMs: number = 30000
+): Promise<T> {
+  const requestId = crypto.randomUUID();
+  const startTime = Date.now();
+  let lastError: Error | null = null;
+  
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    
+    try {
+      const headers = await getHeaders(requestId);
+      const res = await fetch(`${getBaseUrl()}${path}`, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : undefined,
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      
+      const durationMs = Date.now() - startTime;
+      const responseRequestId = res.headers.get("X-Request-Id") || requestId;
+      
+      if (res.ok) {
+        setApiKeyAuthStatus('ok');
+        recordNetworkEvent({
+          timestamp: Date.now(),
+          endpoint: path,
+          method,
+          status: res.status,
+          durationMs,
+          requestId: responseRequestId,
+        });
+        return res.json() as Promise<T>;
+      }
+      
+      // Handle error
+      const { shouldRetry, retryAfterSecs, isDailyCap } = await handleHttpError(res, path, requestId);
+      
+      recordNetworkEvent({
+        timestamp: Date.now(),
+        endpoint: path,
+        method,
+        status: res.status,
+        durationMs,
+        requestId: responseRequestId,
+        rateLimitReason: isDailyCap ? 'daily_cap' : (res.status === 429 ? 'rpm_or_concurrency' : undefined),
+      });
+      
+      if (!shouldRetry || attempt >= MAX_RETRIES) {
+        if (isDailyCap) {
+          throw new Error("Daily limit reached. Try again tomorrow.");
+        }
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
+      
+      // Calculate backoff and wait
+      const backoffMs = calculateBackoff(attempt, retryAfterSecs);
+      const backoffSecs = Math.ceil(backoffMs / 1000);
+      
+      // Show status bar message during retry wait
+      vscode.window.setStatusBarMessage(`$(sync~spin) Aspect Code: Rate limited, retrying in ${backoffSecs}s...`, backoffMs);
+      
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
+      
+    } catch (error) {
+      clearTimeout(timeoutId);
+      
+      const durationMs = Date.now() - startTime;
+      const isAbort = error instanceof Error && error.name === 'AbortError';
+      const isNetwork = error instanceof TypeError;
+      
+      recordNetworkEvent({
+        timestamp: Date.now(),
+        endpoint: path,
+        method,
+        status: isAbort ? 0 : -1,
+        durationMs,
+        requestId,
+        error: isAbort ? 'timeout' : (isNetwork ? 'network_error' : String(error)),
+      });
+      
+      // Network errors are retryable
+      if ((isNetwork || isAbort) && attempt < MAX_RETRIES) {
+        const backoffMs = calculateBackoff(attempt);
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
+        lastError = error instanceof Error ? error : new Error(String(error));
+        continue;
+      }
+      
+      throw error;
+    }
+  }
+  
+  throw lastError || new Error("Request failed after retries");
 }
 
 export async function post<T>(path: string, body: any): Promise<T> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout for validation
-  
-  try {
-    const headers = await getHeaders();
-    const res = await fetch(`${getBaseUrl()}${path}`, { 
-      method: "POST", 
-      headers, 
-      body: JSON.stringify(body),
-      signal: controller.signal
-    });
-    clearTimeout(timeoutId);
-    
-    if (!res.ok) {
-      handleHttpError(res.status, res.statusText);
-    }
-    setApiKeyAuthStatus('ok');
-    return res.json() as Promise<T>;
-  } catch (error) {
-    clearTimeout(timeoutId);
-    throw error;
-  }
+  return fetchWithRetry<T>('POST', path, body, 30000);
 }
 
 export async function get<T>(path: string): Promise<T> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
-  
-  try {
-    const headers = await getHeaders();
-    const res = await fetch(`${getBaseUrl()}${path}`, { 
-      method: "GET", 
-      headers,
-      signal: controller.signal
-    });
-    clearTimeout(timeoutId);
-    
-    if (!res.ok) {
-      handleHttpError(res.status, res.statusText);
-    }
-    setApiKeyAuthStatus('ok');
-    return res.json() as Promise<T>;
-  } catch (error) {
-    clearTimeout(timeoutId);
-    throw error;
+  return fetchWithRetry<T>('GET', path, undefined, 5000);
+}
+
+// --- Single-Flight Requests ---
+
+const inFlightRequests = new Map<string, Promise<any>>();
+
+/**
+ * Make a request that's deduplicated per key.
+ * If a request with the same key is already in flight, returns that promise.
+ */
+export async function singleFlight<T>(
+  key: string,
+  requestFn: () => Promise<T>
+): Promise<T> {
+  const existing = inFlightRequests.get(key);
+  if (existing) {
+    return existing as Promise<T>;
   }
+  
+  const promise = requestFn().finally(() => {
+    inFlightRequests.delete(key);
+  });
+  
+  inFlightRequests.set(key, promise);
+  return promise;
+}
+
+/**
+ * Check if a request is currently in flight.
+ */
+export function isRequestInFlight(key: string): boolean {
+  return inFlightRequests.has(key);
+}
+
+/**
+ * Cancel tracking for an in-flight request (doesn't cancel the actual request).
+ */
+export function clearInFlightRequest(key: string): void {
+  inFlightRequests.delete(key);
 }
 
 // Import types from state
@@ -195,7 +391,6 @@ export async function fetchCapabilities(): Promise<Capabilities> {
     return await get<Capabilities>("/patchlets/capabilities");
   } catch (error) {
     console.warn('[Aspect Code] Failed to fetch capabilities:', error);
-    // Return default capabilities if endpoint doesn't exist
     return {
       language: 'python',
       fixable_rules: []

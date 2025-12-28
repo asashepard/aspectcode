@@ -81,6 +81,11 @@
         "icon": "$(sync)"
       },
       {
+        "command": "aspectcode.copyDebugInfo",
+        "title": "Aspect Code: Copy Debug Info",
+        "icon": "$(clippy)"
+      },
+      {
         "command": "aspectcode.configureAssistants",
         "title": "Aspect Code: Configure AI Assistants",
         "icon": "$(sparkle)"

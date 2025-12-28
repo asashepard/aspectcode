@@ -6,13 +6,15 @@ Shares rate limits with other API endpoints. No streaming.
 """
 
 from typing import Dict, List, Any, Optional, Callable
+import asyncio
+import time
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel, Field
 import logging
 
 from .auth import get_current_user, UserContext
-from .rate_limit import limiter
-from .settings import settings
+from .settings import settings, DATABASE_URL
+from . import db
 
 logger = logging.getLogger(__name__)
 
@@ -347,9 +349,8 @@ _register_all_tools()
 
 
 @router.get("/tools", response_model=ToolsListResponse)
-@limiter.limit(f"{settings.rate_limit}/minute")
+@router.get("/tools", response_model=ToolsListResponse)
 async def list_tools(
-    request: Request,  # Required for rate limiter
     user: UserContext = Depends(get_current_user)
 ) -> ToolsListResponse:
     """
@@ -362,10 +363,9 @@ async def list_tools(
 
 
 @router.post("/execute", response_model=ExecuteResponse)
-@limiter.limit(f"{settings.rate_limit}/minute")
 async def execute_tool(
-    request: Request,  # Required for rate limiter  
     body: ExecuteRequest,
+    request: Request,
     user: UserContext = Depends(get_current_user)
 ) -> ExecuteResponse:
     """
@@ -393,6 +393,10 @@ async def execute_tool(
             error=f"Snapshot not found: {body.snapshot_id}. Index the repository first."
         )
     
+    start_time = time.time()
+    status_str = "success"
+    error_type: Optional[str] = None
+
     # Execute tool
     try:
         handler = tool_registry.get_handler(body.tool)
@@ -400,13 +404,40 @@ async def execute_tool(
         
         # Check if handler returned an error
         if isinstance(result, dict) and "error" in result and len(result) == 1:
+            status_str = "error"
+            error_type = "tool_error"
             return ExecuteResponse(success=False, error=result["error"])
         
         return ExecuteResponse(success=True, result=result)
         
     except Exception as e:
+        status_str = "error"
+        error_type = type(e).__name__
         logger.exception(f"Tool execution failed: {body.tool}")
         return ExecuteResponse(
             success=False,
             error=f"Tool execution failed: {str(e)}"
         )
+    finally:
+        if DATABASE_URL:
+            response_time_ms = int((time.time() - start_time) * 1000)
+            asyncio.create_task(
+                db.log_api_request(
+                    token_id=user.token_id,
+                    endpoint=f"mcp:{body.tool}",
+                    repo_root=None,
+                    language=None,
+                    files_count=0,
+                    response_time_ms=response_time_ms,
+                    findings_count=0,
+                    rule_ids=[],
+                    status=status_str,
+                    error_type=error_type,
+                    lines_of_code_examined=0,
+                    is_admin_key=user.is_admin,
+                    request_id=getattr(request.state, "request_id", None),
+                    client_ip=getattr(request.state, "client_ip", None),
+                    user_agent=getattr(request.state, "user_agent", None),
+                    token_hash=db.hash_token(user.api_key) if getattr(user, "api_key", None) else None,
+                )
+            )

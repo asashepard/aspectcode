@@ -7,7 +7,7 @@ import { loadGrammarsOnce, getLoadedGrammarsSummary } from './tsParser';
 import { extractPythonImports, extractTSJSImports } from './importExtractors';
 import { AspectCodePanelProvider } from './panel/PanelProvider';
 import { AspectCodeState } from './state';
-import { post, fetchCapabilities, initHttp, getHeaders, handleHttpError, getBaseUrl, resetApiKeyAuthStatus } from './http';
+import { post, fetchCapabilities, initHttp, getHeaders, getBaseUrl, resetApiKeyAuthStatus } from './http';
 import Parser from 'web-tree-sitter';
 import { activateNewCommands } from './newCommandsIntegration';
 import { WorkspaceFingerprint } from './services/WorkspaceFingerprint';
@@ -2453,7 +2453,76 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // 5. FORCE REINDEX - Clear cache and reindex entire workspace
+  // 5. COPY DEBUG INFO - Collect debug information for support
+  context.subscriptions.push(
+    vscode.commands.registerCommand('aspectcode.copyDebugInfo', async () => {
+      try {
+        const { getExtensionVersion, getNetworkEvents, getBaseUrl } = await import('./http');
+        
+        // Collect debug info
+        const debugInfo: Record<string, any> = {
+          timestamp: new Date().toISOString(),
+          extension_version: getExtensionVersion(),
+          server_url: getBaseUrl(),
+        };
+        
+        // Workspace fingerprint (hashed, no real path)
+        if (workspaceFingerprint) {
+          const stats = await workspaceFingerprint.getStats();
+          debugInfo.workspace = {
+            fingerprint_hash: stats.fingerprint?.substring(0, 12),
+            file_count: stats.fileCount,
+            kb_stale: stats.isStale,
+            last_kb_update: stats.lastKbUpdate,
+          };
+        }
+        
+        // KB mode from settings
+        const kbMode = vscode.workspace.getConfiguration('aspectcode').get<string>('autoRegenerateKb');
+        debugInfo.kb_mode = kbMode || 'unknown';
+        
+        // State summary
+        const panelState = state.get();
+        debugInfo.state = {
+          busy: panelState.busy,
+          findings_count: panelState.findings.length,
+          has_snapshot: !!panelState.snapshot,
+          last_validate_took_ms: panelState.lastValidate?.tookMs,
+          error: panelState.error?.substring(0, 100),
+        };
+        
+        // Last 20 network events
+        const events = getNetworkEvents();
+        debugInfo.network_events = events.map(e => ({
+          time: new Date(e.timestamp).toISOString(),
+          endpoint: e.endpoint,
+          status: e.status,
+          duration_ms: e.durationMs,
+          request_id: e.requestId?.substring(0, 8),
+          error: e.error?.substring(0, 50),
+        }));
+        
+        // Format and copy
+        const text = JSON.stringify(debugInfo, null, 2);
+        await vscode.env.clipboard.writeText(text);
+        
+        vscode.window.showInformationMessage(
+          'Aspect Code debug info copied to clipboard.',
+          'Show in Output'
+        ).then(choice => {
+          if (choice === 'Show in Output') {
+            outputChannel.appendLine('=== DEBUG INFO ===');
+            outputChannel.appendLine(text);
+            outputChannel.show();
+          }
+        });
+      } catch (e) {
+        vscode.window.showErrorMessage(`Failed to collect debug info: ${e}`);
+      }
+    })
+  );
+
+  // 6. FORCE REINDEX - Clear cache and reindex entire workspace
   context.subscriptions.push(
     vscode.commands.registerCommand('aspectcode.forceReindex', async () => {
       try {
