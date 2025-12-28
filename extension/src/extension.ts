@@ -2598,20 +2598,55 @@ export async function activate(context: vscode.ExtensionContext) {
     outputChannel.appendLine(`Tree-sitter initialization failed: ${error}`);
   });
 
+  const shouldTrackFileForKb = (filePath: string): boolean => {
+    const ext = path.extname(filePath).toLowerCase();
+    const sourceExtensions = ['.py', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.java', '.cpp', '.c', '.cs', '.go', '.rs'];
+    if (!sourceExtensions.includes(ext)) {
+      return false;
+    }
+
+    const normalized = filePath.replace(/\\/g, '/').toLowerCase();
+    // Avoid churn from common generated/vendor directories.
+    const excludedSegments = [
+      '/node_modules/', '/.git/', '/__pycache__/', '/.venv/', '/venv/',
+      '/build/', '/dist/', '/target/', '/coverage/', '/.next/',
+      '/.pytest_cache/', '/.mypy_cache/', '/.tox/', '/htmlcov/',
+      '/.aspect/'
+    ];
+    return !excludedSegments.some(seg => normalized.includes(seg));
+  };
+
+  const isBulkEdit = (changes: readonly vscode.TextDocumentContentChangeEvent[]): boolean => {
+    // Heuristic: LLM/apply-edit flows tend to apply large/compound edits.
+    if (!changes || changes.length === 0) return false;
+    if (changes.length >= 2) return true;
+
+    const c = changes[0];
+    const insertedLen = (c.text || '').length;
+    const insertedLines = (c.text || '').split(/\r?\n/).length - 1;
+    const replacedLen = c.rangeLength ?? 0;
+    return insertedLen >= 200 || insertedLines >= 8 || replacedLen >= 400;
+  };
+
   // Hook into file change events for KB staleness detection
   // Only track edits to mark KB as potentially stale (no server calls)
   context.subscriptions.push(
     vscode.workspace.onDidChangeTextDocument(async (event) => {
-      const ext = path.extname(event.document.fileName).toLowerCase();
-      const sourceExtensions = ['.py', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.java', '.cpp', '.c', '.cs', '.go', '.rs'];
-      
-      if (!sourceExtensions.includes(ext)) {
+      const filePath = event.document.fileName;
+      if (!shouldTrackFileForKb(filePath)) {
         return;
       }
       
       // Notify fingerprint service that a file was edited (for idle detection)
       if (event.contentChanges.length > 0) {
         workspaceFingerprint?.onFileEdited();
+
+        // If autoRegenerateKb === 'onSave', also trigger regeneration for bulk edits
+        // (common when an LLM applies a change), even if the editor isn't explicitly saved.
+        const autoRegen = vscode.workspace.getConfiguration('aspectcode').get<string>('autoRegenerateKb', 'onSave');
+        if (autoRegen === 'onSave' && isBulkEdit(event.contentChanges)) {
+          workspaceFingerprint?.onFileSaved(filePath);
+        }
       }
     })
   );
@@ -2620,14 +2655,32 @@ export async function activate(context: vscode.ExtensionContext) {
   // If autoRegenerateKb === 'onSave', this will trigger debounced KB regeneration.
   context.subscriptions.push(
     vscode.workspace.onDidSaveTextDocument((doc) => {
-      const ext = path.extname(doc.fileName).toLowerCase();
-      const sourceExtensions = ['.py', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.java', '.cpp', '.c', '.cs', '.go', '.rs'];
-      if (!sourceExtensions.includes(ext)) {
+      const filePath = doc.fileName;
+      if (!shouldTrackFileForKb(filePath)) {
         return;
       }
-      workspaceFingerprint?.onFileSaved(doc.fileName);
+      workspaceFingerprint?.onFileSaved(filePath);
     })
   );
+
+  // Also watch for on-disk changes (e.g., git revert/checkout, bulk updates) so
+  // autoRegenerateKb='onSave' works even when files change outside normal saves.
+  const kbFsWatcher = vscode.workspace.createFileSystemWatcher(
+    '**/*.{py,ts,tsx,js,jsx,mjs,cjs,java,cpp,c,cs,go,rs}'
+  );
+  kbFsWatcher.onDidChange((uri) => {
+    if (!shouldTrackFileForKb(uri.fsPath)) return;
+    workspaceFingerprint?.onFileSaved(uri.fsPath);
+  });
+  kbFsWatcher.onDidCreate((uri) => {
+    if (!shouldTrackFileForKb(uri.fsPath)) return;
+    workspaceFingerprint?.onFileSaved(uri.fsPath);
+  });
+  kbFsWatcher.onDidDelete((uri) => {
+    if (!shouldTrackFileForKb(uri.fsPath)) return;
+    workspaceFingerprint?.onFileSaved(uri.fsPath);
+  });
+  context.subscriptions.push(kbFsWatcher);
 
   context.subscriptions.push(
     diag,
