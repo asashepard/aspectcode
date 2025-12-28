@@ -425,12 +425,10 @@ async def execute_tool(
                 db.log_api_request(
                     token_id=user.token_id,
                     endpoint=f"mcp:{body.tool}",
-                    repo_root=None,
                     language=None,
                     files_count=0,
                     response_time_ms=response_time_ms,
                     findings_count=0,
-                    rule_ids=[],
                     status=status_str,
                     error_type=error_type,
                     lines_of_code_examined=0,

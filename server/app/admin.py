@@ -132,6 +132,20 @@ class DbInfoResponse(BaseModel):
     recent_rows_24h: int
 
 
+class RequestLogRow(BaseModel):
+    created_at: datetime
+    endpoint: str
+    language: Optional[str] = None
+    files_count: int
+    findings_count: int
+    status: str
+    token_id: Optional[str] = None
+
+
+class RecentRequestLogsResponse(BaseModel):
+    rows: List[RequestLogRow]
+
+
 # --- Admin Dependency ---
 
 
@@ -371,4 +385,25 @@ async def get_db_info(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to fetch DB info.",
+        )
+
+
+@router.get("/request-logs/recent", response_model=RecentRequestLogsResponse)
+async def get_recent_request_logs(
+    limit: int = 20,
+    admin: UserContext = Depends(require_admin),
+):
+    """Return recent request log rows (admin-only)."""
+    if limit < 1:
+        limit = 1
+    if limit > 200:
+        limit = 200
+    try:
+        rows = await db.get_recent_request_logs(limit=limit)
+        return RecentRequestLogsResponse(rows=[RequestLogRow(**r) for r in rows])
+    except Exception as e:
+        print(f"[admin] Error fetching recent request logs: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch recent request logs.",
         )

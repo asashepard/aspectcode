@@ -619,12 +619,10 @@ async def _get_api_request_table_columns(conn, table_name: str) -> set[str]:
 async def log_api_request(
     token_id: Optional[str],
     endpoint: str,
-    repo_root: Optional[str],
     language: Optional[str],
     files_count: int,
     response_time_ms: int,
     findings_count: int,
-    rule_ids: list[str],
     status: str,
     error_type: Optional[str] = None,
     lines_of_code_examined: int = 0,
@@ -664,12 +662,10 @@ async def log_api_request(
                 "id": str(uuid.uuid4()),
                 "token_id": token_id,
                 "endpoint": endpoint,
-                "repo_root": repo_root[:500] if repo_root else None,
                 "language": language,
                 "files_count": files_count,
                 "response_time_ms": response_time_ms,
                 "findings_count": findings_count,
-                "rule_ids": rule_ids,
                 "status": status,
                 "error_type": error_type,
                 "lines_of_code_examined": lines_of_code_examined,
@@ -909,6 +905,40 @@ async def get_request_log_db_info() -> dict:
             "request_log_columns": cols,
             "recent_rows_24h": recent_rows_24h,
         }
+
+
+async def get_recent_request_logs(limit: int = 20) -> list[dict]:
+    """Fetch recent request log rows for admin debugging."""
+    async with get_connection() as conn:
+        table = await _get_api_request_table_name(conn)
+        rows = await conn.fetch(
+            f"""
+            SELECT
+                created_at,
+                endpoint,
+                language,
+                files_count,
+                findings_count,
+                status,
+                token_id
+            FROM {table}
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+        return [
+            {
+                "created_at": r["created_at"],
+                "endpoint": r["endpoint"],
+                "language": r.get("language"),
+                "files_count": int(r.get("files_count") or 0),
+                "findings_count": int(r.get("findings_count") or 0),
+                "status": r["status"],
+                "token_id": str(r["token_id"]) if r.get("token_id") else None,
+            }
+            for r in rows
+        ]
 
 
 async def get_detailed_metrics(days: int = 30) -> dict:

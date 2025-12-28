@@ -162,7 +162,6 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         
         principal_hash = limits.hash_principal_for_logging(principal_id)
         limited_reason = None
-        
         try:
             # 1. Check daily cap first (cheapest check)
             daily_result = await limiter.check_daily_cap(principal_id)
@@ -372,6 +371,59 @@ def _detect_language(req: ValidateFullRequest) -> str:
     return "unknown"
 
 
+def _languages_to_string(langs: Optional[List[str]]) -> str:
+    if not langs:
+        return "unknown"
+    unique = sorted({l for l in langs if l})
+    if not unique:
+        return "unknown"
+    return ",".join(unique)
+
+
+def _detect_languages_for_logging(req: ValidateFullRequest, response: Optional[ValidateResponse]) -> str:
+    """Detect languages for request logging.
+
+    Preference order:
+    1) Engine-detected languages (response.metrics["languages"]) when available
+    2) Request-provided req.languages
+    3) Infer from remote file payload (req.files)
+    """
+
+    try:
+        if response and isinstance(getattr(response, "metrics", None), dict):
+            langs = response.metrics.get("languages")
+            if isinstance(langs, list) and langs:
+                return _languages_to_string([str(x) for x in langs])
+    except Exception:
+        pass
+
+    if req.languages:
+        return _languages_to_string(req.languages)
+
+    if req.files:
+        inferred: List[str] = []
+        for f in req.files:
+            lang = getattr(f, "language", None)
+            if lang:
+                inferred.append(str(lang))
+                continue
+            path = (getattr(f, "path", "") or "").lower()
+            if path.endswith(".py"):
+                inferred.append("python")
+            elif path.endswith((".ts", ".tsx")):
+                inferred.append("typescript")
+            elif path.endswith((".js", ".jsx", ".mjs", ".cjs")):
+                inferred.append("javascript")
+            elif path.endswith(".java"):
+                inferred.append("java")
+            elif path.endswith((".cs", ".csx")):
+                inferred.append("csharp")
+
+        return _languages_to_string(inferred)
+
+    return "unknown"
+
+
 def _estimate_files_count(req: ValidateFullRequest) -> int:
     """Estimate files to be analyzed from request."""
     if req.files:
@@ -379,6 +431,18 @@ def _estimate_files_count(req: ValidateFullRequest) -> int:
     if req.paths:
         return len(req.paths)
     return 0
+
+def _detect_files_count_for_logging(req: ValidateFullRequest, response: Optional[ValidateResponse]) -> int:
+    try:
+        if response and isinstance(getattr(response, "metrics", None), dict):
+            v = response.metrics.get("files_checked")
+            if isinstance(v, int):
+                return v
+            if isinstance(v, str) and v.isdigit():
+                return int(v)
+    except Exception:
+        pass
+    return _estimate_files_count(req)
 
 
 def _calculate_lines_of_code(req: ValidateFullRequest) -> int:
@@ -433,12 +497,10 @@ async def validate_with_logging(request: Request, req: ValidateFullRequest, user
                 db.log_api_request(
                     token_id=user.token_id,  # May be None for admin keys
                     endpoint=endpoint,
-                    repo_root=req.repo_root,
-                    language=_detect_language(req),
-                    files_count=_estimate_files_count(req),
+                    language=_detect_languages_for_logging(req, response),
+                    files_count=_detect_files_count_for_logging(req, response),
                     response_time_ms=response_time_ms,
                     findings_count=findings_count,
-                    rule_ids=rule_ids,
                     status=status,
                     error_type=error_type,
                     lines_of_code_examined=lines_of_code,
@@ -551,6 +613,14 @@ def validate_with_tree_sitter_internal(req: ValidateFullRequest):
             verdict = "risky"
         
         # Create response
+        engine_language_keys: List[str] = []
+        try:
+            lang_stats = result.get("metrics", {}).get("languages", {})
+            if isinstance(lang_stats, dict):
+                engine_language_keys = sorted([str(k) for k in lang_stats.keys()])
+        except Exception:
+            engine_language_keys = []
+
         return ValidateResponse(
             verdict=verdict,
             violations=violations,
@@ -563,7 +633,8 @@ def validate_with_tree_sitter_internal(req: ValidateFullRequest):
                 "snapshot_id": req.snapshot_id or "tree-sitter-direct",
                 "whole_repo_mode": True,
                 "debug_detector_findings_count": len(result.get("findings", [])),
-                "debug_violations_count": len(violations)
+                "debug_violations_count": len(violations),
+                "languages": engine_language_keys,
             }
         )
         
