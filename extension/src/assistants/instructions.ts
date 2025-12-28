@@ -48,6 +48,8 @@ Before multi-file edits, read the KB files in \`.aspect/\`:
 - Add code; don't reorganize unless explicitly asked
 - Match naming patterns shown in \`map.md\`
 - Check "Used In (files)" in \`map.md\` before renaming/deleting symbols
+- Treat \`.aspect/architecture.md\` as the "hub and entry points" guide
+- Treat \`.aspect/map.md\` as the "where symbols live" index
 
 **Don't:**
 - Edit files with 5+ dependents without acknowledging the risk
@@ -67,26 +69,6 @@ Hub files have many dependents — changes ripple widely. Before editing:
 4. If you must change a signature, update all callers listed in "Used In (files)"
 
 **Example:** If a hub file has 8+ dependents, adding a new function is safer than renaming an existing one.
-
----
-
-## MCP Tools
-
-If MCP is configured, query the dependency graph programmatically:
-
-| Tool | Use Case |
-|------|----------|
-| \`get_file_dependents\` | What files import this file? (blast radius) |
-| \`get_file_dependencies\` | What does this file import? |
-| \`get_architectural_hubs\` | Find files with N+ dependents |
-| \`get_circular_dependencies\` | Detect import cycles |
-| \`get_impact_analysis\` | Cascading impact of changes |
-
-**Example:**
-\`\`\`json
-{ "tool": "get_file_dependents", "arguments": { "file_path": "<path-to-file>" } }
-\`\`\`
-→ Returns files that import the target file (blast radius)
 `.trim();
 }
 

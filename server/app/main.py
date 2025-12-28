@@ -19,7 +19,6 @@ from .storage import get_storage
 from .settings import settings, DATABASE_URL
 from .auth import get_current_user, UserContext
 from .admin import router as admin_router
-from .mcp import router as mcp_router
 from . import db
 from . import limits
 
@@ -72,9 +71,6 @@ app = FastAPI(
 
 # Include admin router
 app.include_router(admin_router)
-
-# Include MCP router for LLM agent tool access
-app.include_router(mcp_router)
 
 # CORS configuration from settings
 # If no origins configured, allow localhost for development

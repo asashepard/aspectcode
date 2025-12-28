@@ -1670,12 +1670,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         this._bridgeState.progress = progress;
         this.post({ type: 'FLOW_PROGRESS', phase: step });
 
-        if (step === 'index') {
-          // INDEX is disabled for remote servers - skip silently
-          // The aspectcode.index command is a no-op for remote servers
-        }
-
-        else if (step === 'validate') {
+                if (step === 'validate') {
           try {
             await vscode.commands.executeCommand('aspectcode.examine');
           } catch (error) {
@@ -6066,16 +6061,12 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             const detailsEl = document.getElementById('score-details');
             scoreEl.textContent = '—';
             scoreEl.style.color = 'var(--vscode-descriptionForeground)';
-            detailsEl.textContent = 'Starting indexing...';
-            showProgress('', 5);
+            detailsEl.textContent = 'Starting analysis...';
+            showProgress('', 10);
             
             try {
-                // Send index command and wait
-                vscode.postMessage({ type: 'COMMAND', command: 'aspectcode.index' });
-                await new Promise(resolve => setTimeout(resolve, 3000));
-                
-                // Transition to validation
-                detailsEl.textContent = 'Running validation...';
+                // Run analysis
+                detailsEl.textContent = 'Running analysis...';
                 showProgress('', 50);
                 
                 // Send validate command and wait

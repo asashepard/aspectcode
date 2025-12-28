@@ -11,6 +11,7 @@ import { post, fetchCapabilities, initHttp, getHeaders, getBaseUrl, resetApiKeyA
 import Parser from 'web-tree-sitter';
 import { activateNewCommands } from './newCommandsIntegration';
 import { WorkspaceFingerprint } from './services/WorkspaceFingerprint';
+import { computeImpactSummaryForFile } from './assistants/kb';
 
 let examineOnSave = false;
 const diag = vscode.languages.createDiagnosticCollection('aspectcode');
@@ -1587,13 +1588,13 @@ async function examineFullRepository(
       // Check if we should auto-generate instruction files after successful examination
       const assistantsConfig = vscode.workspace.getConfiguration('aspectcode.assistants');
       const autoGenerate = assistantsConfig.get<boolean>('autoGenerate', false);
-      
+
       if (autoGenerate) {
         outputChannel?.appendLine('[Assistants] Auto-generating instruction files after examination...');
         try {
           await vscode.commands.executeCommand('aspectcode.generateInstructionFiles');
         } catch (genError) {
-          outputChannel?.appendLine(`[Assistants] Auto-generation failed: ${genError}`);
+          outputChannel?.appendLine(`[Assistants] Auto-generation failed (non-critical): ${genError}`);
           // Don't block validation on generation failure
         }
       }
@@ -2360,48 +2361,7 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // 1. INDEX - Scan entire repository for analysis
-  context.subscriptions.push(
-    vscode.commands.registerCommand('aspectcode.index', async () => {
-      try {
-        const indexStartTime = Date.now();
-        outputChannel?.appendLine('=== INDEX: Starting repository indexing ===');
-        
-        // Clear all existing state and start fresh
-        state.update({
-          busy: false,
-          findings: [],
-          lastValidate: undefined,
-          capabilities: undefined,
-          error: undefined
-        });
-        
-        // Index the entire repository without caching
-        const t1 = Date.now();
-        await indexRepository(true, state); // force = true to bypass cache
-        outputChannel?.appendLine(`=== INDEX: Repository indexed in ${Date.now() - t1}ms ===`);
-        
-        outputChannel?.appendLine(`=== INDEX: Total time ${Date.now() - indexStartTime}ms ===`);
-        
-      } catch (error) {
-        outputChannel?.appendLine(`INDEX ERROR: ${error}`);
-        
-        // Clear progress state on error
-        if (state) {
-          state.update({ busy: false, error: `Index failed: ${error}` });
-          sendProgressToPanel(state, 'indexing', 0, 'Indexing failed');
-        }
-        
-        if (error instanceof Error && error.message.includes('timeout')) {
-          vscode.window.showWarningMessage(`Index timeout: ${error.message}. Try indexing a smaller subset of files.`);
-        } else {
-          vscode.window.showErrorMessage(`Index failed: ${error}`);
-        }
-      }
-    })
-  );
-  
-  // 2. VALIDATE - Analyze entire repository for issues
+  // 1. EXAMINE - Analyze entire repository for issues
   context.subscriptions.push(
     vscode.commands.registerCommand('aspectcode.examine', async (opts?: { modes?: string[] }) => {
       try {
@@ -2441,11 +2401,66 @@ export async function activate(context: vscode.ExtensionContext) {
       }
     })
   );
+
+  // Copy a short impact summary for the current file to clipboard.
+  context.subscriptions.push(
+    vscode.commands.registerCommand('aspectcode.copyImpactAnalysisCurrentFile', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        vscode.window.showWarningMessage('No active file.');
+        return;
+      }
+
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      if (!workspaceFolders || workspaceFolders.length === 0) {
+        vscode.window.showWarningMessage('No workspace folder open.');
+        return;
+      }
+
+      const workspaceRoot = workspaceFolders[0].uri;
+      const absPath = editor.document.uri.fsPath;
+
+      const channel = outputChannel ?? vscode.window.createOutputChannel('Aspect Code');
+      channel.appendLine(`[Impact] Computing impact for: ${absPath}`);
+
+      const summary = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: 'Aspect Code: Computing impact analysis...',
+          cancellable: false
+        },
+        async () => computeImpactSummaryForFile(workspaceRoot, absPath, channel, context)
+      );
+
+      if (!summary) {
+        vscode.window.showWarningMessage('Impact analysis unavailable. Try running “Aspect Code: Examine” first.');
+        return;
+      }
+
+      const lines: string[] = [];
+      lines.push('Aspect Code — Impact Analysis');
+      lines.push(`File: ${summary.file}`);
+      lines.push(`Dependents: ${summary.dependents_count}`);
+      lines.push(`Hub risk: ${summary.hub_risk}`);
+      if (summary.top_dependents.length > 0) {
+        lines.push('Top dependents:');
+        for (const dep of summary.top_dependents) {
+          lines.push(`- ${dep.file} (${dep.dependent_count} dependents)`);
+        }
+      } else {
+        lines.push('Top dependents: (none found)');
+      }
+      lines.push(`Generated: ${summary.generated_at}`);
+
+      await vscode.env.clipboard.writeText(lines.join('\n'));
+      vscode.window.showInformationMessage('Impact analysis copied to clipboard.');
+    })
+  );
   
   // 3. FIX SAFE - Removed legacy command, now uses Auto-Fix V1 pipeline
   // All fix operations now go through Aspect Code.applyAutofix for consistency
   
-  // 4. SHOW PANEL - Display the main Aspect Code panel
+  // 2. SHOW PANEL - Display the main Aspect Code panel
   context.subscriptions.push(
     vscode.commands.registerCommand('aspectcode.showPanel', async () => {
       // Focus the webview panel directly by its view ID

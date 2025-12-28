@@ -68,12 +68,13 @@
         "icon": "$(settings-gear)"
       },
       {
-        "command": "aspectcode.index",
-        "title": "Aspect Code: Index"
-      },
-      {
         "command": "aspectcode.examine",
         "title": "Aspect Code: Examine"
+      },
+      {
+        "command": "aspectcode.copyImpactAnalysisCurrentFile",
+        "title": "Aspect Code: Copy Impact Analysis for Current File",
+        "icon": "$(clippy)"
       },
       {
         "command": "aspectcode.forceReindex",

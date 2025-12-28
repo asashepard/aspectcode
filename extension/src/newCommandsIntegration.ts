@@ -225,7 +225,7 @@ export function activateNewCommands(
 
   // Startup check intentionally disabled: panel UI handles setup prompts.
 
-  // Add legacy CLI scan status bar items (only if enabled)
+  // Add legacy scan status bar items (only if enabled)
   const config = vscode.workspace.getConfiguration('aspectcode');
   const enableLegacyPreflight = config.get<boolean>('enableLegacyPreflight', false);
   
@@ -234,7 +234,7 @@ export function activateNewCommands(
     const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
     statusBarItem.text = '$(search) Scan Workspace';
     statusBarItem.command = 'aspectcode.scanWorkspace';
-    statusBarItem.tooltip = 'Scan workspace with Aspect Code (Legacy CLI)';
+    statusBarItem.tooltip = 'Scan workspace with Aspect Code (Legacy)';
     statusBarItem.show();
     
     // Add rule configuration button to status bar

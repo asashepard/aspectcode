@@ -353,15 +353,99 @@ export async function generateKnowledgeBase(
   outputChannel.appendLine(`[KB][Perf] getDetailedDependencyData: ${allLinks.length} links in ${Date.now() - tDeps}ms`);
 
   // Generate all KB files in parallel (V3: 3 files)
-  const tGen = Date.now();
+  const tWrite = Date.now();
   await Promise.all([
     generateArchitectureFile(aspectCodeDir, state, workspaceRoot, files, depData, allLinks, outputChannel, fileContentCache),
     generateMapFile(aspectCodeDir, state, workspaceRoot, files, depData, allLinks, outputChannel, grammars, fileContentCache),
     generateContextFile(aspectCodeDir, state, workspaceRoot, files, allLinks, outputChannel, fileContentCache)
   ]);
-  outputChannel.appendLine(`[KB][Perf] generateFiles (parallel): ${Date.now() - tGen}ms`);
+  outputChannel.appendLine(`[KB][Perf] write KB files: ${Date.now() - tWrite}ms`);
 
   outputChannel.appendLine(`[KB] Knowledge base generation complete (3 files) in ${Date.now() - kbStart}ms`);
+}
+
+export type ImpactSummary = {
+  file: string;
+  dependents_count: number;
+  top_dependents: Array<{ file: string; dependent_count: number }>;
+  hub_risk: 'LOW' | 'MEDIUM' | 'HIGH';
+  generated_at: string;
+};
+
+/**
+ * Computes a lightweight impact summary for a single file.
+ * Used by the VS Code command that copies impact analysis to clipboard.
+ */
+export async function computeImpactSummaryForFile(
+  workspaceRoot: vscode.Uri,
+  absoluteFilePath: string,
+  outputChannel: vscode.OutputChannel,
+  context?: vscode.ExtensionContext
+): Promise<ImpactSummary | null> {
+  try {
+    const files = await discoverWorkspaceFiles(workspaceRoot);
+    if (files.length === 0) return null;
+
+    const normalizedTarget = path.resolve(absoluteFilePath);
+    const fileContentCache = await preloadFileContents(files);
+    const { stats: depData, links: allLinks } = await getDetailedDependencyData(workspaceRoot, files, outputChannel, fileContentCache);
+
+    const targetClass = classifyFile(normalizedTarget, workspaceRoot.fsPath);
+    if (targetClass === 'third_party') {
+      return {
+        file: makeRelativePath(normalizedTarget, workspaceRoot.fsPath),
+        dependents_count: 0,
+        top_dependents: [],
+        hub_risk: 'LOW',
+        generated_at: new Date().toISOString()
+      };
+    }
+
+    const dependentAbs = dedupe(
+      allLinks
+        .filter(l => l.target && path.resolve(l.target) === normalizedTarget)
+        .map(l => l.source)
+        .filter(Boolean)
+        .filter(s => s !== normalizedTarget)
+        .filter(s => classifyFile(s, workspaceRoot.fsPath) !== 'third_party')
+    );
+
+    // Prefer showing app/test dependents; if none, fall back to whatever we found.
+    const appOrTestDependents = dependentAbs.filter(s => {
+      const c = classifyFile(s, workspaceRoot.fsPath);
+      return c === 'app' || c === 'test';
+    });
+    const dependentsToUse = appOrTestDependents.length > 0 ? appOrTestDependents : dependentAbs;
+
+    const dependentsWithCounts = dependentsToUse
+      .map(dep => ({
+        abs: dep,
+        dependent_count: depData.get(dep)?.inDegree ?? 0
+      }))
+      .sort((a, b) => b.dependent_count - a.dependent_count);
+
+    const dependentsCount = dependentsWithCounts.length;
+    const hubRisk: ImpactSummary['hub_risk'] = dependentsCount >= 5 ? 'HIGH' : dependentsCount >= 3 ? 'MEDIUM' : 'LOW';
+
+    const topDependents = dependentsWithCounts.slice(0, 5).map(d => ({
+      file: makeRelativePath(d.abs, workspaceRoot.fsPath),
+      dependent_count: d.dependent_count
+    }));
+
+    // If the target is itself a test file, keep the risk conservative.
+    const hubRiskAdjusted: ImpactSummary['hub_risk'] = targetClass === 'test' && hubRisk === 'HIGH' ? 'MEDIUM' : hubRisk;
+
+    return {
+      file: makeRelativePath(normalizedTarget, workspaceRoot.fsPath),
+      dependents_count: dependentsCount,
+      top_dependents: topDependents,
+      hub_risk: hubRiskAdjusted,
+      generated_at: new Date().toISOString()
+    };
+  } catch (e) {
+    outputChannel.appendLine(`[Impact] Impact summary failed: ${e}`);
+    return null;
+  }
 }
 
 // ============================================================================
