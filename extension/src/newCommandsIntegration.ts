@@ -126,11 +126,6 @@ export function activateNewCommands(
   let lastNotificationTime = 0;
   const NOTIFICATION_DEBOUNCE_MS = 5000;
 
-  // Track last-known state to avoid false "deleted" warnings.
-  // Many file systems report write-as-rename sequences that look like delete/create.
-  let lastKnownHasAspectKB: boolean | null = null;
-  let lastKnownHasInstructionFiles: boolean | null = null;
-
   const updateInstructionFilesStatus = async (showNotificationOnMissing: boolean = false) => {
     const panelProvider = (state as any)._panelProvider;
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
@@ -152,22 +147,13 @@ export function activateNewCommands(
       panelProvider.post({ type: 'INSTRUCTION_FILES_STATUS', hasFiles: setupComplete });
     }
 
-    // Only show "deleted" warnings when something transitions from present -> missing.
-    const hadAspectKB = lastKnownHasAspectKB;
-    const hadInstructionFiles = lastKnownHasInstructionFiles;
-    const kbWasDeleted = hadAspectKB === true && hasAspectKB === false;
-    const instructionFilesWereDeleted = hadInstructionFiles === true && hasInstructionFiles === false;
-
-    lastKnownHasAspectKB = hasAspectKB;
-    lastKnownHasInstructionFiles = hasInstructionFiles;
-
-    // Show notification only for real regressions (not first-run/unconfigured state).
-    if (showNotificationOnMissing && (kbWasDeleted || instructionFilesWereDeleted)) {
+    // Show notification if setup is incomplete and we should notify
+    if (showNotificationOnMissing && !setupComplete) {
       const now = Date.now();
       if (now - lastNotificationTime > NOTIFICATION_DEBOUNCE_MS) {
         lastNotificationTime = now;
         channel.appendLine(`[Watcher] Detected missing files: aspectKB=${hasAspectKB}, instructionFiles=${hasInstructionFiles}`);
-        const message = kbWasDeleted
+        const message = !hasAspectKB
           ? 'Aspect Code: Knowledge base (.aspect/) was deleted.'
           : 'Aspect Code: AI instruction files were deleted.';
         const action = await vscode.window.showWarningMessage(
@@ -200,9 +186,7 @@ export function activateNewCommands(
   });
   aspectWatcher.onDidDelete((uri) => {
     channel.appendLine(`[Watcher] .aspect file deleted: ${uri.fsPath}`);
-    // Files within .aspect are frequently rewritten via rename/delete/create.
-    // Do not treat that as the KB folder being deleted.
-    debouncedInstructionUpdate(false);
+    debouncedInstructionUpdate(true);
   });
   context.subscriptions.push(aspectWatcher);
 
