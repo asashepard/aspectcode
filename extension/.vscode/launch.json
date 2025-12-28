@@ -8,9 +8,9 @@
       "runtimeExecutable": "${execPath}",
       "args": [
         "--extensionDevelopmentPath=${workspaceFolder}",
-        "${workspaceFolder}/../../_archive/aspectcode-bench-failed/benchmarks_repos/full-stack-fastapi-template/"
+        //"${workspaceFolder}/../../_archive/aspectcode-bench-failed/benchmarks_repos/full-stack-fastapi-template/"
         //"${workspaceFolder}/../../_archive/aspectcode-bench-failed/benchmarks_repos/nextjs-prisma-boilerplate/"
-        //"${workspaceFolder}/../../orgalion-bench-2/benchmarks_repos/.orgalion_bench/djangopackages/"
+        "${workspaceFolder}/../../aspect-bench/repos/djangopackages/"
       ],
       "outFiles": ["${workspaceFolder}/dist/**/*.js"],
       "preLaunchTask": "npm: build",
