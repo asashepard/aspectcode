@@ -39,6 +39,7 @@ type StateSnapshot = {
   progress?: number;
     kbStale?: boolean;
     autoRegenerateKb?: 'off' | 'onSave' | 'idle';
+        instructionsMode?: 'safe' | 'permissive';
   score?: any;  // Score calculation disabled
 };
 
@@ -195,6 +196,17 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             })
         );
 
+        this._context.subscriptions.push(
+            vscode.workspace.onDidChangeConfiguration((e) => {
+                if (
+                    e.affectsConfiguration('aspectcode.instructions.mode') ||
+                    e.affectsConfiguration('aspectcode.autoRegenerateKb')
+                ) {
+                    this.pushState();
+                }
+            })
+        );
+
     // Set up periodic cache cleanup (every 60 seconds)
     this._cacheCleanupInterval = setInterval(() => {
       const now = Date.now();
@@ -317,6 +329,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     progress?: number;
     kbStale?: boolean;
         autoRegenerateKb?: 'off' | 'onSave' | 'idle';
+        instructionsMode?: 'safe' | 'permissive';
   } = { busy: false, findings: [], byRule: {}, history: [] };
 
   // (optional) helper to show the view from activate()
@@ -359,6 +372,11 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         }
         return 'onSave';
     }
+
+        private getInstructionsMode(): 'safe' | 'permissive' {
+            const value = vscode.workspace.getConfiguration('aspectcode').get<string>('instructions.mode', 'safe');
+            return value === 'permissive' ? 'permissive' : 'safe';
+        }
 
   private mapSeverity(severity: string): 'critical' | 'high' | 'medium' | 'low' | 'info' {
     const severityMap: { [key: string]: 'critical' | 'high' | 'medium' | 'low' | 'info' } = {
@@ -1734,7 +1752,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     const webviewState = {
       ...this._bridgeState,
             workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '',
-            autoRegenerateKb: this.getAutoRegenerateKbMode()
+                        autoRegenerateKb: this.getAutoRegenerateKbMode(),
+                        instructionsMode: this.getInstructionsMode()
     };
     this.post({ type: 'STATE_UPDATE', state: webviewState }); 
   }
@@ -1840,6 +1859,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             display: flex;
             flex-direction: column;
             overflow: hidden;
+            padding-bottom: 34px; /* Leave space for bottom mode toggle (34px) + status bar (24px) */
+            box-sizing: border-box;
         }
         
         /* KB Stale Indicator */
@@ -1900,6 +1921,50 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             display: flex;
             align-items: center;
             gap: 8px;
+        }
+
+        .panel-bottom-controls {
+            position: fixed;
+            left: 0;
+            right: 0;
+            bottom: 24px; /* Sit directly above the fixed bottom status bar (24px tall) */
+            height: 34px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 9998;
+            pointer-events: none; /* Allow clicks to pass through except the control itself */
+        }
+
+        .panel-bottom-controls-inner {
+            pointer-events: auto;
+        }
+
+        .instructions-mode-toggle {
+            display: inline-flex;
+            align-items: center;
+            border: 1px solid var(--vscode-input-border);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .instructions-mode-btn {
+            appearance: none;
+            border: none;
+            background: transparent;
+            color: var(--vscode-descriptionForeground);
+            padding: 3px 8px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+
+        .instructions-mode-btn.active {
+            background: var(--vscode-button-secondaryBackground);
+            color: var(--vscode-descriptionForeground);
+        }
+
+        .instructions-mode-btn:hover {
+            background: var(--vscode-button-secondaryHoverBackground);
         }
         
         /* Score display */
@@ -2100,6 +2165,17 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             margin-top: 2px;
             width: 100%;
         }
+
+        .graph-settings-container .action-button:hover:not(:disabled) {
+            background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground));
+            border-color: var(--vscode-charts-orange);
+            box-shadow: inset 0 0 0 1px var(--vscode-charts-orange);
+        }
+
+        .graph-settings-container .action-button:active:not(:disabled) {
+            background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
+            opacity: 1;
+        }
         
         /* Generate AI Instructions button - attention-grabbing */
         .generate-instructions-btn {
@@ -2295,7 +2371,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             background: var(--vscode-sideBar-background);
             min-height: 0; /* Allow flex shrinking */
             padding-top: 72px; /* Reserve space for spinner/status + open kb in small panels */
-            padding-bottom: 44px; /* Leave space for the fixed bottom status bar */
+            padding-bottom: 55px; /* Leave space for bottom status + mode toggle */
             position: relative; /* Anchor absolute loading text/spinner */
         }
         
@@ -3294,18 +3370,18 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             right: 8px;
             /* Keep below full-screen modals (which use z-index: 10001) */
             z-index: 9999;
+            appearance: none;
+            border: 1px solid var(--vscode-input-border);
             background: transparent;
-            border: 1px solid var(--vscode-panel-border);
-            color: var(--vscode-foreground);
+            color: var(--vscode-descriptionForeground);
             font-size: 11px;
-            padding: 2px 8px;
+            padding: 3px 8px;
             cursor: pointer;
             border-radius: 4px;
-            opacity: 0.9;
         }
 
         .graph-legend-toggle:hover {
-            opacity: 1;
+            background: var(--vscode-button-secondaryHoverBackground);
         }
 
         .graph-legend {
@@ -3767,6 +3843,15 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         </div>
     </div>
 
+    <div class="panel-bottom-controls" id="panel-bottom-controls">
+        <div class="panel-bottom-controls-inner">
+            <div class="instructions-mode-toggle" title="Instruction mode">
+                <button id="instructions-mode-safe" class="instructions-mode-btn" type="button">Safe</button>
+                <button id="instructions-mode-permissive" class="instructions-mode-btn" type="button">Permissive</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Bottom status (fixed) -->
     <div class="panel-status-bar" id="panel-status-bar">
         <div class="panel-status-left">
@@ -3858,6 +3943,28 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         
         document.getElementById('simple-expand-btn').addEventListener('click', toggleViewMode);
         document.getElementById('collapse-view-btn').addEventListener('click', toggleViewMode);
+
+        function setInstructionsModeUi(mode) {
+            const safeBtn = document.getElementById('instructions-mode-safe');
+            const permBtn = document.getElementById('instructions-mode-permissive');
+            if (!safeBtn || !permBtn) return;
+            safeBtn.classList.toggle('active', mode !== 'permissive');
+            permBtn.classList.toggle('active', mode === 'permissive');
+        }
+
+        function postSetInstructionsMode(mode) {
+            const currentMode = currentState?.instructionsMode || 'safe';
+            if (mode === currentMode) return;
+            vscode.postMessage({
+                type: 'COMMAND',
+                command: mode === 'permissive'
+                    ? 'aspectcode.enablePermissiveMode'
+                    : 'aspectcode.enableSafeMode'
+            });
+        }
+
+        document.getElementById('instructions-mode-safe')?.addEventListener('click', () => postSetInstructionsMode('safe'));
+        document.getElementById('instructions-mode-permissive')?.addEventListener('click', () => postSetInstructionsMode('permissive'));
 
         // Simple view: open KB link
         function handleOpenKb() {
@@ -6088,6 +6195,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         function render(state) {
             currentState = state; // Store for later use
             updateAutoRegenKbUi(state);
+            setInstructionsModeUi(state.instructionsMode || 'safe');
             updateStatusBar();
             updateSimpleTopStatusIfIdle();
             syncBusyUi();

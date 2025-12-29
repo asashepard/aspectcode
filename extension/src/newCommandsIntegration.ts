@@ -10,7 +10,7 @@ import { AspectCodeCommands, AspectCodeCodeActionProvider } from './commands';
 import { PromptGenerationService } from './services/PromptGenerationService';
 import { AspectCodeState } from './state';
 import { detectAssistants, AssistantId } from './assistants/detection';
-import { generateInstructionFiles } from './assistants/instructions';
+import { generateInstructionFiles, regenerateInstructionFilesOnly } from './assistants/instructions';
 import { getBaseUrl } from './http';
 import type { ScoreResult } from './scoring/scoreEngine';
 
@@ -46,6 +46,12 @@ export function activateNewCommands(
     }),
     vscode.commands.registerCommand('aspectcode.generateInstructionFiles', async () => {
       return await handleGenerateInstructionFiles(state, commands, channel, context);
+    }),
+    vscode.commands.registerCommand('aspectcode.enableSafeMode', async () => {
+      return await handleSetInstructionMode('safe', channel);
+    }),
+    vscode.commands.registerCommand('aspectcode.enablePermissiveMode', async () => {
+      return await handleSetInstructionMode('permissive', channel);
     })
   );
 
@@ -601,5 +607,25 @@ async function handleGeneratePrompt(promptService: PromptGenerationService, stat
   } catch (error) {
     state.update({ busy: false });
     vscode.window.showErrorMessage(`Failed to generate plan: ${error}`);
+  }
+}
+
+async function handleSetInstructionMode(mode: 'safe' | 'permissive', outputChannel: vscode.OutputChannel): Promise<void> {
+  try {
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders || workspaceFolders.length === 0) {
+      vscode.window.showErrorMessage('No workspace folder open');
+      return;
+    }
+
+    const config = vscode.workspace.getConfiguration('aspectcode');
+    await config.update('instructions.mode', mode, vscode.ConfigurationTarget.Workspace);
+    outputChannel.appendLine(`[Instructions] Set instructions.mode=${mode}`);
+
+    // Regenerate instruction files only; do not run EXAMINE or KB generation.
+    await regenerateInstructionFilesOnly(workspaceFolders[0].uri, null, outputChannel);
+  } catch (error) {
+    outputChannel.appendLine(`[Instructions] Failed to set instruction mode: ${error}`);
+    vscode.window.showErrorMessage(`Failed to set instruction mode: ${error}`);
   }
 }

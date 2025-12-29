@@ -6,6 +6,13 @@ import { generateKnowledgeBase } from './kb';
 const ASPECT_CODE_START = '<!-- ASPECT_CODE_START -->';
 const ASPECT_CODE_END = '<!-- ASPECT_CODE_END -->';
 
+type InstructionsMode = 'safe' | 'permissive';
+
+function getInstructionsMode(): InstructionsMode {
+  const raw = vscode.workspace.getConfiguration('aspectcode').get<string>('instructions.mode', 'safe');
+  return raw === 'permissive' ? 'permissive' : 'safe';
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Canonical instruction content - all exports derive from this
 // ─────────────────────────────────────────────────────────────────────────────
@@ -15,6 +22,14 @@ const ASPECT_CODE_END = '<!-- ASPECT_CODE_END -->';
  * All assistant-specific exports are derived from this single source.
  */
 function generateCanonicalContent(): string {
+  const mode = getInstructionsMode();
+  if (mode === 'permissive') {
+    return generateCanonicalContentPermissive();
+  }
+  return generateCanonicalContentSafe();
+}
+
+function generateCanonicalContentSafe(): string {
   return `## Aspect Code Knowledge Base
 
 **Aspect Code** is a static-analysis extension that generates a Knowledge Base (KB) for your codebase. The KB lives in \`.aspect/\` and contains these files:
@@ -124,6 +139,85 @@ If you encounter repeated errors or unexpected behavior:
 `.trim();
 }
 
+function generateCanonicalContentPermissive(): string {
+  return `## Aspect Code Knowledge Base
+
+Aspect Code generates a Knowledge Base (KB) in \`.aspect/\` to help you move quickly with better context:
+
+| File | Purpose |
+|------|---------|
+| \`architecture.md\` | Big-picture structure, hubs, entry points |
+| \`map.md\` | Symbols, models, signatures, naming conventions |
+| \`context.md\` | Integrations, data flows, and commonly co-edited files |
+
+Reference KB files at: \`.aspect/<file>.md\`
+
+## Working Style (Permissive)
+
+- Prefer shipping a correct solution over over-optimizing for minimal diffs.
+- Make reasonable refactors if they reduce complexity, duplication, or bugs.
+- If a change is risky, say why briefly and proceed with care.
+
+## Suggested Workflow
+
+1. Skim the relevant KB files for orientation.
+2. Implement the change end-to-end.
+3. Run tests / build.
+
+## Output Format
+
+- When providing code, include filepath headers in code blocks (e.g. \`# filepath: backend/app/foo.py\`).
+`.trim();
+}
+
+async function generateInstructionFilesForEnabledAssistants(
+  workspaceRoot: vscode.Uri,
+  scoreResult: ScoreResult | null,
+  outputChannel: vscode.OutputChannel
+): Promise<void> {
+  // Read assistant settings
+  const config = vscode.workspace.getConfiguration('aspectcode.assistants');
+  const wantCopilot = config.get<boolean>('copilot', false);
+  const wantCursor = config.get<boolean>('cursor', false);
+  const wantClaude = config.get<boolean>('claude', false);
+  const wantOther = config.get<boolean>('other', false);
+
+  outputChannel.appendLine(`[Instructions] Generating instruction files (mode=${getInstructionsMode()}, Copilot: ${wantCopilot}, Cursor: ${wantCursor}, Claude: ${wantClaude}, Other: ${wantOther})`);
+
+  const promises: Promise<void>[] = [];
+
+  if (wantCopilot) {
+    promises.push(generateCopilotInstructions(workspaceRoot, scoreResult, outputChannel));
+  }
+
+  if (wantCursor) {
+    promises.push(generateCursorRules(workspaceRoot, outputChannel));
+  }
+
+  if (wantClaude) {
+    promises.push(generateClaudeInstructions(workspaceRoot, scoreResult, outputChannel));
+  }
+
+  if (wantOther) {
+    promises.push(generateOtherInstructions(workspaceRoot, scoreResult, outputChannel));
+  }
+
+  await Promise.all(promises);
+  outputChannel.appendLine('[Instructions] Instruction file generation complete');
+}
+
+/**
+ * Regenerate instruction files only (no KB generation / no examine).
+ * Used by instruction mode toggles.
+ */
+export async function regenerateInstructionFilesOnly(
+  workspaceRoot: vscode.Uri,
+  scoreResult: ScoreResult | null,
+  outputChannel: vscode.OutputChannel
+): Promise<void> {
+  await generateInstructionFilesForEnabledAssistants(workspaceRoot, scoreResult, outputChannel);
+}
+
 /**
  * Generates or updates instruction files for configured AI assistants.
  * 
@@ -152,36 +246,7 @@ export async function generateInstructionFiles(
     await generateKnowledgeBase(workspaceRoot, state, scoreResult, outputChannel, context);
   }
 
-  // Read assistant settings
-  const config = vscode.workspace.getConfiguration('aspectcode.assistants');
-  const wantCopilot = config.get<boolean>('copilot', false);
-  const wantCursor = config.get<boolean>('cursor', false);
-  const wantClaude = config.get<boolean>('claude', false);
-  const wantOther = config.get<boolean>('other', false);
-
-  outputChannel.appendLine(`[Instructions] Generating instruction files (Copilot: ${wantCopilot}, Cursor: ${wantCursor}, Claude: ${wantClaude}, Other: ${wantOther})`);
-
-  const promises: Promise<void>[] = [];
-
-  if (wantCopilot) {
-    promises.push(generateCopilotInstructions(workspaceRoot, scoreResult, outputChannel));
-  }
-
-  if (wantCursor) {
-    promises.push(generateCursorRules(workspaceRoot, outputChannel));
-  }
-
-  if (wantClaude) {
-    promises.push(generateClaudeInstructions(workspaceRoot, scoreResult, outputChannel));
-  }
-
-  if (wantOther) {
-    promises.push(generateOtherInstructions(workspaceRoot, scoreResult, outputChannel));
-  }
-
-  await Promise.all(promises);
-
-  outputChannel.appendLine('[Instructions] Instruction file generation complete');
+  await generateInstructionFilesForEnabledAssistants(workspaceRoot, scoreResult, outputChannel);
 }
 
 /**
@@ -217,6 +282,9 @@ async function generateCopilotInstructions(
 }
 
 function generateCopilotContent(): string {
+  if (getInstructionsMode() === 'permissive') {
+    return generateCanonicalContent();
+  }
   return `${generateCanonicalContent()}
 
 ---
@@ -251,6 +319,16 @@ async function generateCursorRules(
 }
 
 function generateCursorContent(): string {
+  if (getInstructionsMode() === 'permissive') {
+    return `---
+description: Aspect Code KB integration - read before multi-file edits
+globs: 
+alwaysApply: true
+---
+
+${generateCanonicalContent()}
+`.trim();
+  }
   return `---
 description: Aspect Code KB integration - read before multi-file edits
 globs: 
@@ -297,6 +375,9 @@ async function generateClaudeInstructions(
 }
 
 function generateClaudeContent(): string {
+  if (getInstructionsMode() === 'permissive') {
+    return generateCanonicalContent();
+  }
   return `${generateCanonicalContent()}
 
 ---
