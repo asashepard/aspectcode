@@ -572,8 +572,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             pendingProgressMessage = phase;
             try {
                 this._view?.webview.postMessage({ type: 'LOADING_PHASE', phase });
-            } catch {
-                // best-effort
+            } catch (e) {
+                // Webview might not be ready yet
             }
             reportProgress?.(phase);
         };
@@ -660,7 +660,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     
     // Ensure the active file is valid (with normalized path comparison)
     const normalizedAllFiles = allFiles.map(f => path.normalize(f));
-    const fileIndex = normalizedAllFiles.findIndex(f => f === normalizedFile);
+    let fileIndex = normalizedAllFiles.findIndex(f => f === normalizedFile);
     
     if (fileIndex === -1) {
       console.warn(`[Dependency Graph] Active file not found in workspace: ${normalizedFile}`);
@@ -671,10 +671,29 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
       allFiles = await this.discoverAllWorkspaceFiles();
       this._workspaceFilesCache = allFiles;
       
-      if (!allFiles.includes(normalizedFile)) {
-        console.error(`[Dependency Graph] File still not found after rescan. Showing empty graph.`);
-                const stats = this.bestEffortStats();
-        // Send empty graph centered on this file anyway
+      // Update the normalized list and try again
+      const updatedNormalizedFiles = allFiles.map(f => path.normalize(f));
+      fileIndex = updatedNormalizedFiles.findIndex(f => f === normalizedFile);
+    }
+    
+    // Even if file not in workspace, we still need to analyze dependencies to get global stats
+    // Get dependencies (cached)
+    let allDependencies = this._dependencyCache.get('all');
+    if (!allDependencies || (now - this._cacheTimestamp) > this._cacheTimeout) {
+            setPhase(`Analyzing dependencies (0/${allFiles.length} files)...`);
+      allDependencies = await this._dependencyAnalyzer.analyzeDependencies(allFiles, (current, total, phase) => {
+        // The phase string from DependencyAnalyzer already includes progress info
+        setPhase(phase);
+      });
+      this._dependencyCache.set('all', allDependencies);
+    }
+
+    const stats = this.ensureGlobalGraphStats(allFiles, allDependencies as DependencyLink[]);
+    
+    // Now handle the file-not-found case with proper stats
+    if (fileIndex === -1) {
+        console.error(`[Dependency Graph] File still not found after rescan. Showing empty graph with stats.`);
+        // Send empty graph centered on this file but WITH full stats
         this._view?.webview.postMessage({
                     type: 'DEPENDENCY_GRAPH',
                     graph: {
@@ -695,23 +714,17 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     },
                                         stats
         });
+        // Even if file not found, we still need to enable UI if this is first graph
+        if (isFirstGraphLoad) {
+          this._initialGraphSent = true;
+          this.post({ type: 'GRAPH_READY' });
+          this._outputChannel?.appendLine('[PanelProvider] Initial dependency graph ready (empty) - UI enabled');
+          this._setupInProgress = false;
+        }
         return;
-      }
     }
     
     const actualFile = allFiles[fileIndex] || normalizedFile;
-
-    // Get dependencies (cached)
-    let allDependencies = this._dependencyCache.get('all');
-    if (!allDependencies || (now - this._cacheTimestamp) > this._cacheTimeout) {
-            setPhase(`Analyzing dependencies (${allFiles.length} files)...`);
-      allDependencies = await this._dependencyAnalyzer.analyzeDependencies(allFiles, (current, total, phase) => {
-        setPhase(phase);
-      });
-      this._dependencyCache.set('all', allDependencies);
-    }
-
-        const stats = this.ensureGlobalGraphStats(allFiles, allDependencies as DependencyLink[]);
     
     // Filter to get only dependencies involving the active file (using actual file path)
     const relevantDependencies = allDependencies.filter(dep => 
@@ -5970,8 +5983,11 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     updateSimpleTopStatusIfIdle();
                     break;
                 case 'DEPENDENCY_GRAPH':
-                    // Any graph payload means graph loading is done for this request
-                    hideGraphLoading();
+                    // Graph data received - hide loading only if graph was already ready
+                    // (i.e., this is a subsequent graph update, not the initial load)
+                    if (graphReady) {
+                        hideGraphLoading();
+                    }
                     latestGraphForStatus = msg.graph;
                     if (msg.stats) {
                         globalStatsForStatus = msg.stats;
@@ -6056,20 +6072,19 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                         }
                     }
                     break;
+                case 'graphLoading':
+                    // Graph loading started - show spinner and file being processed
+                    showGraphLoading();
+                    if (msg.file) {
+                        const fileName = msg.file.split(/[\\/]/).pop() || msg.file;
+                        setLoadingText('Loading graph for ' + fileName + '...');
+                    }
+                    break;
                 case 'LOADING_PHASE':
                     // Show loading phase progress message
-                    const detailsElPhase = document.getElementById('score-details');
-                    if (detailsElPhase) {
-                        detailsElPhase.textContent = msg.phase;
-                    }
-                    const simpleLoadingText = document.getElementById('simple-loading-text');
-                    if (simpleLoadingText) {
-                        simpleLoadingText.textContent = msg.phase;
-                        simpleLoadingText.style.display = 'block';
-                    }
-                    setSimpleOpenKbVisible(false);
-                    // Ensure spinner is visible during loading
                     showGraphLoading();
+                    setLoadingText(msg.phase);
+                    setSimpleOpenKbVisible(false);
                     break;
                 case 'ALIGNMENTS_FILE_STATUS':
                     // Show/hide the align button based on whether ALIGNMENTS.json exists
@@ -6083,6 +6098,11 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
 
         // Now request initial state and dependency graph (listener is ready)
         vscode.postMessage({ type: 'PANEL_READY' });
+
+        // Show spinner immediately on startup - don't wait for LOADING_PHASE
+        showGraphLoading();
+        setLoadingText('Loading dependency graph...');
+
         // Request initial graph based on dropdown preference
         const savedGraphType = localStorage.getItem('Aspect Code-graph-type') || '2d';
         if (savedGraphType === '3d') {
@@ -6162,6 +6182,15 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             simpleSpinner?.classList.add('active');
             syncBusyUi();
         }
+
+        // Set loading text in simple view
+        function setLoadingText(text) {
+            const simpleLoadingText = document.getElementById('simple-loading-text');
+            if (simpleLoadingText) {
+                simpleLoadingText.textContent = text;
+                simpleLoadingText.style.display = text ? 'block' : 'none';
+            }
+        }
         
         // Hide graph loading indicator
         function hideGraphLoading() {
@@ -6169,11 +6198,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             const simpleSpinner = document.getElementById('simple-view-spinner');
             validationSpinner?.classList.remove('active');
             simpleSpinner?.classList.remove('active');
-            const simpleLoadingText = document.getElementById('simple-loading-text');
-            if (simpleLoadingText) {
-                simpleLoadingText.textContent = '';
-                simpleLoadingText.style.display = 'none';
-            }
+            setLoadingText('');
             setSimpleOpenKbVisible(false);
             syncBusyUi();
             updateSimpleTopStatusIfIdle();
