@@ -3884,10 +3884,24 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         let graphReady = false; // Track if initial dependency graph has loaded
         let pendingInstructionFilesStatus = null; // Store instruction files status until graph is ready
         
-        // View mode: default screen is always Simple.
-        // Intentionally do not restore persisted viewMode to avoid surprising startup states.
-        let viewMode = 'simple';
-        document.body.classList.add('simple-mode');
+        // View mode: persist across sessions using webview state.
+        const persistedWebviewState = (() => {
+            try {
+                return vscode.getState() || {};
+            } catch {
+                return {};
+            }
+        })();
+
+        let viewMode = (persistedWebviewState && (persistedWebviewState.viewMode === 'full' || persistedWebviewState.viewMode === 'simple'))
+            ? persistedWebviewState.viewMode
+            : 'simple';
+
+        if (viewMode === 'simple') {
+            document.body.classList.add('simple-mode');
+        } else {
+            document.body.classList.remove('simple-mode');
+        }
         
         function toggleViewMode() {
             viewMode = viewMode === 'simple' ? 'full' : 'simple';
@@ -3900,6 +3914,16 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     setTimeout(() => renderDependencyGraph(currentGraph), 100);
                 }
             }
+
+            try {
+                vscode.setState({
+                    ...(persistedWebviewState || {}),
+                    viewMode
+                });
+            } catch {
+                // ignore
+            }
+
             updateStatusBar();
             updateSimpleTopStatusIfIdle();
         }
