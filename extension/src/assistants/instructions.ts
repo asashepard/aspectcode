@@ -142,31 +142,56 @@ If you encounter repeated errors or unexpected behavior:
 function generateCanonicalContentPermissive(): string {
   return `## Aspect Code Knowledge Base
 
-Aspect Code generates a Knowledge Base (KB) in \`.aspect/\` to help you move quickly with better context:
+**Aspect Code** is a static-analysis extension that generates a Knowledge Base (KB) for your codebase. The KB lives in \`.aspect/\` and contains these files:
 
 | File | Purpose |
 |------|---------|
-| \`architecture.md\` | Big-picture structure, hubs, entry points |
-| \`map.md\` | Symbols, models, signatures, naming conventions |
-| \`context.md\` | Integrations, data flows, and commonly co-edited files |
+| \`architecture.md\` | Hubs, directory layout, entry points |
+| \`map.md\` | Data models with signatures, symbol index, naming conventions |
+| \`context.md\` | Module clusters (co-edited files), external integrations, data flow paths |
 
 Reference KB files at: \`.aspect/<file>.md\`
 
-## Working Style (Permissive)
+Use the Knowledge Base (KB) as orientation and ground truth for architecture and dependencies—not as a constraint.
 
-- Prefer shipping a correct solution over over-optimizing for minimal diffs.
-- Make reasonable refactors if they reduce complexity, duplication, or bugs.
-- If a change is risky, say why briefly and proceed with care.
+### Operating Rules (KB-First, Not KB-Locked)
+
+- Read the KB before large edits; use it to understand boundaries, flows, and ownership
+- Treat the KB as the source of “what connects to what” (entry points, hubs, key types)
+- If your change conflicts with the KB, either:
+  - update the code in a way that keeps the KB’s intent valid, or
+  - explicitly state the mismatch and proceed with a coherent new structure
+
+### You May (Explicitly Allowed)
+
+- Refactor for clarity: extract functions, split files, consolidate duplicates
+- Reorganize modules/folders when it improves cohesion and discoverability
+- Touch multiple files when the change is conceptually one improvement
+- Change public/internal APIs when it simplifies the design (with follow-through updates)
+- Edit high-risk hubs when needed—do it deliberately, with dependency awareness
+- Rename symbols for consistency (types, functions, modules) and update references
+
+### You Should
+
+- Explain the new structure in terms of the existing architecture
+- Keep changes “conceptually tight”: one goal, end-to-end, fully wired
+- Update call sites and imports immediately when you move/rename things
+- Prefer simplification over novelty; remove unnecessary layers when justified
+- Validate that referenced symbols still exist and are still reachable from call sites
+
+### Avoid
+
+- Deleting or renaming referenced symbols without updating all usages
+- Unnecessary scope creep (adding features unrelated to the request)
+- Blind rewrites that ignore the KB’s dependency map and entry points
+- “Rebuild everything” refactors when a targeted restructure achieves the goal
+- Cosmetic churn that obscures meaningful changes
 
 ## Suggested Workflow
 
 1. Skim the relevant KB files for orientation.
 2. Implement the change end-to-end.
 3. Run tests / build.
-
-## Output Format
-
-- When providing code, include filepath headers in code blocks (e.g. \`# filepath: backend/app/foo.py\`).
 `.trim();
 }
 
