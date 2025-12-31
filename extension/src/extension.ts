@@ -7,7 +7,7 @@ import { loadGrammarsOnce, getLoadedGrammarsSummary } from './tsParser';
 import { extractPythonImports, extractTSJSImports } from './importExtractors';
 import { AspectCodePanelProvider } from './panel/PanelProvider';
 import { AspectCodeState } from './state';
-import { post, fetchCapabilities, initHttp, getHeaders, getBaseUrl, resetApiKeyAuthStatus } from './http';
+import { post, fetchCapabilities, handleHttpError, hasApiKeyConfigured, isApiKeyBlocked, initHttp, getHeaders, getBaseUrl, resetApiKeyAuthStatus } from './http';
 import Parser from 'web-tree-sitter';
 import { activateNewCommands } from './newCommandsIntegration';
 import { WorkspaceFingerprint } from './services/WorkspaceFingerprint';
@@ -2247,6 +2247,10 @@ export async function activate(context: vscode.ExtensionContext) {
     // Set up KB regeneration callback for idle/onSave auto-regeneration
     workspaceFingerprint.setKbRegenerateCallback(async () => {
       try {
+        if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
+          outputChannel.appendLine('[KB] Auto-regeneration skipped (API key missing/blocked)');
+          return;
+        }
         const regenStart = Date.now();
         outputChannel.appendLine('[KB] Auto-regenerating (examine + KB)...');
 
@@ -2389,6 +2393,12 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('aspectcode.examine', async (opts?: { modes?: string[] }) => {
       try {
+        if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
+          vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+            if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
+          });
+          return;
+        }
         outputChannel?.appendLine('=== EXAMINE: Starting repository examination ===');
         
         // Validate the entire repository
@@ -2422,6 +2432,37 @@ export async function activate(context: vscode.ExtensionContext) {
         } else {
           vscode.window.showErrorMessage(`Examination failed: ${error}`);
         }
+      }
+    })
+  );
+
+  // Generate/refresh KB files (.aspect/*.md) based on current state.
+  // Used by the panel “Regenerate KB” button.
+  context.subscriptions.push(
+    vscode.commands.registerCommand('aspectcode.generateKB', async () => {
+      if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
+        vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+          if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
+        });
+        return;
+      }
+
+      try {
+        const regenStart = Date.now();
+        outputChannel?.appendLine('=== GENERATE KB: Regenerating KB files ===');
+
+        const { autoRegenerateKBFiles } = await import('./assistants/kb');
+        await autoRegenerateKBFiles(state, outputChannel, context);
+        await workspaceFingerprint?.markKbFresh();
+
+        // Best-effort: refresh dependency caches if the panel is open.
+        panelProvider.invalidateDependencyCache();
+        panelProvider.refreshDependencyGraph();
+
+        outputChannel?.appendLine(`=== GENERATE KB: Complete (${Date.now() - regenStart}ms) ===`);
+      } catch (e) {
+        outputChannel?.appendLine(`GENERATE KB ERROR: ${e}`);
+        vscode.window.showErrorMessage(`KB generation failed: ${e}`);
       }
     })
   );
@@ -2569,6 +2610,12 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('aspectcode.forceReindex', async () => {
       try {
+        if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
+          vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+            if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
+          });
+          return;
+        }
         outputChannel?.appendLine('=== FORCE REINDEX: Clearing state and reindexing ===');
         
         // Clear state and run full index + examine

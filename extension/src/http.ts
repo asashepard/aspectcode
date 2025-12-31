@@ -16,8 +16,73 @@ export function getApiKeyAuthStatus(): ApiKeyAuthStatus {
   return apiKeyAuthStatus;
 }
 
+// Feature-gating helper: treat only explicit 'ok' as valid.
+// 'unknown' is considered not valid until verified.
+export function hasValidApiKey(): boolean {
+  return apiKeyAuthStatus === 'ok';
+}
+
+// Treat invalid/revoked as hard-blocked until the user changes the key.
+export function isApiKeyBlocked(): boolean {
+  return apiKeyAuthStatus === 'invalid' || apiKeyAuthStatus === 'revoked';
+}
+
+// Async presence check (covers SecretStorage + config).
+export async function hasApiKeyConfigured(): Promise<boolean> {
+  const key = (await getApiKey()).trim();
+  return key.length > 0;
+}
+
 export function resetApiKeyAuthStatus(): void {
   setApiKeyAuthStatus('unknown');
+}
+
+/**
+ * Legacy-style HTTP error handler used by older call sites that only have
+ * status/statusText (not the full Response).
+ *
+ * This updates API key auth status and throws.
+ */
+export function handleHttpError(status: number, statusText: string): never {
+  if (status === 401) {
+    setApiKeyAuthStatus('invalid');
+    void vscode.window.showErrorMessage(
+      'Aspect Code: API key is missing or invalid.',
+      'Enter API Key'
+    ).then(choice => {
+      if (choice === 'Enter API Key') {
+        void vscode.commands.executeCommand('aspectcode.enterApiKey');
+      }
+    });
+    throw new Error('Authentication failed: Invalid or missing API key');
+  }
+
+  if (status === 403) {
+    setApiKeyAuthStatus('revoked');
+    void vscode.window.showErrorMessage(
+      'Aspect Code: Your API key has been revoked.',
+      'Enter New API Key'
+    ).then(choice => {
+      if (choice === 'Enter New API Key') {
+        void vscode.commands.executeCommand('aspectcode.enterApiKey');
+      }
+    });
+    throw new Error('Authentication failed: API key revoked');
+  }
+
+  if (status === 426) {
+    void vscode.window.showErrorMessage(
+      'Aspect Code: Extension version too old. Please update.',
+      'Check for Updates'
+    ).then(choice => {
+      if (choice === 'Check for Updates') {
+        void vscode.commands.executeCommand('workbench.extensions.action.checkForUpdates');
+      }
+    });
+    throw new Error('Client version too old');
+  }
+
+  throw new Error(`HTTP ${status}: ${statusText || 'Request failed'}`);
 }
 
 function setApiKeyAuthStatus(next: ApiKeyAuthStatus): void {
@@ -152,7 +217,7 @@ export async function getHeaders(requestId?: string): Promise<Record<string, str
  * Handle HTTP errors with user-friendly messages.
  * Returns retry info for retryable errors, throws for non-retryable.
  */
-async function handleHttpError(
+async function handleHttpResponseError(
   res: Response,
   endpoint: string,
   requestId: string
@@ -276,7 +341,7 @@ async function fetchWithRetry<T>(
       }
       
       // Handle error
-      const { shouldRetry, retryAfterSecs, isDailyCap } = await handleHttpError(res, path, requestId);
+      const { shouldRetry, retryAfterSecs, isDailyCap } = await handleHttpResponseError(res, path, requestId);
       
       recordNetworkEvent({
         timestamp: Date.now(),

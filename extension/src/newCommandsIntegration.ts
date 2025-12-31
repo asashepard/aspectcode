@@ -11,7 +11,7 @@ import { PromptGenerationService } from './services/PromptGenerationService';
 import { AspectCodeState } from './state';
 import { detectAssistants, AssistantId } from './assistants/detection';
 import { generateInstructionFiles, regenerateInstructionFilesOnly } from './assistants/instructions';
-import { getBaseUrl } from './http';
+import { getBaseUrl, hasApiKeyConfigured, isApiKeyBlocked, hasValidApiKey } from './http';
 import type { ScoreResult } from './scoring/scoreEngine';
 import { stopIgnoringGeneratedFilesCommand } from './services/gitignoreService';
 import { setInstructionsModeSetting, updateAspectSettings } from './services/aspectSettings';
@@ -41,21 +41,57 @@ export function activateNewCommands(
     vscode.commands.registerCommand('aspectcode.insertSuppression', (finding: any) => commands.insertSuppression(finding)),
     vscode.commands.registerCommand('aspectcode.configureRules', () => commands.configureRules()),
     vscode.commands.registerCommand('aspectcode.generatePrompt', async () => {
+      if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
+        vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+          if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
+        });
+        return;
+      }
       return await handleGeneratePrompt(promptGenerationService, state);
     }),
     vscode.commands.registerCommand('aspectcode.configureAssistants', async () => {
+      if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
+        vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+          if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
+        });
+        return;
+      }
       return await handleConfigureAssistants(context, state, commands, channel);
     }),
     vscode.commands.registerCommand('aspectcode.generateInstructionFiles', async () => {
+      if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
+        vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+          if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
+        });
+        return;
+      }
       return await handleGenerateInstructionFiles(state, commands, channel, context);
     }),
     vscode.commands.registerCommand('aspectcode.enableSafeMode', async () => {
+      if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
+        vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+          if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
+        });
+        return;
+      }
       return await handleSetInstructionMode('safe', channel);
     }),
     vscode.commands.registerCommand('aspectcode.enablePermissiveMode', async () => {
+      if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
+        vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+          if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
+        });
+        return;
+      }
       return await handleSetInstructionMode('permissive', channel);
     }),
     vscode.commands.registerCommand('aspectcode.stopIgnoringGeneratedFiles', async () => {
+      if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
+        vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+          if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
+        });
+        return;
+      }
       return await stopIgnoringGeneratedFilesCommand(channel);
     })
   );
@@ -100,6 +136,9 @@ export function activateNewCommands(
     
     debounceTimer = setTimeout(() => {
       // Only scan active file on save for performance
+      if (!hasValidApiKey()) {
+        return;
+      }
       const activeEditor = vscode.window.activeTextEditor;
       if (activeEditor) {
         commands.scanActiveFile();
@@ -119,6 +158,9 @@ export function activateNewCommands(
     const enableLegacyPreflight = config.get<boolean>('enableLegacyPreflight', false);
     
     if (validateOnSave && enableLegacyPreflight) {
+      if (!hasValidApiKey()) {
+        return;
+      }
       debouncedScan();
     }
     

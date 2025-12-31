@@ -2,7 +2,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { AspectCodeState } from '../state';
-import { getApiKeyAuthStatus, onDidChangeApiKeyAuthStatus, resetApiKeyAuthStatus, type ApiKeyAuthStatus } from '../http';
+import { fetchCapabilities, getApiKeyAuthStatus, hasValidApiKey, onDidChangeApiKeyAuthStatus, resetApiKeyAuthStatus, type ApiKeyAuthStatus } from '../http';
 // NOTE: ScoreEngine imports kept but not used - score calculation disabled for performance
 // import { ScoreEngine, ScoreResult } from '../scoring/scoreEngine';
 // import { defaultScoreConfig } from '../scoring/scoreConfig';
@@ -90,6 +90,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     private _globalGraphStats: DependencyGraphStats | null = null;
     private _globalGraphStatsAt = 0;
 
+    private _apiKeyValidationInFlight = false;
+
   constructor(
     private readonly _context: vscode.ExtensionContext,
     private readonly _state: AspectCodeState,
@@ -173,6 +175,19 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             onDidChangeApiKeyAuthStatus((status: ApiKeyAuthStatus) => {
                 this._bridgeState.apiKeyAuthStatus = status;
                 this.pushState();
+
+                if (status === 'ok') {
+                    // Now that gated features are available, refresh the dependency graph.
+                    // Also resume any auto-processing that was blocked at PANEL_READY.
+                    this.invalidateDependencyCache();
+                    this.refreshDependencyGraph();
+
+                    if (!this._autoProcessingStarted && !this._cacheLoadedSuccessfully && this._hasAspectKBAtPanelReady) {
+                        this._autoProcessingStarted = true;
+                        this._outputChannel?.appendLine('[PanelProvider] API key validated; resuming automatic processing');
+                        this.post({ type: 'START_AUTOMATIC_PROCESSING' });
+                    }
+                }
             })
         );
 
@@ -370,6 +385,21 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             this._bridgeState.hasApiKey = hasApiKey;
             this.pushState();
         }
+
+        // If we have a key but auth status is unknown/invalid, attempt a lightweight validation.
+        // This ensures UI enables promptly after entering a key.
+        if (hasApiKey && !hasValidApiKey() && !this._apiKeyValidationInFlight) {
+            this._apiKeyValidationInFlight = true;
+            try {
+                await fetchCapabilities();
+            } catch {
+                // fetchCapabilities is best-effort and already logs.
+            } finally {
+                this._apiKeyValidationInFlight = false;
+                this._bridgeState.apiKeyAuthStatus = getApiKeyAuthStatus();
+                this.pushState();
+            }
+        }
     }
 
     private getAutoRegenerateKbMode(): 'off' | 'onSave' | 'idle' {
@@ -566,6 +596,26 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
       console.error('[Dependency Graph] View not initialized, cannot send graph');
       return;
     }
+
+        // API-key gate: block dependency graph + workspace scanning unless a key is configured.
+        // Do NOT require auth status to be 'ok' here; first server request will validate.
+        const hasApiKey = await this.computeHasApiKey();
+        const authStatus = getApiKeyAuthStatus();
+        if (!hasApiKey || authStatus === 'invalid' || authStatus === 'revoked') {
+            const isFirstGraphLoad = !this._initialGraphSent;
+            this.post({
+                type: 'DEPENDENCY_GRAPH',
+                graph: { nodes: [], links: [], focusMode: true, centerFile: null },
+                stats: { totalFiles: 0, totalDeps: 0, totalCycles: 0 }
+            });
+
+            if (isFirstGraphLoad) {
+                this._initialGraphSent = true;
+                this.post({ type: 'GRAPH_READY' });
+                this._setupInProgress = false;
+            }
+            return;
+        }
 
         // Track if this is the first graph load (enables UI + suppresses startup warning)
         const isFirstGraphLoad = !this._initialGraphSent;
@@ -1251,7 +1301,10 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           // 1. Cache was loaded successfully, OR
           // 2. .aspect/ KB exists (prior configuration) but cache is stale
           // Otherwise, user must click '+' to initialize
-          if (!this._autoProcessingStarted && !this._cacheLoadedSuccessfully && hasAspectKB) {
+                                        if (!this._autoProcessingStarted && !this._cacheLoadedSuccessfully && hasAspectKB
+                                                && this._bridgeState.hasApiKey !== false
+                                                && this._bridgeState.apiKeyAuthStatus !== 'invalid'
+                                                && this._bridgeState.apiKeyAuthStatus !== 'revoked') {
             this._autoProcessingStarted = true;
             // KB exists but cache is stale - regenerate automatically
             this._outputChannel?.appendLine('[PanelProvider] .aspect/ KB exists, regenerating cache...');
@@ -1425,6 +1478,14 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         case 'REGENERATE_KB':
           // Regenerate knowledge base files
           try {
+                                                const hasApiKey = await this.computeHasApiKey();
+                                                const authStatus = getApiKeyAuthStatus();
+                                                if (!hasApiKey || authStatus === 'invalid' || authStatus === 'revoked') {
+                                                        vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+                                                                if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
+                                                        });
+                                                        break;
+                                                }
             await vscode.commands.executeCommand('aspectcode.generateKB');
           } catch (e) {
             console.error('[PanelProvider] Failed to regenerate KB:', e);
@@ -1432,6 +1493,14 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           break;
 
                 case 'CYCLE_AUTO_REGENERATE_KB': {
+                    const hasApiKey = await this.computeHasApiKey();
+                    const authStatus = getApiKeyAuthStatus();
+                    if (!hasApiKey || authStatus === 'invalid' || authStatus === 'revoked') {
+                        vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+                            if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
+                        });
+                        break;
+                    }
                     const current = this.getAutoRegenerateKbMode();
                     const next: 'off' | 'onSave' | 'idle' = current === 'off'
                         ? 'onSave'
@@ -1452,6 +1521,16 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 }
 
         case 'FORCE_REINDEX':
+                    {
+                        const hasApiKey = await this.computeHasApiKey();
+                        const authStatus = getApiKeyAuthStatus();
+                        if (!hasApiKey || authStatus === 'invalid' || authStatus === 'revoked') {
+                            vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+                                if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
+                            });
+                            break;
+                        }
+                    }
           // Show native VS Code confirmation dialog
           const confirmed = await vscode.window.showWarningMessage(
                         'Rebuild analysis caches and re-index the workspace? This rebuilds the dependency/indexing data and may take a moment.',
@@ -1465,6 +1544,17 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
 
         case 'COMMAND':
           if (msg?.command) {
+                        if (msg.command !== 'aspectcode.enterApiKey' && msg.command !== 'aspectcode.clearApiKey') {
+                            const hasApiKey = await this.computeHasApiKey();
+                            const authStatus = getApiKeyAuthStatus();
+                            const blocked = !hasApiKey || authStatus === 'invalid' || authStatus === 'revoked';
+                            if (blocked) {
+                                vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+                                    if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
+                                });
+                                break;
+                            }
+                        }
                         const perfEnabled = vscode.workspace.getConfiguration().get<boolean>('aspectcode.devLogs', true);
                         const t0 = Date.now();
                         if (perfEnabled) {
@@ -1585,11 +1675,27 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'EXPLAIN_FILE': {
+                    const hasApiKey = await this.computeHasApiKey();
+                    const authStatus = getApiKeyAuthStatus();
+                    if (!hasApiKey || authStatus === 'invalid' || authStatus === 'revoked') {
+                        vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+                            if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
+                        });
+                        break;
+                    }
           await vscode.commands.executeCommand('aspectcode.explainFile');
           break;
         }
 
         case 'PROPOSE_FIXES': {
+                        const hasApiKey = await this.computeHasApiKey();
+                        const authStatus = getApiKeyAuthStatus();
+                        if (!hasApiKey || authStatus === 'invalid' || authStatus === 'revoked') {
+                            vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+                                if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
+                            });
+                            break;
+                        }
                     // Propose Fixes was removed; keep the panel button working by invoking
                     // the single user-input prompt generator command.
                     await vscode.commands.executeCommand('aspectcode.generatePrompt');
@@ -1597,6 +1703,14 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         }
 
         case 'ALIGN_ISSUE': {
+                    const hasApiKey = await this.computeHasApiKey();
+                    const authStatus = getApiKeyAuthStatus();
+                    if (!hasApiKey || authStatus === 'invalid' || authStatus === 'revoked') {
+                        vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+                            if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
+                        });
+                        break;
+                    }
           await vscode.commands.executeCommand('aspectcode.alignIssue');
           break;
         }
@@ -3987,7 +4101,13 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 }
                 const text = (el.textContent || '').trim();
                 const isVisible = el.style.display !== 'none';
-                setSimpleOpenKbVisible(isVisible && text === 'Aspect Code • Up to date');
+                const allow = new Set([
+                    'Aspect Code • Up to date',
+                    'Aspect Code • KB might be stale',
+                    'Up to date',
+                    'KB might be stale'
+                ]);
+                setSimpleOpenKbVisible(isVisible && allow.has(text));
             } catch {
                 setSimpleOpenKbVisible(false);
             }
@@ -4135,16 +4255,48 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 if (spinnerActive) return;
                 if (currentState && currentState.busy) return;
                 const ownedStatuses = new Set([
+                    // KB statuses
                     'Aspect Code • KB might be stale',
                     'Aspect Code • Up to date',
                     'KB might be stale',
-                    'Up to date'
+                    'Up to date',
+                    // Auth statuses (must be replaceable after key entry)
+                    'Aspect Code • API key required',
+                    'Aspect Code • API key invalid',
+                    'Aspect Code • API key revoked',
+                    'Aspect Code • Checking API key…',
+                    'API key required',
+                    'API key invalid',
+                    'API key revoked',
+                    'Checking API key…'
                 ]);
-                // Allow updating our own status line (prevents getting stuck on stale).
-                if (existing.length > 0 && isVisible && !ownedStatuses.has(existing)) return;
+                // Allow updating our own status line (prevents getting stuck).
+                if (existing.length > 0 && isVisible && !(ownedStatuses.has(existing) || existing.startsWith('Aspect Code •'))) return;
 
                 // Only claim "up to date" when we have a state snapshot and the graph has loaded.
                 if (!currentState || !graphReady) {
+                    return;
+                }
+
+                // Only show API key message when action is blocked.
+                const authStatus = currentState?.apiKeyAuthStatus;
+                const hasApiKey = currentState?.hasApiKey;
+                if (hasApiKey === false) {
+                    el.textContent = 'Aspect Code • API key required';
+                    el.style.display = 'block';
+                    setSimpleOpenKbVisible(false);
+                    return;
+                }
+                if (authStatus === 'revoked') {
+                    el.textContent = 'Aspect Code • API key revoked';
+                    el.style.display = 'block';
+                    setSimpleOpenKbVisible(false);
+                    return;
+                }
+                if (authStatus === 'invalid') {
+                    el.textContent = 'Aspect Code • API key invalid';
+                    el.style.display = 'block';
+                    setSimpleOpenKbVisible(false);
                     return;
                 }
 
@@ -4166,6 +4318,12 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 const graphSpinnerActive = !!(validationSpinner && validationSpinner.classList && validationSpinner.classList.contains('active'));
                 const simpleSpinnerActive = !!(simpleSpinner && simpleSpinner.classList && simpleSpinner.classList.contains('active'));
                 const isBusy = !!(currentState && currentState.busy) || graphSpinnerActive || simpleSpinnerActive;
+
+                const apiBlocked = !!(currentState && (
+                    currentState.hasApiKey === false
+                    || currentState.apiKeyAuthStatus === 'invalid'
+                    || currentState.apiKeyAuthStatus === 'revoked'
+                ));
 
                 // Replace graph prompt-generation button with spinner when spinner is active.
                 const proposeBtn = document.getElementById('propose-button');
@@ -4191,6 +4349,13 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     'regenerate-assistant-files',
                     // View toggle
                     'view-toggle-btn',
+
+                    // Bottom controls
+                    'instructions-mode-safe',
+                    'instructions-mode-permissive',
+
+                    // KB
+                    'btn-regenerate-kb',
                 ];
 
                 for (const id of ids) {
@@ -4214,6 +4379,66 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                                 el.disabled = false;
                                 if (el.dataset) delete el.dataset.disabledByBusy;
                             }
+                        }
+                    }
+                }
+
+                // Disable key-dependent controls when API key is not valid.
+                // Avoid fighting other code: only re-enable buttons we disabled.
+                const authIds = [
+                    'simple-generate-btn',
+                    'generate-instructions-btn',
+                    'regenerate-assistant-files',
+                    'simple-propose-btn',
+                    'propose-button',
+                    'simple-auto-regen-kb-btn',
+                    'complex-auto-regen-kb-btn',
+                    'btn-regenerate-kb',
+                    'instructions-mode-safe',
+                    'instructions-mode-permissive',
+                    'simple-reindex-btn',
+                    'complex-reindex-btn',
+                ];
+
+                for (const id of authIds) {
+                    const el = document.getElementById(id);
+                    if (!el) continue;
+                    if (!('disabled' in el)) continue;
+
+                    const hadAuthFlag = !!(el.dataset && el.dataset.disabledByAuth === '1');
+
+                    if (apiBlocked) {
+                        // @ts-ignore - webview DOM typing
+                        if (!el.disabled) {
+                            // @ts-ignore - webview DOM typing
+                            el.disabled = true;
+                            if (el.dataset) el.dataset.disabledByAuth = '1';
+                        }
+                    } else {
+                        if (hadAuthFlag) {
+                            const disabledByBusy = !!(el.dataset && el.dataset.disabledByBusy === '1');
+                            if (!disabledByBusy) {
+                                // @ts-ignore - webview DOM typing
+                                el.disabled = false;
+                            }
+                            if (el.dataset) delete el.dataset.disabledByAuth;
+                        }
+                    }
+                }
+
+                // Special case: prompt-action-slot is a div, not a button - use CSS opacity/pointer-events.
+                const promptSlot = document.getElementById('prompt-action-slot');
+                if (promptSlot) {
+                    const hadAuthFlag = !!(promptSlot.dataset && promptSlot.dataset.disabledByAuth === '1');
+                    if (apiBlocked) {
+                        promptSlot.style.opacity = '0.5';
+                        promptSlot.style.pointerEvents = 'none';
+                        if (promptSlot.dataset) promptSlot.dataset.disabledByAuth = '1';
+                    } else {
+                        if (hadAuthFlag) {
+                            promptSlot.style.opacity = '';
+                            promptSlot.style.pointerEvents = '';
+                            if (promptSlot.dataset) delete promptSlot.dataset.disabledByAuth;
                         }
                     }
                 }

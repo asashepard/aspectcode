@@ -12,6 +12,7 @@ import { Finding, ScanResult, createSuppressionComment } from './types/protocol'
 import { AutofixV1Service } from './archive/autofix/service';
 import { isAutoFixV1Finding } from './archive/autofix/config';
 import { AspectCodeState } from './state';
+import { hasApiKeyConfigured, isApiKeyBlocked } from './http';
 
 export class AspectCodeCommands {
   private engineService: AspectCodeEngineService;
@@ -183,6 +184,13 @@ export class AspectCodeCommands {
    * Scan workspace command with category filtering.
    */
   async scanWorkspace(): Promise<void> {
+    if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
+      vscode.window.showErrorMessage('Aspect Code: Scanning is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+        if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
+      });
+      return;
+    }
+
     this.outputChannel.show();
     this.outputChannel.appendLine('=== Scanning workspace ===');
     this.statusBarItem.text = '$(loading~spin) Aspect Code: Scanning...';
@@ -247,6 +255,13 @@ export class AspectCodeCommands {
    * Scan active file command.
    */
   async scanActiveFile(): Promise<void> {
+    if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
+      vscode.window.showErrorMessage('Aspect Code: Scanning is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+        if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
+      });
+      return;
+    }
+
     const activeEditor = vscode.window.activeTextEditor;
     if (!activeEditor) {
       vscode.window.showWarningMessage('No active file to scan');
