@@ -107,6 +107,14 @@
       {
         "command": "aspectcode.enablePermissiveMode",
         "title": "Aspect Code: Enable Permissive Mode"
+      },
+      {
+        "command": "aspectcode.editCustomInstructions",
+        "title": "Aspect Code: Edit Custom Instructions"
+      },
+      {
+        "command": "aspectcode.copyKbReceiptPrompt",
+        "title": "Aspect Code: Copy KB Receipt Prompt"
       }
     ],
     "configuration": {

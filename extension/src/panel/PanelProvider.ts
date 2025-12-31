@@ -2119,23 +2119,34 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             left: 0;
             right: 0;
             bottom: 24px; /* Sit directly above the fixed bottom status bar (24px tall) */
-            height: 34px;
+            height: 24px;
             display: flex;
             align-items: center;
-            justify-content: center;
+            justify-content: flex-start;
+            padding: 0 10px;
+            background: var(--vscode-sideBar-background);
+            border-top: 1px solid var(--vscode-panel-border);
+            color: var(--vscode-descriptionForeground);
+            font-size: 11px;
             z-index: 9998;
+            box-sizing: border-box;
             pointer-events: none; /* Allow clicks to pass through except the control itself */
         }
 
         .panel-bottom-controls-inner {
             pointer-events: auto;
+            display: flex;
+            align-items: center;
+            width: 100%;
         }
 
         .instructions-mode-toggle {
             display: inline-flex;
             align-items: center;
-            border: 1px solid var(--vscode-input-border);
-            border-radius: 4px;
+            height: 24px;
+            border: none;
+            border-left: 1px solid var(--vscode-panel-border);
+            border-radius: 0;
             overflow: hidden;
         }
 
@@ -2144,9 +2155,17 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             border: none;
             background: transparent;
             color: var(--vscode-descriptionForeground);
-            padding: 3px 8px;
+            height: 24px;
+            line-height: 24px;
+            padding: 0 8px;
             font-size: 11px;
             cursor: pointer;
+            border-right: 1px solid var(--vscode-panel-border);
+        }
+
+        .instructions-mode-btn:focus {
+            outline: 1px solid var(--vscode-focusBorder);
+            outline-offset: -1px;
         }
 
         .instructions-mode-btn.active {
@@ -2159,11 +2178,45 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         }
 
         .instructions-regenerate-btn {
-            border-left: 1px solid var(--vscode-input-border);
-            padding: 3px 6px;
+            border-left: 1px solid var(--vscode-panel-border);
+            padding: 0 6px;
+            height: 24px;
             display: inline-flex;
             align-items: center;
             justify-content: center;
+        }
+
+        .instructions-icon-btn {
+            width: 28px;
+            padding: 0;
+            text-align: center;
+        }
+
+        .instructions-expand-btn {
+            position: fixed;
+            right: 10px;
+            bottom: 32px; /* add a little more breathing room above bottom */
+            height: 24px;
+            width: 28px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: transparent;
+            color: var(--vscode-descriptionForeground);
+            border: 1px solid var(--vscode-input-border);
+            border-radius: 4px;
+            cursor: pointer;
+            z-index: 9998;
+            box-sizing: border-box;
+        }
+
+        .instructions-expand-btn:hover {
+            background: var(--vscode-button-secondaryHoverBackground);
+        }
+
+        .instructions-expand-btn:focus {
+            outline: 1px solid var(--vscode-focusBorder);
+            outline-offset: -1px;
         }
         
         /* Score display */
@@ -2698,25 +2751,31 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             display: none;
         }
 
-        .simple-open-kb {
+        .simple-kb-actions {
             position: absolute;
             top: 30px;
             left: 40px;
             right: 40px;
             height: 18px;
-            line-height: 18px;
-            font-size: 11px;
-            text-align: center;
-            color: var(--vscode-descriptionForeground);
-            cursor: pointer;
-            user-select: none;
             display: none;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            color: var(--vscode-descriptionForeground);
+            font-size: 11px;
+            user-select: none;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
 
-        .simple-open-kb:hover {
+        .simple-open-kb,
+        .simple-edit-instructions {
+            cursor: pointer;
+        }
+
+        .simple-open-kb:hover,
+        .simple-edit-instructions:hover {
             text-decoration: underline;
         }
 
@@ -3882,7 +3941,10 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             </svg>
         </div>
         <div class="simple-loading-text" id="simple-loading-text"></div>
-        <div class="simple-open-kb" id="simple-open-kb" role="button" tabindex="0" title="Open architecture.md">open kb</div>
+        <div class="simple-kb-actions" id="simple-kb-actions">
+            <div class="simple-open-kb" id="simple-open-kb" role="button" tabindex="0" title="Open architecture.md">open kb</div>
+            <div class="simple-edit-instructions" id="simple-edit-instructions" role="button" tabindex="0" title="Edit .aspect/instructions.md">edit instructions</div>
+        </div>
         <div class="simple-view-buttons">
             <button id="simple-generate-btn" class="generate-instructions-btn" title="Generate AI instruction files" style="display: none;">
                 <svg class="action-icon" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5">
@@ -4042,7 +4104,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         </div>
     </div>
 
-    <div class="panel-bottom-controls" id="panel-bottom-controls">
+    <div class="panel-bottom-controls" id="panel-bottom-controls" style="display: none;">
         <div class="panel-bottom-controls-inner">
             <div class="instructions-mode-toggle" title="Instruction mode">
                 <button id="instructions-mode-safe" class="instructions-mode-btn" type="button">Safe</button>
@@ -4054,9 +4116,13 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                         <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
                     </svg>
                 </button>
+                <button id="instructions-copy-receipt" class="instructions-mode-btn instructions-icon-btn" type="button" title="Copy KB receipt prompt">⧉</button>
+                <button id="instructions-collapse" class="instructions-mode-btn instructions-icon-btn" type="button" title="Hide instruction bar">−</button>
             </div>
         </div>
     </div>
+
+    <button id="instructions-expand" class="instructions-expand-btn" type="button" title="Show instruction bar" style="display: inline-flex;">+</button>
 
     <!-- Bottom status (fixed) -->
     <div class="panel-status-bar" id="panel-status-bar">
@@ -4103,11 +4169,33 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             ? persistedWebviewState.viewMode
             : 'simple';
 
+        let instructionsBarCollapsed = (persistedWebviewState && typeof persistedWebviewState.instructionsBarCollapsed === 'boolean')
+            ? persistedWebviewState.instructionsBarCollapsed
+            : true;
+
         if (viewMode === 'simple') {
             document.body.classList.add('simple-mode');
         } else {
             document.body.classList.remove('simple-mode');
         }
+
+        function setInstructionsBarCollapsed(collapsed) {
+            instructionsBarCollapsed = !!collapsed;
+            const bar = document.getElementById('panel-bottom-controls');
+            const expandBtn = document.getElementById('instructions-expand');
+            if (bar) bar.style.display = instructionsBarCollapsed ? 'none' : '';
+            if (expandBtn) expandBtn.style.display = instructionsBarCollapsed ? 'inline-flex' : 'none';
+            try {
+                const next = { ...(vscode.getState() || {}) };
+                next.instructionsBarCollapsed = instructionsBarCollapsed;
+                vscode.setState(next);
+            } catch {
+                // ignore
+            }
+        }
+
+        // Apply persisted collapsed state on load
+        setInstructionsBarCollapsed(instructionsBarCollapsed);
         
         function toggleViewMode() {
             viewMode = viewMode === 'simple' ? 'full' : 'simple';
@@ -4135,9 +4223,9 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         }
 
         function setSimpleOpenKbVisible(visible) {
-            const openKb = document.getElementById('simple-open-kb');
-            if (!openKb) return;
-            openKb.style.display = visible ? 'block' : 'none';
+            const actions = document.getElementById('simple-kb-actions');
+            if (!actions) return;
+            actions.style.display = visible ? 'flex' : 'none';
         }
 
         function syncSimpleOpenKbVisibility() {
@@ -4220,6 +4308,18 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             vscode.postMessage({ type: 'COMMAND', command: 'aspectcode.configureAssistants' });
         });
 
+        document.getElementById('instructions-copy-receipt')?.addEventListener('click', () => {
+            vscode.postMessage({ type: 'COMMAND', command: 'aspectcode.copyKbReceiptPrompt' });
+        });
+
+        document.getElementById('instructions-collapse')?.addEventListener('click', () => {
+            setInstructionsBarCollapsed(true);
+        });
+
+        document.getElementById('instructions-expand')?.addEventListener('click', () => {
+            setInstructionsBarCollapsed(false);
+        });
+
         // Simple view: open KB link
         function handleOpenKb() {
             vscode.postMessage({ type: 'OPEN_KB' });
@@ -4229,6 +4329,18 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
                 handleOpenKb();
+            }
+        });
+
+        // Simple view: edit custom instructions
+        function handleEditInstructions() {
+            vscode.postMessage({ type: 'COMMAND', command: 'aspectcode.editCustomInstructions' });
+        }
+        document.getElementById('simple-edit-instructions')?.addEventListener('click', handleEditInstructions);
+        document.getElementById('simple-edit-instructions')?.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                handleEditInstructions();
             }
         });
 
@@ -4409,6 +4521,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     'simple-auto-regen-kb-btn',
                     'simple-expand-btn',
                     'simple-reindex-btn',
+                    'simple-edit-instructions',
                     // Graph view header
                     'generate-instructions-btn',
                     'propose-button',
@@ -4426,6 +4539,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     'instructions-mode-custom',
                     'instructions-mode-off',
                     'instructions-regenerate',
+                    'instructions-copy-receipt',
 
                     // KB
                     'btn-regenerate-kb',
@@ -4467,6 +4581,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     'simple-auto-regen-kb-btn',
                     'complex-auto-regen-kb-btn',
                     'btn-regenerate-kb',
+                    'simple-edit-instructions',
                     'instructions-mode-safe',
                     'instructions-mode-permissive',
                     'instructions-mode-custom',

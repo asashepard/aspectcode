@@ -103,6 +103,18 @@ export function activateNewCommands(
       }
       return await handleSetInstructionMode('off', channel);
     }),
+    vscode.commands.registerCommand('aspectcode.editCustomInstructions', async () => {
+      if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
+        vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+          if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
+        });
+        return;
+      }
+      return await handleEditCustomInstructions(channel);
+    }),
+    vscode.commands.registerCommand('aspectcode.copyKbReceiptPrompt', async () => {
+      return await handleCopyKbReceiptPrompt(channel);
+    }),
     vscode.commands.registerCommand('aspectcode.stopIgnoringGeneratedFiles', async () => {
       if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
         vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
@@ -751,5 +763,90 @@ async function handleSetInstructionMode(mode: InstructionsMode, outputChannel: v
   } catch (error) {
     outputChannel.appendLine(`[Instructions] Failed to set instruction mode: ${error}`);
     vscode.window.showErrorMessage(`Failed to set instruction mode: ${error}`);
+  }
+}
+
+async function handleEditCustomInstructions(outputChannel: vscode.OutputChannel): Promise<void> {
+  try {
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!workspaceRoot) {
+      vscode.window.showErrorMessage('No workspace folder open');
+      return;
+    }
+
+    const aspectDir = vscode.Uri.joinPath(workspaceRoot, '.aspect');
+    const customFile = vscode.Uri.joinPath(aspectDir, 'instructions.md');
+
+    let exists = true;
+    try {
+      await vscode.workspace.fs.stat(customFile);
+    } catch {
+      exists = false;
+    }
+
+    if (!exists) {
+      const confirmed = await vscode.window.showWarningMessage(
+        'Aspect Code: Create .aspect/instructions.md and switch to Custom mode? This file will be used as the content inserted into AI instruction files.',
+        { modal: true },
+        'Create & Edit'
+      );
+      if (confirmed !== 'Create & Edit') {
+        return;
+      }
+
+      try {
+        await vscode.workspace.fs.createDirectory(aspectDir);
+      } catch {
+        // ignore
+      }
+
+      const template =
+        `## Aspect Code Custom Instructions\n\n` +
+        `Edit this file to control the instructions inserted into your AI assistant instruction files.\n` +
+        `This content will be placed inside the Aspect Code markers (ASPECT_CODE_START/END).\n`;
+      await vscode.workspace.fs.writeFile(customFile, Buffer.from(template, 'utf-8'));
+      outputChannel.appendLine('[Instructions] Created .aspect/instructions.md');
+    }
+
+    // Activate custom mode (no prompt when already exists).
+    await setInstructionsModeSetting(workspaceRoot, 'custom');
+    outputChannel.appendLine('[Instructions] Set instructions.mode=custom in .aspect/.settings.json');
+
+    const assistants = await getAssistantsSettings(workspaceRoot, outputChannel);
+    const hasEnabledAssistants = assistants.copilot || assistants.cursor || assistants.claude || assistants.other;
+    if (hasEnabledAssistants) {
+      await regenerateInstructionFilesOnly(workspaceRoot, null, outputChannel);
+    }
+
+    const doc = await vscode.workspace.openTextDocument(customFile);
+    await vscode.window.showTextDocument(doc, { preview: false });
+  } catch (error) {
+    outputChannel.appendLine(`[Instructions] Failed to edit custom instructions: ${error}`);
+    vscode.window.showErrorMessage(`Failed to edit custom instructions: ${error}`);
+  }
+}
+
+async function handleCopyKbReceiptPrompt(outputChannel: vscode.OutputChannel): Promise<void> {
+  try {
+    const text =
+`Using the Aspect Code knowledge base available in this repository, return a KB Receipt in this exact format:
+
+Architecture hubs: <file1> (Imported By: <n1>), <file2> (Imported By: <n2>)
+
+One entry point file + its category (runtime / script / barrel)
+
+One module cluster name + 3 files in it
+
+One symbol (name + kind + defining file)
+
+KB generated timestamp
+
+If you can’t access the KB, output exactly: KB_NOT_AVAILABLE.`;
+
+    await vscode.env.clipboard.writeText(text);
+    vscode.window.showInformationMessage('Aspect Code: KB receipt prompt copied to clipboard.');
+  } catch (error) {
+    outputChannel.appendLine(`[KB Receipt] Failed to copy prompt: ${error}`);
+    vscode.window.showErrorMessage(`Failed to copy KB receipt prompt: ${error}`);
   }
 }
