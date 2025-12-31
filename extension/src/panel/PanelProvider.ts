@@ -40,7 +40,8 @@ type StateSnapshot = {
   progress?: number;
     kbStale?: boolean;
     autoRegenerateKb?: 'off' | 'onSave' | 'idle';
-        instructionsMode?: 'safe' | 'permissive';
+                instructionsMode?: 'safe' | 'permissive' | 'custom' | 'off';
+                hasCustomInstructions?: boolean;
   score?: any;  // Score calculation disabled
 };
 
@@ -229,6 +230,30 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         });
         this._context.subscriptions.push(aspectSettingsWatcher);
 
+        // Watch custom instructions file presence so we can show/hide the Custom mode button.
+        const customInstructionsWatcher = vscode.workspace.createFileSystemWatcher('**/.aspect/instructions.md');
+        const refreshCustom = () => {
+            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
+            if (!workspaceRoot) {
+                this._bridgeState.hasCustomInstructions = false;
+                this.pushState();
+                return;
+            }
+            void this.computeHasCustomInstructions(workspaceRoot).then((hasCustom) => {
+                if (this._bridgeState.hasCustomInstructions !== hasCustom) {
+                    this._bridgeState.hasCustomInstructions = hasCustom;
+                    this.pushState();
+                }
+            });
+        };
+        customInstructionsWatcher.onDidCreate(refreshCustom);
+        customInstructionsWatcher.onDidChange(refreshCustom);
+        customInstructionsWatcher.onDidDelete(() => {
+            this._bridgeState.hasCustomInstructions = false;
+            this.pushState();
+        });
+        this._context.subscriptions.push(customInstructionsWatcher);
+
     // Set up periodic cache cleanup (every 60 seconds)
     this._cacheCleanupInterval = setInterval(() => {
       const now = Date.now();
@@ -351,7 +376,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     progress?: number;
     kbStale?: boolean;
         autoRegenerateKb?: 'off' | 'onSave' | 'idle';
-        instructionsMode?: 'safe' | 'permissive';
+        instructionsMode?: 'safe' | 'permissive' | 'custom' | 'off';
+        hasCustomInstructions?: boolean;
   } = { busy: false, findings: [], byRule: {}, history: [] };
 
   // (optional) helper to show the view from activate()
@@ -374,6 +400,16 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             }
             const secretKey = await this._context.secrets.get('aspectcode.apiKey');
             return !!(secretKey && secretKey.trim().length > 0);
+        } catch {
+            return false;
+        }
+    }
+
+    private async computeHasCustomInstructions(workspaceRoot: vscode.Uri): Promise<boolean> {
+        try {
+            const uri = vscode.Uri.joinPath(workspaceRoot, '.aspect', 'instructions.md');
+            await vscode.workspace.fs.stat(uri);
+            return true;
         } catch {
             return false;
         }
@@ -410,9 +446,9 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         return 'onSave';
     }
 
-        private getInstructionsMode(): 'safe' | 'permissive' {
+        private getInstructionsMode(): 'safe' | 'permissive' | 'custom' | 'off' {
             const value = this._bridgeState.instructionsMode;
-            return value === 'permissive' ? 'permissive' : 'safe';
+            return value === 'permissive' || value === 'custom' || value === 'off' ? value : 'safe';
         }
 
         private async loadProjectSettingsIntoBridgeState(): Promise<void> {
@@ -423,6 +459,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 const instructionsMode = await getInstructionsModeSetting(workspaceRoot);
                 this._bridgeState.autoRegenerateKb = autoRegenerateKb;
                 this._bridgeState.instructionsMode = instructionsMode;
+                this._bridgeState.hasCustomInstructions = await this.computeHasCustomInstructions(workspaceRoot);
             } catch (e) {
                 console.warn('[PanelProvider] Failed to load .aspect/.settings.json:', e);
             }
@@ -2119,6 +2156,14 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
 
         .instructions-mode-btn:hover {
             background: var(--vscode-button-secondaryHoverBackground);
+        }
+
+        .instructions-regenerate-btn {
+            border-left: 1px solid var(--vscode-input-border);
+            padding: 3px 6px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
         }
         
         /* Score display */
@@ -4002,6 +4047,13 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             <div class="instructions-mode-toggle" title="Instruction mode">
                 <button id="instructions-mode-safe" class="instructions-mode-btn" type="button">Safe</button>
                 <button id="instructions-mode-permissive" class="instructions-mode-btn" type="button">Permissive</button>
+                <button id="instructions-mode-custom" class="instructions-mode-btn" type="button" style="display: none;">Custom</button>
+                <button id="instructions-mode-off" class="instructions-mode-btn" type="button">Off</button>
+                <button id="instructions-regenerate" class="instructions-mode-btn instructions-regenerate-btn" type="button" title="Regenerate instruction files (QuickPick)">
+                    <svg class="action-icon" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+                    </svg>
+                </button>
             </div>
         </div>
     </div>
@@ -4131,24 +4183,42 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         function setInstructionsModeUi(mode) {
             const safeBtn = document.getElementById('instructions-mode-safe');
             const permBtn = document.getElementById('instructions-mode-permissive');
-            if (!safeBtn || !permBtn) return;
-            safeBtn.classList.toggle('active', mode !== 'permissive');
+            const customBtn = document.getElementById('instructions-mode-custom');
+            const offBtn = document.getElementById('instructions-mode-off');
+            if (!safeBtn || !permBtn || !offBtn) return;
+
+            const hasCustom = !!(currentState && currentState.hasCustomInstructions);
+            if (customBtn) {
+                customBtn.style.display = hasCustom ? '' : 'none';
+            }
+
+            safeBtn.classList.toggle('active', mode === 'safe' || !mode);
             permBtn.classList.toggle('active', mode === 'permissive');
+            if (customBtn) customBtn.classList.toggle('active', mode === 'custom');
+            offBtn.classList.toggle('active', mode === 'off');
         }
 
         function postSetInstructionsMode(mode) {
             const currentMode = currentState?.instructionsMode || 'safe';
             if (mode === currentMode) return;
-            vscode.postMessage({
-                type: 'COMMAND',
-                command: mode === 'permissive'
+            const command =
+                mode === 'permissive'
                     ? 'aspectcode.enablePermissiveMode'
-                    : 'aspectcode.enableSafeMode'
-            });
+                    : mode === 'custom'
+                        ? 'aspectcode.enableCustomMode'
+                        : mode === 'off'
+                            ? 'aspectcode.enableOffMode'
+                            : 'aspectcode.enableSafeMode';
+            vscode.postMessage({ type: 'COMMAND', command });
         }
 
         document.getElementById('instructions-mode-safe')?.addEventListener('click', () => postSetInstructionsMode('safe'));
         document.getElementById('instructions-mode-permissive')?.addEventListener('click', () => postSetInstructionsMode('permissive'));
+        document.getElementById('instructions-mode-custom')?.addEventListener('click', () => postSetInstructionsMode('custom'));
+        document.getElementById('instructions-mode-off')?.addEventListener('click', () => postSetInstructionsMode('off'));
+        document.getElementById('instructions-regenerate')?.addEventListener('click', () => {
+            vscode.postMessage({ type: 'COMMAND', command: 'aspectcode.configureAssistants' });
+        });
 
         // Simple view: open KB link
         function handleOpenKb() {
@@ -4353,6 +4423,9 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     // Bottom controls
                     'instructions-mode-safe',
                     'instructions-mode-permissive',
+                    'instructions-mode-custom',
+                    'instructions-mode-off',
+                    'instructions-regenerate',
 
                     // KB
                     'btn-regenerate-kb',
@@ -4396,6 +4469,9 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     'btn-regenerate-kb',
                     'instructions-mode-safe',
                     'instructions-mode-permissive',
+                    'instructions-mode-custom',
+                    'instructions-mode-off',
+                    'instructions-regenerate',
                     'simple-reindex-btn',
                     'complex-reindex-btn',
                 ];

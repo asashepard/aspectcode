@@ -14,7 +14,7 @@ import { generateInstructionFiles, regenerateInstructionFilesOnly } from './assi
 import { getBaseUrl, hasApiKeyConfigured, isApiKeyBlocked, hasValidApiKey } from './http';
 import type { ScoreResult } from './scoring/scoreEngine';
 import { stopIgnoringGeneratedFilesCommand } from './services/gitignoreService';
-import { setInstructionsModeSetting, updateAspectSettings } from './services/aspectSettings';
+import { InstructionsMode, getAssistantsSettings, getInstructionsModeSetting, setInstructionsModeSetting, updateAspectSettings } from './services/aspectSettings';
 
 /**
  * Activate the new engine-based commands.
@@ -84,6 +84,24 @@ export function activateNewCommands(
         return;
       }
       return await handleSetInstructionMode('permissive', channel);
+    }),
+    vscode.commands.registerCommand('aspectcode.enableCustomMode', async () => {
+      if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
+        vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+          if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
+        });
+        return;
+      }
+      return await handleSetInstructionMode('custom', channel);
+    }),
+    vscode.commands.registerCommand('aspectcode.enableOffMode', async () => {
+      if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
+        vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+          if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
+        });
+        return;
+      }
+      return await handleSetInstructionMode('off', channel);
     }),
     vscode.commands.registerCommand('aspectcode.stopIgnoringGeneratedFiles', async () => {
       if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
@@ -254,6 +272,32 @@ export function activateNewCommands(
     debouncedInstructionUpdate(true);
   });
   context.subscriptions.push(aspectFolderWatcher);
+
+  // Watch for `.aspect/instructions.md` deletion.
+  // If it disappears while `custom` mode is active, auto-switch to `off`.
+  const customInstructionsWatcher = vscode.workspace.createFileSystemWatcher('**/.aspect/instructions.md');
+  customInstructionsWatcher.onDidDelete(async (uri) => {
+    try {
+      channel.appendLine(`[Watcher] .aspect/instructions.md deleted: ${uri.fsPath}`);
+      const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
+      if (!workspaceRoot) return;
+
+      const mode = await getInstructionsModeSetting(workspaceRoot, channel);
+      if (mode !== 'custom') return;
+
+      await setInstructionsModeSetting(workspaceRoot, 'off');
+      channel.appendLine('[Instructions] Custom instructions missing; auto-switched instructions.mode=off');
+
+      const assistants = await getAssistantsSettings(workspaceRoot, channel);
+      const hasEnabledAssistants = assistants.copilot || assistants.cursor || assistants.claude || assistants.other;
+      if (hasEnabledAssistants) {
+        await regenerateInstructionFilesOnly(workspaceRoot, null, channel);
+      }
+    } catch (e) {
+      channel.appendLine(`[Watcher] Failed to auto-switch from custom to off: ${e}`);
+    }
+  });
+  context.subscriptions.push(customInstructionsWatcher);
 
   // Watch for instruction files: AGENTS.md, CLAUDE.md
   const rootInstructionWatcher = vscode.workspace.createFileSystemWatcher('**/{AGENTS,CLAUDE}.md');
@@ -658,7 +702,7 @@ async function handleGeneratePrompt(promptService: PromptGenerationService, stat
   }
 }
 
-async function handleSetInstructionMode(mode: 'safe' | 'permissive', outputChannel: vscode.OutputChannel): Promise<void> {
+async function handleSetInstructionMode(mode: InstructionsMode, outputChannel: vscode.OutputChannel): Promise<void> {
   try {
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
@@ -667,6 +711,28 @@ async function handleSetInstructionMode(mode: 'safe' | 'permissive', outputChann
     }
 
     const workspaceRoot = workspaceFolders[0].uri;
+
+    if (mode === 'off') {
+      const confirmed = await vscode.window.showWarningMessage(
+        'Aspect Code: Turn off instructions? This will remove only the Aspect Code block (between the ASPECT_CODE_START/END markers) from any existing instruction files.',
+        { modal: true },
+        'Turn Off'
+      );
+      if (confirmed !== 'Turn Off') {
+        return;
+      }
+    }
+
+    if (mode === 'custom') {
+      const customFile = vscode.Uri.joinPath(workspaceRoot, '.aspect', 'instructions.md');
+      try {
+        await vscode.workspace.fs.stat(customFile);
+      } catch {
+        vscode.window.showErrorMessage('Aspect Code: Custom mode requires .aspect/instructions.md to exist.');
+        return;
+      }
+    }
+
     await setInstructionsModeSetting(workspaceRoot, mode);
     outputChannel.appendLine(`[Instructions] Set instructions.mode=${mode} in .aspect/.settings.json`);
 

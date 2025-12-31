@@ -8,6 +8,40 @@ import { GitignoreTarget, InstructionsMode, getAssistantsSettings, getInstructio
 const ASPECT_CODE_START = '<!-- ASPECT_CODE_START -->';
 const ASPECT_CODE_END = '<!-- ASPECT_CODE_END -->';
 
+async function readCustomInstructionsContent(workspaceRoot: vscode.Uri): Promise<string | null> {
+  const file = vscode.Uri.joinPath(workspaceRoot, '.aspect', 'instructions.md');
+  try {
+    const bytes = await vscode.workspace.fs.readFile(file);
+    const text = Buffer.from(bytes).toString('utf-8');
+    return text.trim();
+  } catch {
+    return null;
+  }
+}
+
+function removeAspectCodeSection(existingContent: string): string {
+  const startIndex = existingContent.indexOf(ASPECT_CODE_START);
+  if (startIndex === -1) return existingContent;
+
+  const endIndex = existingContent.indexOf(ASPECT_CODE_END, startIndex);
+  if (endIndex === -1) return existingContent;
+
+  let deleteFrom = startIndex;
+  let deleteTo = endIndex + ASPECT_CODE_END.length;
+
+  // Remove trailing newline(s) right after the end marker
+  while (deleteTo < existingContent.length && (existingContent[deleteTo] === '\n' || existingContent[deleteTo] === '\r')) {
+    deleteTo++;
+  }
+
+  // Remove at most one preceding newline before the start marker to avoid leaving a blank gap.
+  if (deleteFrom > 0 && (existingContent[deleteFrom - 1] === '\n' || existingContent[deleteFrom - 1] === '\r')) {
+    deleteFrom--;
+  }
+
+  return existingContent.substring(0, deleteFrom) + existingContent.substring(deleteTo);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Canonical instruction content - all exports derive from this
 // ─────────────────────────────────────────────────────────────────────────────
@@ -287,20 +321,33 @@ async function generateCopilotInstructions(
   const githubDir = vscode.Uri.joinPath(workspaceRoot, '.github');
   const instructionsFile = vscode.Uri.joinPath(githubDir, 'copilot-instructions.md');
 
+  let existingContent = '';
+  let fileExists = true;
+  try {
+    const bytes = await vscode.workspace.fs.readFile(instructionsFile);
+    existingContent = Buffer.from(bytes).toString('utf-8');
+  } catch {
+    fileExists = false;
+  }
+
+  if (mode === 'off') {
+    if (!fileExists) return;
+    const newContent = removeAspectCodeSection(existingContent);
+    if (newContent === existingContent) return;
+    await vscode.workspace.fs.writeFile(instructionsFile, Buffer.from(newContent, 'utf-8'));
+    outputChannel.appendLine('[Instructions] Updated .github/copilot-instructions.md (off)');
+    return;
+  }
+
   // Ensure .github directory exists
   try {
     await vscode.workspace.fs.createDirectory(githubDir);
   } catch {}
 
-  const aspectCodeContent = generateCopilotContent(mode);
-
-  let existingContent = '';
-  try {
-    const bytes = await vscode.workspace.fs.readFile(instructionsFile);
-    existingContent = Buffer.from(bytes).toString('utf-8');
-  } catch {
-    // File doesn't exist yet
-  }
+  const aspectCodeContent =
+    mode === 'custom'
+      ? (await readCustomInstructionsContent(workspaceRoot)) ?? generateCopilotContent('safe')
+      : generateCopilotContent(mode);
 
   const newContent = mergeAspectCodeSection(existingContent, aspectCodeContent);
 
@@ -339,14 +386,37 @@ async function generateCursorRules(
   const cursorDir = vscode.Uri.joinPath(workspaceRoot, '.cursor', 'rules');
   const rulesFile = vscode.Uri.joinPath(cursorDir, 'aspectcode.mdc');
 
+  let existingContent = '';
+  let fileExists = true;
+  try {
+    const bytes = await vscode.workspace.fs.readFile(rulesFile);
+    existingContent = Buffer.from(bytes).toString('utf-8');
+  } catch {
+    fileExists = false;
+  }
+
+  if (mode === 'off') {
+    if (!fileExists) return;
+    const newContent = removeAspectCodeSection(existingContent);
+    if (newContent === existingContent) return;
+    await vscode.workspace.fs.writeFile(rulesFile, Buffer.from(newContent, 'utf-8'));
+    outputChannel.appendLine('[Instructions] Updated .cursor/rules/aspectcode.mdc (off)');
+    return;
+  }
+
   // Ensure .cursor/rules directory exists
   try {
     await vscode.workspace.fs.createDirectory(cursorDir);
   } catch {}
 
-  const content = generateCursorContent(mode);
+  const aspectCodeContent =
+    mode === 'custom'
+      ? (await readCustomInstructionsContent(workspaceRoot)) ?? generateCursorContent('safe')
+      : generateCursorContent(mode);
 
-  await vscode.workspace.fs.writeFile(rulesFile, Buffer.from(content, 'utf-8'));
+  const newContent = mergeAspectCodeSection(existingContent, aspectCodeContent);
+
+  await vscode.workspace.fs.writeFile(rulesFile, Buffer.from(newContent, 'utf-8'));
   outputChannel.appendLine('[Instructions] Generated .cursor/rules/aspectcode.mdc');
 
   // Prompt user for gitignore preference for this specific file
@@ -396,14 +466,30 @@ async function generateClaudeInstructions(
 ): Promise<void> {
   const claudeFile = vscode.Uri.joinPath(workspaceRoot, 'CLAUDE.md');
 
-  const aspectCodeContent = generateClaudeContent(mode);
-
   let existingContent = '';
+  let fileExists = true;
   try {
     const bytes = await vscode.workspace.fs.readFile(claudeFile);
     existingContent = Buffer.from(bytes).toString('utf-8');
   } catch {
-    // File doesn't exist, create new one
+    fileExists = false;
+  }
+
+  if (mode === 'off') {
+    if (!fileExists) return;
+    const newContent = removeAspectCodeSection(existingContent);
+    if (newContent === existingContent) return;
+    await vscode.workspace.fs.writeFile(claudeFile, Buffer.from(newContent, 'utf-8'));
+    outputChannel.appendLine('[Instructions] Updated CLAUDE.md (off)');
+    return;
+  }
+
+  const aspectCodeContent =
+    mode === 'custom'
+      ? (await readCustomInstructionsContent(workspaceRoot)) ?? generateClaudeContent('safe')
+      : generateClaudeContent(mode);
+
+  if (!fileExists) {
     existingContent = '# Claude Code Instructions\n\n';
   }
 
@@ -444,14 +530,30 @@ async function generateOtherInstructions(
 ): Promise<void> {
   const agentsFile = vscode.Uri.joinPath(workspaceRoot, 'AGENTS.md');
 
-  const aspectCodeContent = generateCanonicalContentForMode(mode);
-
   let existingContent = '';
+  let fileExists = true;
   try {
     const bytes = await vscode.workspace.fs.readFile(agentsFile);
     existingContent = Buffer.from(bytes).toString('utf-8');
   } catch {
-    // File doesn't exist, create new one
+    fileExists = false;
+  }
+
+  if (mode === 'off') {
+    if (!fileExists) return;
+    const newContent = removeAspectCodeSection(existingContent);
+    if (newContent === existingContent) return;
+    await vscode.workspace.fs.writeFile(agentsFile, Buffer.from(newContent, 'utf-8'));
+    outputChannel.appendLine('[Instructions] Updated AGENTS.md (off)');
+    return;
+  }
+
+  const aspectCodeContent =
+    mode === 'custom'
+      ? (await readCustomInstructionsContent(workspaceRoot)) ?? generateCanonicalContentForMode('safe')
+      : generateCanonicalContentForMode(mode);
+
+  if (!fileExists) {
     existingContent = '# AI Coding Agent Instructions\n\n';
   }
 

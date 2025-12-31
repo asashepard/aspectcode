@@ -8,7 +8,7 @@
 
 import * as vscode from 'vscode';
 
-export type InstructionsMode = 'safe' | 'permissive';
+export type InstructionsMode = 'safe' | 'permissive' | 'custom' | 'off';
 export type AutoRegenerateKbMode = 'off' | 'onSave' | 'idle';
 
 export interface AssistantsSettings {
@@ -77,7 +77,9 @@ function cacheKey(workspaceRoot: vscode.Uri): string {
 }
 
 function normalizeInstructionsMode(value: unknown): InstructionsMode | undefined {
-  return value === 'permissive' ? 'permissive' : value === 'safe' ? 'safe' : undefined;
+  return value === 'permissive' || value === 'safe' || value === 'custom' || value === 'off'
+    ? value
+    : undefined;
 }
 
 function normalizeAutoRegenerateKbMode(value: unknown): AutoRegenerateKbMode | undefined {
