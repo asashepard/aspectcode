@@ -2788,7 +2788,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             display: none;
             align-items: center;
             justify-content: center;
-            gap: 12px;
+            gap: 20px;
             color: var(--vscode-descriptionForeground);
             font-size: 11px;
             user-select: none;
