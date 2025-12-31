@@ -12,6 +12,7 @@ import Parser from 'web-tree-sitter';
 import { activateNewCommands } from './newCommandsIntegration';
 import { WorkspaceFingerprint } from './services/WorkspaceFingerprint';
 import { computeImpactSummaryForFile } from './assistants/kb';
+import { getAssistantsSettings, getAutoRegenerateKbSetting, migrateAspectSettingsFromVSCode, readAspectSettings, setAutoRegenerateKbSetting } from './services/aspectSettings';
 
 let examineOnSave = false;
 const diag = vscode.languages.createDiagnosticCollection('aspectcode');
@@ -1586,8 +1587,8 @@ async function examineFullRepository(
       }
 
       // Check if we should auto-generate instruction files after successful examination
-      const assistantsConfig = vscode.workspace.getConfiguration('aspectcode.assistants');
-      const autoGenerate = assistantsConfig.get<boolean>('autoGenerate', false);
+      const assistantsSettings = await getAssistantsSettings(vscode.Uri.file(root));
+      const autoGenerate = assistantsSettings.autoGenerate;
 
       if (autoGenerate) {
         outputChannel?.appendLine('[Assistants] Auto-generating instruction files after examination...');
@@ -2189,24 +2190,22 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // Ensure key settings are written into workspace settings.json so users can see/tweak them.
-  // VS Code does not write default values into settings.json automatically.
+  // Migrate project-scoped Aspect Code settings from .vscode/settings.json (if present)
+  // into .aspect/.settings.json, and ensure reasonable defaults exist there.
   try {
     const root = await getWorkspaceRoot();
     if (root) {
-      const cfg = vscode.workspace.getConfiguration('aspectcode');
-      const inspected = cfg.inspect<string>('autoRegenerateKb');
-      const isUnsetEverywhere =
-        inspected?.globalValue === undefined &&
-        inspected?.workspaceValue === undefined &&
-        inspected?.workspaceFolderValue === undefined;
-      if (isUnsetEverywhere) {
-        await cfg.update('autoRegenerateKb', 'onSave', vscode.ConfigurationTarget.Workspace);
-        outputChannel.appendLine("[Settings] Set 'aspectcode.autoRegenerateKb' = 'onSave' in workspace settings");
+      const rootUri = vscode.Uri.file(root);
+      await migrateAspectSettingsFromVSCode(rootUri, outputChannel);
+
+      // Ensure a default autoRegenerateKb is present in .aspect/.settings.json.
+      const settings = await readAspectSettings(rootUri);
+      if (settings.autoRegenerateKb === undefined) {
+        await setAutoRegenerateKbSetting(rootUri, 'onSave');
       }
     }
   } catch (e) {
-    outputChannel.appendLine(`[Settings] Failed to auto-populate 'aspectcode.autoRegenerateKb': ${e}`);
+    outputChannel.appendLine(`[Settings] Failed to migrate project settings: ${e}`);
   }
 
   // Initialize workspace fingerprint for KB staleness detection
@@ -2214,6 +2213,31 @@ export async function activate(context: vscode.ExtensionContext) {
   if (workspaceRoot) {
     workspaceFingerprint = new WorkspaceFingerprint(workspaceRoot, EXTENSION_VERSION, outputChannel);
     context.subscriptions.push(workspaceFingerprint);
+
+    // Initialize fingerprint service with project-local mode and keep it updated.
+    try {
+      const mode = await getAutoRegenerateKbSetting(vscode.Uri.file(workspaceRoot), outputChannel);
+      workspaceFingerprint.setAutoRegenerateKbMode(mode);
+    } catch {}
+
+    // Use **/ glob pattern to match the settings file from the workspace root.
+    const aspectSettingsWatcher = vscode.workspace.createFileSystemWatcher('**/.aspect/.settings.json');
+    const refreshKbMode = () => {
+      void (async () => {
+        try {
+          const mode = await getAutoRegenerateKbSetting(vscode.Uri.file(workspaceRoot), outputChannel);
+          workspaceFingerprint?.setAutoRegenerateKbMode(mode);
+        } catch {
+          // Ignore
+        }
+      })();
+    };
+    aspectSettingsWatcher.onDidChange(refreshKbMode);
+    aspectSettingsWatcher.onDidCreate(refreshKbMode);
+    aspectSettingsWatcher.onDidDelete(() => {
+      workspaceFingerprint?.setAutoRegenerateKbMode('onSave');
+    });
+    context.subscriptions.push(aspectSettingsWatcher);
     
     // Connect fingerprint staleness to panel indicator
     workspaceFingerprint.onStaleStateChanged(stale => {
@@ -2492,9 +2516,13 @@ export async function activate(context: vscode.ExtensionContext) {
           };
         }
         
-        // KB mode from settings
-        const kbMode = vscode.workspace.getConfiguration('aspectcode').get<string>('autoRegenerateKb');
-        debugInfo.kb_mode = kbMode || 'unknown';
+        // KB mode from project-local settings
+        const root = await getWorkspaceRoot();
+        if (root) {
+          debugInfo.kb_mode = await getAutoRegenerateKbSetting(vscode.Uri.file(root));
+        } else {
+          debugInfo.kb_mode = 'unknown';
+        }
         
         // State summary
         const panelState = state.get();
@@ -2643,7 +2671,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
         // If autoRegenerateKb === 'onSave', also trigger regeneration for bulk edits
         // (common when an LLM applies a change), even if the editor isn't explicitly saved.
-        const autoRegen = vscode.workspace.getConfiguration('aspectcode').get<string>('autoRegenerateKb', 'onSave');
+        const autoRegen = workspaceRoot ? await getAutoRegenerateKbSetting(vscode.Uri.file(workspaceRoot)) : 'onSave';
         if (autoRegen === 'onSave' && isBulkEdit(event.contentChanges)) {
           workspaceFingerprint?.onFileSaved(filePath);
         }

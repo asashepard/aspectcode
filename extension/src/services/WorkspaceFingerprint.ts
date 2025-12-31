@@ -9,6 +9,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import { AutoRegenerateKbMode } from './aspectSettings';
 
 // ============================================================================
 // Types
@@ -51,6 +52,8 @@ export class WorkspaceFingerprint implements vscode.Disposable {
   // onSave debounce (shorter than idle)
   private saveTimer: NodeJS.Timeout | null = null;
   private readonly SAVE_DEBOUNCE_MS = 2000; // 2 seconds after last save
+
+  private autoRegenMode: AutoRegenerateKbMode = 'onSave';
   
   // Cached fingerprint
   private cachedFingerprint: string | null = null;
@@ -67,6 +70,19 @@ export class WorkspaceFingerprint implements vscode.Disposable {
   // Event emitter for stale state changes
   private readonly _onStaleStateChanged = new vscode.EventEmitter<boolean>();
   readonly onStaleStateChanged = this._onStaleStateChanged.event;
+
+  /**
+   * Set the auto-regeneration mode (driven by .aspect/.settings.json).
+   */
+  setAutoRegenerateKbMode(mode: AutoRegenerateKbMode): void {
+    this.autoRegenMode = mode;
+
+    // If we moved away from idle mode, cancel any pending idle regeneration.
+    if (mode !== 'idle' && this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+  }
   
   // KB regeneration callback
   private kbRegenerateCallback: (() => Promise<void>) | null = null;
@@ -190,11 +206,7 @@ export class WorkspaceFingerprint implements vscode.Disposable {
       clearTimeout(this.idleTimer);
     }
 
-    // Check if auto-regenerate is enabled
-    const config = vscode.workspace.getConfiguration('aspectcode');
-    const autoRegen = config.get<string>('autoRegenerateKb', 'onSave');
-    
-    if (autoRegen === 'idle' && this.kbRegenerateCallback) {
+    if (this.autoRegenMode === 'idle' && this.kbRegenerateCallback) {
       this.idleTimer = setTimeout(async () => {
         this.idleTimer = null;
         await this.onIdleTimeout();
@@ -222,11 +234,7 @@ export class WorkspaceFingerprint implements vscode.Disposable {
   onFileSaved(filePath: string): void {
     this.lastEditTime = Date.now();
 
-    // Check if auto-regenerate is enabled for onSave
-    const config = vscode.workspace.getConfiguration('aspectcode');
-    const autoRegen = config.get<string>('autoRegenerateKb', 'onSave');
-
-    if (autoRegen !== 'onSave' || !this.kbRegenerateCallback) {
+    if (this.autoRegenMode !== 'onSave' || !this.kbRegenerateCallback) {
       // Still mark stale if not auto-regenerating
       this.onFileEdited();
       return;

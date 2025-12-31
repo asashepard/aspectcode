@@ -2,16 +2,11 @@ import * as vscode from 'vscode';
 import { AspectCodeState } from '../state';
 import { ScoreResult } from '../scoring/scoreEngine';
 import { generateKnowledgeBase } from './kb';
+import { ensureGitignoreForTarget } from '../services/gitignoreService';
+import { GitignoreTarget, InstructionsMode, getAssistantsSettings, getInstructionsModeSetting } from '../services/aspectSettings';
 
 const ASPECT_CODE_START = '<!-- ASPECT_CODE_START -->';
 const ASPECT_CODE_END = '<!-- ASPECT_CODE_END -->';
-
-type InstructionsMode = 'safe' | 'permissive';
-
-function getInstructionsMode(): InstructionsMode {
-  const raw = vscode.workspace.getConfiguration('aspectcode').get<string>('instructions.mode', 'safe');
-  return raw === 'permissive' ? 'permissive' : 'safe';
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Canonical instruction content - all exports derive from this
@@ -22,7 +17,11 @@ function getInstructionsMode(): InstructionsMode {
  * All assistant-specific exports are derived from this single source.
  */
 function generateCanonicalContent(): string {
-  const mode = getInstructionsMode();
+  // Backwards-compat default. Call generateCanonicalContentForMode() instead.
+  return generateCanonicalContentForMode('safe');
+}
+
+function generateCanonicalContentForMode(mode: InstructionsMode): string {
   if (mode === 'permissive') {
     return generateCanonicalContentPermissive();
   }
@@ -200,31 +199,31 @@ async function generateInstructionFilesForEnabledAssistants(
   scoreResult: ScoreResult | null,
   outputChannel: vscode.OutputChannel
 ): Promise<void> {
-  // Read assistant settings
-  const config = vscode.workspace.getConfiguration('aspectcode.assistants');
-  const wantCopilot = config.get<boolean>('copilot', false);
-  const wantCursor = config.get<boolean>('cursor', false);
-  const wantClaude = config.get<boolean>('claude', false);
-  const wantOther = config.get<boolean>('other', false);
+  const mode = await getInstructionsModeSetting(workspaceRoot, outputChannel);
+  const assistants = await getAssistantsSettings(workspaceRoot, outputChannel);
+  const wantCopilot = assistants.copilot;
+  const wantCursor = assistants.cursor;
+  const wantClaude = assistants.claude;
+  const wantOther = assistants.other;
 
-  outputChannel.appendLine(`[Instructions] Generating instruction files (mode=${getInstructionsMode()}, Copilot: ${wantCopilot}, Cursor: ${wantCursor}, Claude: ${wantClaude}, Other: ${wantOther})`);
+  outputChannel.appendLine(`[Instructions] Generating instruction files (mode=${mode}, Copilot: ${wantCopilot}, Cursor: ${wantCursor}, Claude: ${wantClaude}, Other: ${wantOther})`);
 
   const promises: Promise<void>[] = [];
 
   if (wantCopilot) {
-    promises.push(generateCopilotInstructions(workspaceRoot, scoreResult, outputChannel));
+    promises.push(generateCopilotInstructions(workspaceRoot, scoreResult, outputChannel, mode));
   }
 
   if (wantCursor) {
-    promises.push(generateCursorRules(workspaceRoot, outputChannel));
+    promises.push(generateCursorRules(workspaceRoot, outputChannel, mode));
   }
 
   if (wantClaude) {
-    promises.push(generateClaudeInstructions(workspaceRoot, scoreResult, outputChannel));
+    promises.push(generateClaudeInstructions(workspaceRoot, scoreResult, outputChannel, mode));
   }
 
   if (wantOther) {
-    promises.push(generateOtherInstructions(workspaceRoot, scoreResult, outputChannel));
+    promises.push(generateOtherInstructions(workspaceRoot, scoreResult, outputChannel, mode));
   }
 
   await Promise.all(promises);
@@ -256,6 +255,8 @@ export async function generateInstructionFiles(
   outputChannel: vscode.OutputChannel,
   context?: vscode.ExtensionContext
 ): Promise<void> {
+  // Note: Gitignore prompts are now handled per-file in each generation function
+
   // Check if KB files exist; if not, generate them
   const aspectCodeDir = vscode.Uri.joinPath(workspaceRoot, '.aspect');
   const architectureFile = vscode.Uri.joinPath(aspectCodeDir, 'architecture.md');
@@ -280,7 +281,8 @@ export async function generateInstructionFiles(
 async function generateCopilotInstructions(
   workspaceRoot: vscode.Uri,
   scoreResult: ScoreResult | null,
-  outputChannel: vscode.OutputChannel
+  outputChannel: vscode.OutputChannel,
+  mode: InstructionsMode
 ): Promise<void> {
   const githubDir = vscode.Uri.joinPath(workspaceRoot, '.github');
   const instructionsFile = vscode.Uri.joinPath(githubDir, 'copilot-instructions.md');
@@ -290,7 +292,7 @@ async function generateCopilotInstructions(
     await vscode.workspace.fs.createDirectory(githubDir);
   } catch {}
 
-  const aspectCodeContent = generateCopilotContent();
+  const aspectCodeContent = generateCopilotContent(mode);
 
   let existingContent = '';
   try {
@@ -304,13 +306,17 @@ async function generateCopilotInstructions(
 
   await vscode.workspace.fs.writeFile(instructionsFile, Buffer.from(newContent, 'utf-8'));
   outputChannel.appendLine('[Instructions] Generated .github/copilot-instructions.md');
+
+  // Prompt user for gitignore preference for this specific file
+  const target: GitignoreTarget = '.github/copilot-instructions.md';
+  await ensureGitignoreForTarget(workspaceRoot, target, outputChannel);
 }
 
-function generateCopilotContent(): string {
-  if (getInstructionsMode() === 'permissive') {
-    return generateCanonicalContent();
+function generateCopilotContent(mode: InstructionsMode): string {
+  if (mode === 'permissive') {
+    return generateCanonicalContentForMode(mode);
   }
-  return `${generateCanonicalContent()}
+  return `${generateCanonicalContentForMode(mode)}
 
 ---
 
@@ -327,7 +333,8 @@ function generateCopilotContent(): string {
  */
 async function generateCursorRules(
   workspaceRoot: vscode.Uri,
-  outputChannel: vscode.OutputChannel
+  outputChannel: vscode.OutputChannel,
+  mode: InstructionsMode
 ): Promise<void> {
   const cursorDir = vscode.Uri.joinPath(workspaceRoot, '.cursor', 'rules');
   const rulesFile = vscode.Uri.joinPath(cursorDir, 'aspectcode.mdc');
@@ -337,21 +344,25 @@ async function generateCursorRules(
     await vscode.workspace.fs.createDirectory(cursorDir);
   } catch {}
 
-  const content = generateCursorContent();
+  const content = generateCursorContent(mode);
 
   await vscode.workspace.fs.writeFile(rulesFile, Buffer.from(content, 'utf-8'));
   outputChannel.appendLine('[Instructions] Generated .cursor/rules/aspectcode.mdc');
+
+  // Prompt user for gitignore preference for this specific file
+  const target: GitignoreTarget = '.cursor/rules/aspectcode.mdc';
+  await ensureGitignoreForTarget(workspaceRoot, target, outputChannel);
 }
 
-function generateCursorContent(): string {
-  if (getInstructionsMode() === 'permissive') {
+function generateCursorContent(mode: InstructionsMode): string {
+  if (mode === 'permissive') {
     return `---
 description: Aspect Code KB integration - read before multi-file edits
 globs: 
 alwaysApply: true
 ---
 
-${generateCanonicalContent()}
+${generateCanonicalContentForMode(mode)}
 `.trim();
   }
   return `---
@@ -360,7 +371,8 @@ globs:
 alwaysApply: true
 ---
 
-${generateCanonicalContent()}
+${generateCanonicalContentForMode(mode)}
+
 
 ---
 
@@ -372,17 +384,19 @@ ${generateCanonicalContent()}
 `.trim();
 }
 
+
 /**
  * Generate/update CLAUDE.md with Aspect Code section
  */
 async function generateClaudeInstructions(
   workspaceRoot: vscode.Uri,
   scoreResult: ScoreResult | null,
-  outputChannel: vscode.OutputChannel
+  outputChannel: vscode.OutputChannel,
+  mode: InstructionsMode
 ): Promise<void> {
   const claudeFile = vscode.Uri.joinPath(workspaceRoot, 'CLAUDE.md');
 
-  const aspectCodeContent = generateClaudeContent();
+  const aspectCodeContent = generateClaudeContent(mode);
 
   let existingContent = '';
   try {
@@ -397,13 +411,17 @@ async function generateClaudeInstructions(
 
   await vscode.workspace.fs.writeFile(claudeFile, Buffer.from(newContent, 'utf-8'));
   outputChannel.appendLine('[Instructions] Generated CLAUDE.md');
+
+  // Prompt user for gitignore preference for this specific file
+  const target: GitignoreTarget = 'CLAUDE.md';
+  await ensureGitignoreForTarget(workspaceRoot, target, outputChannel);
 }
 
-function generateClaudeContent(): string {
-  if (getInstructionsMode() === 'permissive') {
-    return generateCanonicalContent();
+function generateClaudeContent(mode: InstructionsMode): string {
+  if (mode === 'permissive') {
+    return generateCanonicalContentForMode(mode);
   }
-  return `${generateCanonicalContent()}
+  return `${generateCanonicalContentForMode(mode)}
 
 ---
 
@@ -421,11 +439,12 @@ function generateClaudeContent(): string {
 async function generateOtherInstructions(
   workspaceRoot: vscode.Uri,
   scoreResult: ScoreResult | null,
-  outputChannel: vscode.OutputChannel
+  outputChannel: vscode.OutputChannel,
+  mode: InstructionsMode
 ): Promise<void> {
   const agentsFile = vscode.Uri.joinPath(workspaceRoot, 'AGENTS.md');
 
-  const aspectCodeContent = generateCanonicalContent();
+  const aspectCodeContent = generateCanonicalContentForMode(mode);
 
   let existingContent = '';
   try {
@@ -440,6 +459,10 @@ async function generateOtherInstructions(
 
   await vscode.workspace.fs.writeFile(agentsFile, Buffer.from(newContent, 'utf-8'));
   outputChannel.appendLine('[Instructions] Generated AGENTS.md');
+
+  // Prompt user for gitignore preference for this specific file
+  const target: GitignoreTarget = 'AGENTS.md';
+  await ensureGitignoreForTarget(workspaceRoot, target, outputChannel);
 }
 
 /**

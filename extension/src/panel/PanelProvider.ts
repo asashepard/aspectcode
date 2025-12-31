@@ -8,6 +8,7 @@ import { getApiKeyAuthStatus, onDidChangeApiKeyAuthStatus, resetApiKeyAuthStatus
 // import { defaultScoreConfig } from '../scoring/scoreConfig';
 import { DependencyAnalyzer, DependencyLink } from './DependencyAnalyzer';
 import { detectAssistants } from '../assistants/detection';
+import { getAutoRegenerateKbSetting, getInstructionsModeSetting, setAutoRegenerateKbSetting } from '../services/aspectSettings';
 
 type Finding = { 
   id?: string;
@@ -196,16 +197,22 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             })
         );
 
-        this._context.subscriptions.push(
-            vscode.workspace.onDidChangeConfiguration((e) => {
-                if (
-                    e.affectsConfiguration('aspectcode.instructions.mode') ||
-                    e.affectsConfiguration('aspectcode.autoRegenerateKb')
-                ) {
-                    this.pushState();
-                }
-            })
-        );
+        // Watch project-local settings file for changes.
+        // This keeps the panel state in sync when settings are changed via commands
+        // (or manually edited) without relying on VS Code workspace configuration.
+        // Use **/ glob pattern to ensure it works from workspace root.
+        const aspectSettingsWatcher = vscode.workspace.createFileSystemWatcher('**/.aspect/.settings.json');
+        const refresh = () => {
+            void this.loadProjectSettingsIntoBridgeState().then(() => this.pushState());
+        };
+        aspectSettingsWatcher.onDidChange(refresh);
+        aspectSettingsWatcher.onDidCreate(refresh);
+        aspectSettingsWatcher.onDidDelete(() => {
+            this._bridgeState.autoRegenerateKb = 'onSave';
+            this._bridgeState.instructionsMode = 'safe';
+            this.pushState();
+        });
+        this._context.subscriptions.push(aspectSettingsWatcher);
 
     // Set up periodic cache cleanup (every 60 seconds)
     this._cacheCleanupInterval = setInterval(() => {
@@ -366,7 +373,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     }
 
     private getAutoRegenerateKbMode(): 'off' | 'onSave' | 'idle' {
-        const value = vscode.workspace.getConfiguration('aspectcode').get<string>('autoRegenerateKb', 'onSave');
+        const value = this._bridgeState.autoRegenerateKb;
         if (value === 'off' || value === 'onSave' || value === 'idle') {
             return value;
         }
@@ -374,8 +381,21 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     }
 
         private getInstructionsMode(): 'safe' | 'permissive' {
-            const value = vscode.workspace.getConfiguration('aspectcode').get<string>('instructions.mode', 'safe');
+            const value = this._bridgeState.instructionsMode;
             return value === 'permissive' ? 'permissive' : 'safe';
+        }
+
+        private async loadProjectSettingsIntoBridgeState(): Promise<void> {
+            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
+            if (!workspaceRoot) return;
+            try {
+                const autoRegenerateKb = await getAutoRegenerateKbSetting(workspaceRoot);
+                const instructionsMode = await getInstructionsModeSetting(workspaceRoot);
+                this._bridgeState.autoRegenerateKb = autoRegenerateKb;
+                this._bridgeState.instructionsMode = instructionsMode;
+            } catch (e) {
+                console.warn('[PanelProvider] Failed to load .aspect/.settings.json:', e);
+            }
         }
 
   private mapSeverity(severity: string): 'critical' | 'high' | 'medium' | 'low' | 'info' {
@@ -1244,11 +1264,13 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             this._outputChannel?.appendLine('[PanelProvider] No .aspect/ KB found, waiting for user to configure via + button');
             this.post({ type: 'SETUP_REQUIRED' });
           }
+                    await this.loadProjectSettingsIntoBridgeState();
           // Send state with workspace root without modifying the original state
           const webviewState = {
             ...this._bridgeState,
                         workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '',
-                        autoRegenerateKb: this.getAutoRegenerateKbMode()
+                        autoRegenerateKb: this.getAutoRegenerateKbMode(),
+                        instructionsMode: this.getInstructionsMode()
           };
           this.post({ type: 'STATE_UPDATE', state: webviewState });
 
@@ -1417,11 +1439,11 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                             ? 'idle'
                             : 'off';
                     try {
-                        await vscode.workspace.getConfiguration('aspectcode').update(
-                            'autoRegenerateKb',
-                            next,
-                            vscode.ConfigurationTarget.Workspace
-                        );
+                        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
+                        if (workspaceRoot) {
+                            await setAutoRegenerateKbSetting(workspaceRoot, next);
+                        }
+                        this._bridgeState.autoRegenerateKb = next;
                     } catch (e) {
                         console.error('[PanelProvider] Failed to update autoRegenerateKb:', e);
                     }
@@ -1453,6 +1475,11 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                             if (msg.command === 'aspectcode.enterApiKey' || msg.command === 'aspectcode.clearApiKey') {
                                 await this.refreshApiKeyStatus();
                             }
+
+                            // Keep project-local settings in sync after commands that mutate .aspect/.settings.json
+                            // (e.g. instructions mode toggles, assistant configuration).
+                            await this.loadProjectSettingsIntoBridgeState();
+                            this.pushState();
                         } finally {
                             if (perfEnabled) {
                                 this._outputChannel?.appendLine(`[Perf][PanelProvider][COMMAND] end cmd=${msg.command} tookMs=${Date.now() - t0}`);

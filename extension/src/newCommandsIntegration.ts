@@ -13,6 +13,8 @@ import { detectAssistants, AssistantId } from './assistants/detection';
 import { generateInstructionFiles, regenerateInstructionFilesOnly } from './assistants/instructions';
 import { getBaseUrl } from './http';
 import type { ScoreResult } from './scoring/scoreEngine';
+import { stopIgnoringGeneratedFilesCommand } from './services/gitignoreService';
+import { setInstructionsModeSetting, updateAspectSettings } from './services/aspectSettings';
 
 /**
  * Activate the new engine-based commands.
@@ -52,6 +54,9 @@ export function activateNewCommands(
     }),
     vscode.commands.registerCommand('aspectcode.enablePermissiveMode', async () => {
       return await handleSetInstructionMode('permissive', channel);
+    }),
+    vscode.commands.registerCommand('aspectcode.stopIgnoringGeneratedFiles', async () => {
+      return await stopIgnoringGeneratedFilesCommand(channel);
     })
   );
 
@@ -364,17 +369,18 @@ async function handleConfigureAssistants(
 
     const selectedIds = new Set(selected.map(item => item.id));
 
-    // Update workspace settings in parallel
-    const config = vscode.workspace.getConfiguration('aspectcode.assistants');
+    // Update project-local settings (.aspect/.settings.json)
     const tCfg = Date.now();
-    await Promise.all([
-      config.update('copilot', selectedIds.has('copilot'), vscode.ConfigurationTarget.Workspace),
-      config.update('cursor', selectedIds.has('cursor'), vscode.ConfigurationTarget.Workspace),
-      config.update('claude', selectedIds.has('claude'), vscode.ConfigurationTarget.Workspace),
-      config.update('other', selectedIds.has('other'), vscode.ConfigurationTarget.Workspace)
-    ]);
+    await updateAspectSettings(workspaceRoot, {
+        assistants: {
+          copilot: selectedIds.has('copilot'),
+          cursor: selectedIds.has('cursor'),
+          claude: selectedIds.has('claude'),
+          other: selectedIds.has('other')
+        }
+    });
     if (perfEnabled) {
-      outputChannel.appendLine(`[Perf][Assistants][configure] config.update tookMs=${Date.now() - tCfg}`);
+      outputChannel.appendLine(`[Perf][Assistants][configure] .aspect settings update tookMs=${Date.now() - tCfg}`);
     }
     // TEMPORARILY DISABLED: ALIGNMENTS.json feature
     // await config.update('alignments', selectedIds.has('alignments'), vscode.ConfigurationTarget.Workspace);
@@ -618,12 +624,22 @@ async function handleSetInstructionMode(mode: 'safe' | 'permissive', outputChann
       return;
     }
 
-    const config = vscode.workspace.getConfiguration('aspectcode');
-    await config.update('instructions.mode', mode, vscode.ConfigurationTarget.Workspace);
-    outputChannel.appendLine(`[Instructions] Set instructions.mode=${mode}`);
+    const workspaceRoot = workspaceFolders[0].uri;
+    await setInstructionsModeSetting(workspaceRoot, mode);
+    outputChannel.appendLine(`[Instructions] Set instructions.mode=${mode} in .aspect/.settings.json`);
 
-    // Regenerate instruction files only; do not run EXAMINE or KB generation.
-    await regenerateInstructionFilesOnly(workspaceFolders[0].uri, null, outputChannel);
+    // Check if any assistants are enabled before regenerating
+    const { getAssistantsSettings } = await import('./services/aspectSettings');
+    const assistants = await getAssistantsSettings(workspaceRoot, outputChannel);
+    const hasEnabledAssistants = assistants.copilot || assistants.cursor || assistants.claude || assistants.other;
+
+    if (hasEnabledAssistants) {
+      // Regenerate instruction files only; do not run EXAMINE or KB generation.
+      await regenerateInstructionFilesOnly(workspaceRoot, null, outputChannel);
+    } else {
+      // No assistants configured - nothing to regenerate.
+      outputChannel.appendLine('[Instructions] No assistants enabled; skipped instruction file regeneration');
+    }
   } catch (error) {
     outputChannel.appendLine(`[Instructions] Failed to set instruction mode: ${error}`);
     vscode.window.showErrorMessage(`Failed to set instruction mode: ${error}`);

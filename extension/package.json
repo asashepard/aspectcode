@@ -97,6 +97,10 @@
         "icon": "$(book)"
       },
       {
+        "command": "aspectcode.stopIgnoringGeneratedFiles",
+        "title": "Aspect Code: Stop ignoring generated files"
+      },
+      {
         "command": "aspectcode.enableSafeMode",
         "title": "Aspect Code: Enable Safe Mode"
       },
