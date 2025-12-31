@@ -8,7 +8,7 @@ import { fetchCapabilities, getApiKeyAuthStatus, hasValidApiKey, onDidChangeApiK
 // import { defaultScoreConfig } from '../scoring/scoreConfig';
 import { DependencyAnalyzer, DependencyLink } from './DependencyAnalyzer';
 import { detectAssistants } from '../assistants/detection';
-import { getAutoRegenerateKbSetting, getInstructionsModeSetting, setAutoRegenerateKbSetting } from '../services/aspectSettings';
+import { getAutoRegenerateKbSetting, getInstructionsModeSetting, setAutoRegenerateKbSetting, getExtensionEnabledSetting } from '../services/aspectSettings';
 
 type Finding = { 
   id?: string;
@@ -42,6 +42,7 @@ type StateSnapshot = {
     autoRegenerateKb?: 'off' | 'onSave' | 'idle';
                 instructionsMode?: 'safe' | 'permissive' | 'custom' | 'off';
                 hasCustomInstructions?: boolean;
+                                extensionEnabled?: boolean;
   score?: any;  // Score calculation disabled
 };
 
@@ -142,6 +143,10 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         processingPhase: this._bridgeState.processingPhase,
         progress: this._bridgeState.progress,
                 kbStale: this._bridgeState.kbStale,
+                                autoRegenerateKb: this._bridgeState.autoRegenerateKb,
+                                instructionsMode: this._bridgeState.instructionsMode,
+                                hasCustomInstructions: this._bridgeState.hasCustomInstructions,
+                                extensionEnabled: this._bridgeState.extensionEnabled,
       };
       
       this.pushState();
@@ -226,6 +231,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         aspectSettingsWatcher.onDidDelete(() => {
             this._bridgeState.autoRegenerateKb = 'onSave';
             this._bridgeState.instructionsMode = 'safe';
+            this._bridgeState.extensionEnabled = true;
             this.pushState();
         });
         this._context.subscriptions.push(aspectSettingsWatcher);
@@ -378,6 +384,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         autoRegenerateKb?: 'off' | 'onSave' | 'idle';
         instructionsMode?: 'safe' | 'permissive' | 'custom' | 'off';
         hasCustomInstructions?: boolean;
+        extensionEnabled?: boolean;
   } = { busy: false, findings: [], byRule: {}, history: [] };
 
   // (optional) helper to show the view from activate()
@@ -457,9 +464,11 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             try {
                 const autoRegenerateKb = await getAutoRegenerateKbSetting(workspaceRoot);
                 const instructionsMode = await getInstructionsModeSetting(workspaceRoot);
+                const extensionEnabled = await getExtensionEnabledSetting(workspaceRoot);
                 this._bridgeState.autoRegenerateKb = autoRegenerateKb;
                 this._bridgeState.instructionsMode = instructionsMode;
                 this._bridgeState.hasCustomInstructions = await this.computeHasCustomInstructions(workspaceRoot);
+                this._bridgeState.extensionEnabled = extensionEnabled;
             } catch (e) {
                 console.warn('[PanelProvider] Failed to load .aspect/.settings.json:', e);
             }
@@ -493,6 +502,11 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
    */
   private async sendDependencyGraph(forceOverview: boolean = false) {
     if (!this._view) return;
+
+        // Hard stop when extension is disabled.
+        if (this._bridgeState.extensionEnabled === false) {
+            return;
+        }
     
     // ALWAYS send focused graph - never show all nodes at once
     // Only use activeTextEditor if it's a real file (not output channel, etc.)
@@ -633,6 +647,11 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
       console.error('[Dependency Graph] View not initialized, cannot send graph');
       return;
     }
+
+        // Hard stop when extension is disabled.
+        if (this._bridgeState.extensionEnabled === false) {
+            return;
+        }
 
         // API-key gate: block dependency graph + workspace scanning unless a key is configured.
         // Do NOT require auth status to be 'ok' here; first server request will validate.
@@ -2190,6 +2209,15 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             width: 28px;
             padding: 0;
             text-align: center;
+        }
+
+        #simple-enable-toggle-btn {
+            font-size: 14px;
+            margin-bottom: 2px;
+        }
+
+        .instructions-enable-btn.active {
+            color: var(--vscode-errorForeground);
         }
 
         .instructions-expand-btn {
@@ -4117,6 +4145,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     </svg>
                 </button>
                 <button id="instructions-copy-receipt" class="instructions-mode-btn instructions-icon-btn" type="button" title="Copy KB receipt prompt">⧉</button>
+                <button id="simple-enable-toggle-btn" class="instructions-mode-btn instructions-icon-btn" type="button" title="Disable Aspect Code">⏻</button>
                 <button id="instructions-collapse" class="instructions-mode-btn instructions-icon-btn" type="button" title="Hide instruction bar">−</button>
             </div>
         </div>
@@ -4387,6 +4416,22 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         }
         document.getElementById('simple-reindex-btn')?.addEventListener('click', handleReindex);
 
+        // Simple view: enable/disable toggle
+        function updateEnableToggleUi() {
+            const btn = document.getElementById('simple-enable-toggle-btn');
+            if (!btn) return;
+            const enabled = !(currentState && currentState.extensionEnabled === false);
+            btn.title = enabled ? 'Disable Aspect Code' : 'Enable Aspect Code';
+            btn.classList.toggle('active', !enabled);
+            // Ensure click listener is bound
+            if (!btn.dataset.listenerBound) {
+                btn.addEventListener('click', () => {
+                    vscode.postMessage({ type: 'COMMAND', command: 'aspectcode.toggleExtensionEnabled' });
+                });
+                btn.dataset.listenerBound = '1';
+            }
+        }
+
         function modeLabel(mode) {
             switch (mode) {
                 case 'off': return 'Off';
@@ -4463,6 +4508,13 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 // Only show API key message when action is blocked.
                 const authStatus = currentState?.apiKeyAuthStatus;
                 const hasApiKey = currentState?.hasApiKey;
+
+                if (currentState && currentState.extensionEnabled === false) {
+                    el.textContent = 'Aspect Code • Disabled';
+                    el.style.display = 'block';
+                    setSimpleOpenKbVisible(false);
+                    return;
+                }
                 if (hasApiKey === false) {
                     el.textContent = 'Aspect Code • API key required';
                     el.style.display = 'block';
@@ -4506,6 +4558,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     || currentState.apiKeyAuthStatus === 'invalid'
                     || currentState.apiKeyAuthStatus === 'revoked'
                 ));
+
+                const extensionDisabled = !!(currentState && currentState.extensionEnabled === false);
 
                 // Replace graph prompt-generation button with spinner when spinner is active.
                 const proposeBtn = document.getElementById('propose-button');
@@ -4566,6 +4620,51 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                                 el.disabled = false;
                                 if (el.dataset) delete el.dataset.disabledByBusy;
                             }
+                        }
+                    }
+                }
+
+                // Hard-disable everything (except the enable toggle itself) while extension is disabled.
+                const disableIds = ids.filter((id) => id !== 'simple-enable-toggle-btn');
+                disableIds.push(
+                    'generate-instructions-btn',
+                    'propose-button',
+                    'complex-auto-regen-kb-btn',
+                    'collapse-view-btn',
+                    'complex-reindex-btn',
+                    'regenerate-assistant-files',
+                    'view-toggle-btn',
+                    'instructions-mode-safe',
+                    'instructions-mode-permissive',
+                    'instructions-mode-custom',
+                    'instructions-mode-off',
+                    'instructions-regenerate',
+                    'instructions-copy-receipt',
+                    'btn-regenerate-kb'
+                );
+
+                for (const id of disableIds) {
+                    const el = document.getElementById(id);
+                    if (!el) continue;
+                    if (!('disabled' in el)) continue;
+
+                    const hadFlag = !!(el.dataset && el.dataset.disabledByExtension === '1');
+                    if (extensionDisabled) {
+                        // @ts-ignore
+                        if (!el.disabled) {
+                            // @ts-ignore
+                            el.disabled = true;
+                            if (el.dataset) el.dataset.disabledByExtension = '1';
+                        }
+                    } else {
+                        if (hadFlag) {
+                            const disabledByBusy = !!(el.dataset && el.dataset.disabledByBusy === '1');
+                            const disabledByAuth = !!(el.dataset && el.dataset.disabledByAuth === '1');
+                            if (!disabledByBusy && !disabledByAuth) {
+                                // @ts-ignore
+                                el.disabled = false;
+                            }
+                            if (el.dataset) delete el.dataset.disabledByExtension;
                         }
                     }
                 }
@@ -4633,6 +4732,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                         }
                     }
                 }
+
+                updateEnableToggleUi();
             } catch (e) {
                 console.error('[Panel] syncBusyUi failed:', e);
             }

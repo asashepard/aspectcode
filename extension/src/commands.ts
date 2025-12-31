@@ -20,6 +20,7 @@ export class AspectCodeCommands {
   private outputChannel: vscode.OutputChannel;
   private diagnostics: vscode.DiagnosticCollection;
   private state: AspectCodeState;
+  private currentOperationCts: vscode.CancellationTokenSource | null = null;
 
   constructor(context: vscode.ExtensionContext, state: AspectCodeState) {
     this.outputChannel = vscode.window.createOutputChannel('Aspect Code');
@@ -34,6 +35,34 @@ export class AspectCodeCommands {
       this.diagnostics,
       this.engineService
     );
+  }
+
+  /**
+   * Cancel any in-flight work started by this command set.
+   * Used by the global enable/disable switch.
+   */
+  cancelAllRunningWork(): void {
+    try {
+      this.currentOperationCts?.cancel();
+      this.currentOperationCts?.dispose();
+    } catch {
+      // ignore
+    } finally {
+      this.currentOperationCts = null;
+    }
+
+    try {
+      this.engineService.stopAllRunningProcesses();
+    } catch {
+      // ignore
+    }
+
+    // Ensure panel UI is not left stuck.
+    try {
+      this.state.update({ busy: false });
+    } catch {
+      // ignore
+    }
   }
 
   /**
@@ -207,6 +236,12 @@ export class AspectCodeCommands {
         title: 'Aspect Code: Scanning workspace...',
         cancellable: true
       }, async (progress, token) => {
+        // Allow programmatic cancellation (e.g., disable toggle) while still
+        // honoring the user-cancellable progress token.
+        this.currentOperationCts?.dispose();
+        this.currentOperationCts = new vscode.CancellationTokenSource();
+        token.onCancellationRequested(() => this.currentOperationCts?.cancel());
+
         const scanOptions = {
           categories: categories.length > 0 ? categories : undefined,
           rules: enabledRules.length > 0 && enabledRules[0] !== '*' ? enabledRules.join(',') : undefined,
@@ -214,7 +249,7 @@ export class AspectCodeCommands {
         };
         
         // Combine scanOptions with the engine service call
-        return await this.engineService.scanWorkspace(token);
+        return await this.engineService.scanWorkspace(this.currentOperationCts.token);
       });
 
       if (result.success && result.data) {
@@ -249,6 +284,10 @@ export class AspectCodeCommands {
       vscode.window.showErrorMessage(`Aspect Code scan failed: ${error}`);
       this.outputChannel.appendLine(`Scan error: ${error}`);
     }
+    finally {
+      this.currentOperationCts?.dispose();
+      this.currentOperationCts = null;
+    }
   }
 
   /**
@@ -276,7 +315,11 @@ export class AspectCodeCommands {
         title: 'Aspect Code: Scanning file...',
         cancellable: true
       }, async (progress, token) => {
-        return await this.engineService.scanActiveFile(token);
+        this.currentOperationCts?.dispose();
+        this.currentOperationCts = new vscode.CancellationTokenSource();
+        token.onCancellationRequested(() => this.currentOperationCts?.cancel());
+
+        return await this.engineService.scanActiveFile(this.currentOperationCts.token);
       });
 
       if (result.success && result.data) {
@@ -299,6 +342,10 @@ export class AspectCodeCommands {
     } catch (error) {
       vscode.window.showErrorMessage(`Aspect Code file scan failed: ${error}`);
       this.outputChannel.appendLine(`File scan error: ${error}`);
+    }
+    finally {
+      this.currentOperationCts?.dispose();
+      this.currentOperationCts = null;
     }
   }
 

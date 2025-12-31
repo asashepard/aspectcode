@@ -14,7 +14,8 @@ import { generateInstructionFiles, regenerateInstructionFilesOnly } from './assi
 import { getBaseUrl, hasApiKeyConfigured, isApiKeyBlocked, hasValidApiKey } from './http';
 import type { ScoreResult } from './scoring/scoreEngine';
 import { stopIgnoringGeneratedFilesCommand } from './services/gitignoreService';
-import { InstructionsMode, getAssistantsSettings, getInstructionsModeSetting, setInstructionsModeSetting, updateAspectSettings } from './services/aspectSettings';
+import { InstructionsMode, getAssistantsSettings, getInstructionsModeSetting, setInstructionsModeSetting, updateAspectSettings, getExtensionEnabledSetting, setExtensionEnabledSetting } from './services/aspectSettings';
+import { cancelAndResetAllInFlightWork } from './services/enablementCancellation';
 
 /**
  * Activate the new engine-based commands.
@@ -31,16 +32,78 @@ export function activateNewCommands(
   const codeActionProvider = new AspectCodeCodeActionProvider(commands);
   const promptGenerationService = new PromptGenerationService({ outputChannel: channel, state });
 
+  const getWorkspaceRoot = (): vscode.Uri | undefined => vscode.workspace.workspaceFolders?.[0]?.uri;
+
+  const isExtensionEnabled = async (): Promise<boolean> => {
+    const root = getWorkspaceRoot();
+    if (!root) return true;
+    try {
+      return await getExtensionEnabledSetting(root);
+    } catch {
+      return true;
+    }
+  };
+
+  const requireExtensionEnabled = async (): Promise<boolean> => {
+    if (await isExtensionEnabled()) return true;
+    void vscode.window
+      .showInformationMessage('Aspect Code is disabled.', 'Enable')
+      .then((sel) => {
+        if (sel === 'Enable') void vscode.commands.executeCommand('aspectcode.toggleExtensionEnabled');
+      });
+    return false;
+  };
+
   // Register commands
   context.subscriptions.push(
-    vscode.commands.registerCommand('aspectcode.scanWorkspace', () => commands.scanWorkspace()),
-    vscode.commands.registerCommand('aspectcode.scanActiveFile', () => commands.scanActiveFile()),
+    vscode.commands.registerCommand('aspectcode.toggleExtensionEnabled', async () => {
+      const root = getWorkspaceRoot();
+      if (!root) {
+        vscode.window.showErrorMessage('No workspace folder open');
+        return;
+      }
+
+      const enabled = await getExtensionEnabledSetting(root);
+      const nextEnabled = !enabled;
+
+      await setExtensionEnabledSetting(root, nextEnabled);
+
+      if (!nextEnabled) {
+        // Stop any in-flight work immediately.
+        cancelAndResetAllInFlightWork();
+        commands.cancelAllRunningWork();
+        // Best-effort: clear any stuck busy indicators.
+        state.update({ busy: false, error: undefined });
+      }
+
+      vscode.window.showInformationMessage(
+        nextEnabled ? 'Aspect Code enabled' : 'Aspect Code disabled'
+      );
+    }),
+    vscode.commands.registerCommand('aspectcode.scanWorkspace', async () => {
+      if (!(await requireExtensionEnabled())) return;
+      return commands.scanWorkspace();
+    }),
+    vscode.commands.registerCommand('aspectcode.scanActiveFile', async () => {
+      if (!(await requireExtensionEnabled())) return;
+      return commands.scanActiveFile();
+    }),
     // Auto-Fix commands temporarily disabled
     // vscode.commands.registerCommand('aspectcode.applyAutofix', (findings?: any) => commands.applyAutofix(findings)),
-    vscode.commands.registerCommand('aspectcode.openFinding', (finding: any) => commands.openFinding(finding)),
-    vscode.commands.registerCommand('aspectcode.insertSuppression', (finding: any) => commands.insertSuppression(finding)),
-    vscode.commands.registerCommand('aspectcode.configureRules', () => commands.configureRules()),
+    vscode.commands.registerCommand('aspectcode.openFinding', async (finding: any) => {
+      if (!(await requireExtensionEnabled())) return;
+      return commands.openFinding(finding);
+    }),
+    vscode.commands.registerCommand('aspectcode.insertSuppression', async (finding: any) => {
+      if (!(await requireExtensionEnabled())) return;
+      return commands.insertSuppression(finding);
+    }),
+    vscode.commands.registerCommand('aspectcode.configureRules', async () => {
+      if (!(await requireExtensionEnabled())) return;
+      return commands.configureRules();
+    }),
     vscode.commands.registerCommand('aspectcode.generatePrompt', async () => {
+      if (!(await requireExtensionEnabled())) return;
       if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
         vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
           if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
@@ -50,6 +113,7 @@ export function activateNewCommands(
       return await handleGeneratePrompt(promptGenerationService, state);
     }),
     vscode.commands.registerCommand('aspectcode.configureAssistants', async () => {
+      if (!(await requireExtensionEnabled())) return;
       if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
         vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
           if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
@@ -59,6 +123,7 @@ export function activateNewCommands(
       return await handleConfigureAssistants(context, state, commands, channel);
     }),
     vscode.commands.registerCommand('aspectcode.generateInstructionFiles', async () => {
+      if (!(await requireExtensionEnabled())) return;
       if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
         vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
           if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
@@ -68,6 +133,7 @@ export function activateNewCommands(
       return await handleGenerateInstructionFiles(state, commands, channel, context);
     }),
     vscode.commands.registerCommand('aspectcode.enableSafeMode', async () => {
+      if (!(await requireExtensionEnabled())) return;
       if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
         vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
           if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
@@ -77,6 +143,7 @@ export function activateNewCommands(
       return await handleSetInstructionMode('safe', channel);
     }),
     vscode.commands.registerCommand('aspectcode.enablePermissiveMode', async () => {
+      if (!(await requireExtensionEnabled())) return;
       if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
         vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
           if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
@@ -86,6 +153,7 @@ export function activateNewCommands(
       return await handleSetInstructionMode('permissive', channel);
     }),
     vscode.commands.registerCommand('aspectcode.enableCustomMode', async () => {
+      if (!(await requireExtensionEnabled())) return;
       if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
         vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
           if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
@@ -95,6 +163,7 @@ export function activateNewCommands(
       return await handleSetInstructionMode('custom', channel);
     }),
     vscode.commands.registerCommand('aspectcode.enableOffMode', async () => {
+      if (!(await requireExtensionEnabled())) return;
       if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
         vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
           if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
@@ -104,6 +173,7 @@ export function activateNewCommands(
       return await handleSetInstructionMode('off', channel);
     }),
     vscode.commands.registerCommand('aspectcode.editCustomInstructions', async () => {
+      if (!(await requireExtensionEnabled())) return;
       if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
         vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
           if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
@@ -113,9 +183,11 @@ export function activateNewCommands(
       return await handleEditCustomInstructions(channel);
     }),
     vscode.commands.registerCommand('aspectcode.copyKbReceiptPrompt', async () => {
+      if (!(await requireExtensionEnabled())) return;
       return await handleCopyKbReceiptPrompt(channel);
     }),
     vscode.commands.registerCommand('aspectcode.stopIgnoringGeneratedFiles', async () => {
+      if (!(await requireExtensionEnabled())) return;
       if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
         vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
           if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
@@ -169,10 +241,13 @@ export function activateNewCommands(
       if (!hasValidApiKey()) {
         return;
       }
-      const activeEditor = vscode.window.activeTextEditor;
-      if (activeEditor) {
-        commands.scanActiveFile();
-      }
+      void isExtensionEnabled().then((enabled) => {
+        if (!enabled) return;
+        const activeEditor = vscode.window.activeTextEditor;
+        if (activeEditor) {
+          commands.scanActiveFile();
+        }
+      });
     }, debounceMs);
   };
 
@@ -191,7 +266,10 @@ export function activateNewCommands(
       if (!hasValidApiKey()) {
         return;
       }
-      debouncedScan();
+      void isExtensionEnabled().then((enabled) => {
+        if (!enabled) return;
+        debouncedScan();
+      });
     }
     
     // Optional: Apply safe autofixes on save - feature temporarily disabled

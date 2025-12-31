@@ -49,6 +49,22 @@ export class AspectCodeEngineService {
   }
 
   /**
+   * Best-effort: immediately stop any currently running engine processes.
+   * attach to the engine are cancelled.
+   */
+  stopAllRunningProcesses(): void {
+    for (const proc of Array.from(this.runningProcesses)) {
+      try {
+        proc.kill();
+      } catch {
+        // ignore
+      } finally {
+        this.runningProcesses.delete(proc);
+      }
+    }
+  }
+
+  /**
    * Get the Python interpreter path, preferring Python extension if available.
    */
   private async getPythonPath(): Promise<string> {

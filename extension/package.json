@@ -45,6 +45,10 @@
         "title": "Aspect Code: Show Panel"
       },
       {
+        "command": "aspectcode.toggleExtensionEnabled",
+        "title": "Aspect Code: Toggle Enabled"
+      },
+      {
         "command": "aspectcode.scanWorkspace",
         "title": "Aspect Code: Scan Workspace",
         "icon": "$(search)"

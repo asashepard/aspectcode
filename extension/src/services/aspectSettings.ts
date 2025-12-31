@@ -65,6 +65,12 @@ export interface AspectSettings {
    * Instructions mode: 'safe' or 'permissive'
    */
   instructionsMode?: InstructionsMode;
+
+  /**
+   * Master enable/disable switch for the extension.
+   * When false, all actions should be blocked and any running work cancelled.
+   */
+  extensionEnabled?: boolean;
 }
 
 const SETTINGS_FILENAME = '.settings.json';
@@ -166,7 +172,8 @@ export async function updateAspectSettings(
       ...update.assistants
     },
     autoRegenerateKb: update.autoRegenerateKb ?? existing.autoRegenerateKb,
-    instructionsMode: update.instructionsMode ?? existing.instructionsMode
+    instructionsMode: update.instructionsMode ?? existing.instructionsMode,
+    extensionEnabled: update.extensionEnabled ?? existing.extensionEnabled
   };
   
   await writeAspectSettings(workspaceRoot, merged);
@@ -283,6 +290,21 @@ export async function setAutoRegenerateKbSetting(
   mode: AutoRegenerateKbMode
 ): Promise<void> {
   await updateAspectSettings(workspaceRoot, { autoRegenerateKb: mode });
+}
+
+export async function getExtensionEnabledSetting(
+  workspaceRoot: vscode.Uri
+): Promise<boolean> {
+  const settings = await readAspectSettings(workspaceRoot);
+  // Default enabled
+  return settings.extensionEnabled !== false;
+}
+
+export async function setExtensionEnabledSetting(
+  workspaceRoot: vscode.Uri,
+  enabled: boolean
+): Promise<void> {
+  await updateAspectSettings(workspaceRoot, { extensionEnabled: enabled });
 }
 
 export async function getAssistantsSettings(

@@ -12,7 +12,8 @@ import Parser from 'web-tree-sitter';
 import { activateNewCommands } from './newCommandsIntegration';
 import { WorkspaceFingerprint } from './services/WorkspaceFingerprint';
 import { computeImpactSummaryForFile } from './assistants/kb';
-import { getAssistantsSettings, getAutoRegenerateKbSetting, migrateAspectSettingsFromVSCode, readAspectSettings, setAutoRegenerateKbSetting } from './services/aspectSettings';
+import { getAssistantsSettings, getAutoRegenerateKbSetting, migrateAspectSettingsFromVSCode, readAspectSettings, setAutoRegenerateKbSetting, getExtensionEnabledSetting } from './services/aspectSettings';
+import { getEnablementCancellationToken } from './services/enablementCancellation';
 
 let examineOnSave = false;
 const diag = vscode.languages.createDiagnosticCollection('aspectcode');
@@ -1308,6 +1309,19 @@ async function examineFullRepository(
     return;
   }
 
+  // Respect the project-local enable/disable switch.
+  try {
+    const enabled = await getExtensionEnabledSetting(vscode.Uri.file(root));
+    if (!enabled) {
+      if (state) state.update({ busy: false });
+      return;
+    }
+  } catch {
+    // If settings read fails, default to enabled.
+  }
+
+  const enablementToken = getEnablementCancellationToken();
+
   const apiUrl = getBaseUrl();
 
   try {
@@ -1327,6 +1341,9 @@ async function examineFullRepository(
     };
 
     await vscode.window.withProgress(progressOptions, async (progress) => {
+      if (enablementToken.isCancellationRequested) {
+        throw new Error('Aspect Code disabled');
+      }
       // Phase 1: Preparing validation (10%)
       progress.report({ increment: 0, message: 'Preparing examination...' });
       sendProgressToPanel(state, 'examination', 10, 'Preparing examination...');
@@ -1368,10 +1385,16 @@ async function examineFullRepository(
       let skippedLarge = 0;
       
       for (let i = 0; i < sourceFiles.length && totalSize < maxTotalSize; i += BATCH_SIZE) {
+        if (enablementToken.isCancellationRequested) {
+          throw new Error('Aspect Code disabled');
+        }
         const batch = sourceFiles.slice(i, i + BATCH_SIZE);
         
         const batchResults = await Promise.allSettled(
           batch.map(async (filePath) => {
+            if (enablementToken.isCancellationRequested) {
+              return { skipped: true, size: 0, path: filePath };
+            }
             const uri = vscode.Uri.file(filePath);
             const stat = await vscode.workspace.fs.stat(uri);
             
@@ -1395,6 +1418,10 @@ async function examineFullRepository(
             };
           })
         );
+
+        if (enablementToken.isCancellationRequested) {
+          throw new Error('Aspect Code disabled');
+        }
         
         // Collect results
         for (const result of batchResults) {
@@ -2393,6 +2420,16 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('aspectcode.examine', async (opts?: { modes?: string[] }) => {
       try {
+        const rootUri = vscode.workspace.workspaceFolders?.[0]?.uri;
+        if (rootUri) {
+          const enabled = await getExtensionEnabledSetting(rootUri);
+          if (!enabled) {
+            vscode.window.showInformationMessage('Aspect Code is disabled.', 'Enable').then((sel) => {
+              if (sel === 'Enable') void vscode.commands.executeCommand('aspectcode.toggleExtensionEnabled');
+            });
+            return;
+          }
+        }
         if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
           vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
             if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
@@ -2440,6 +2477,16 @@ export async function activate(context: vscode.ExtensionContext) {
   // Used by the panel “Regenerate KB” button.
   context.subscriptions.push(
     vscode.commands.registerCommand('aspectcode.generateKB', async () => {
+      const rootUri = vscode.workspace.workspaceFolders?.[0]?.uri;
+      if (rootUri) {
+        const enabled = await getExtensionEnabledSetting(rootUri);
+        if (!enabled) {
+          vscode.window.showInformationMessage('Aspect Code is disabled.', 'Enable').then((sel) => {
+            if (sel === 'Enable') void vscode.commands.executeCommand('aspectcode.toggleExtensionEnabled');
+          });
+          return;
+        }
+      }
       if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
         vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
           if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
