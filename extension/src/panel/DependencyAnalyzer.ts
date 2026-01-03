@@ -113,6 +113,7 @@ export class DependencyAnalyzer {
     onProgress?: DependencyProgressCallback
   ): Promise<DependencyLink[]> {
     const links: DependencyLink[] = [];
+    const linkIndex = new Map<string, DependencyLink>();
     const startTime = Date.now();
     
     // Load and cache file contents (parallelized for performance)
@@ -148,15 +149,25 @@ export class DependencyAnalyzer {
         
         // Skip self-references (file importing itself)
         if (resolvedTarget && resolvedTarget !== file) {
-          links.push({
-            source: file,
-            target: resolvedTarget,
-            type: 'import',
-            strength: this.calculateImportStrength(imp),
-            symbols: imp.symbols,
-            lines: [imp.line],
-            bidirectional: false
-          });
+          const key = `import|${file}|${resolvedTarget}`;
+          const existing = linkIndex.get(key);
+          if (existing) {
+            existing.symbols = [...new Set([...existing.symbols, ...imp.symbols])];
+            existing.lines = [...new Set([...existing.lines, imp.line])].sort((a, b) => a - b);
+            existing.strength = Math.min(1.0, Math.max(existing.strength, this.calculateImportStrength(imp)));
+          } else {
+            const link: DependencyLink = {
+              source: file,
+              target: resolvedTarget,
+              type: 'import',
+              strength: this.calculateImportStrength(imp),
+              symbols: [...new Set(imp.symbols)],
+              lines: [imp.line],
+              bidirectional: false
+            };
+            links.push(link);
+            linkIndex.set(key, link);
+          }
         }
       }
       
@@ -166,16 +177,19 @@ export class DependencyAnalyzer {
           const resolvedTarget = this.resolveCallTargetFast(call.callee, file);
           // Skip self-references
           if (resolvedTarget && resolvedTarget !== file) {
-            const existing = links.find(l => 
-              l.source === file && l.target === resolvedTarget && l.type === 'call'
-            );
+            const callKey = `call|${file}|${resolvedTarget}`;
+            const existing = linkIndex.get(callKey);
             
             if (existing) {
-              existing.symbols.push(call.callee);
-              existing.lines.push(call.line);
+              if (!existing.symbols.includes(call.callee)) {
+                existing.symbols.push(call.callee);
+              }
+              if (!existing.lines.includes(call.line)) {
+                existing.lines.push(call.line);
+              }
               existing.strength = Math.min(1.0, existing.strength + 0.1);
             } else {
-              links.push({
+              const link: DependencyLink = {
                 source: file,
                 target: resolvedTarget,
                 type: 'call',
@@ -183,7 +197,9 @@ export class DependencyAnalyzer {
                 symbols: [call.callee],
                 lines: [call.line],
                 bidirectional: false
-              });
+              };
+              links.push(link);
+              linkIndex.set(callKey, link);
             }
           }
         }
@@ -240,6 +256,11 @@ export class DependencyAnalyzer {
       else if (extension === '.cs') {
         const csharpImports = this.parseCSharpImports(line, lineNum);
         imports.push(...csharpImports);
+      }
+      // Go imports
+      else if (extension === '.go') {
+        const goImports = this.parseGoImports(line, lineNum);
+        imports.push(...goImports);
       }
     }
     
@@ -314,10 +335,15 @@ export class DependencyAnalyzer {
         .filter((s) => s !== '(' && s !== ')' && s !== '[' && s !== ']' && s !== '{' && s !== '}');
     };
     
-    // from module import symbols
-    const fromImportMatch = line.match(/from\s+([\w.]+)\s+import\s+(.+)/);
+    // from module import symbols (including relative imports like `from .module` or `from ..pkg.mod`)
+    const fromImportMatch = line.match(/from\s+(\.{0,3}[\w.]*?)\s+import\s+(.+)/);
     if (fromImportMatch) {
       let module = fromImportMatch[1];
+      
+      // Skip if module is empty (malformed)
+      if (!module || module === '') {
+        return imports;
+      }
       const symbolsStr = fromImportMatch[2];
       const symbols = cleanSymbolsList(symbolsStr);
       
@@ -354,44 +380,55 @@ export class DependencyAnalyzer {
           raw: line
         });
       }
+
+      // Important: don't also treat this as a plain "import ..." statement.
+      // Otherwise lines like `from .settings import settings, DATABASE_URL` get mis-parsed
+      // as importing a module named `settings` (the first imported symbol), creating bogus edges.
+      return imports;
     }
     
     // import module
-    const importMatch = line.match(/import\s+([\w.]+)(?:\s+as\s+\w+)?/);
-    if (importMatch) {
-      let module = importMatch[1];
-      
-      // Handle package imports
-      if (module.includes('.')) {
-        const parts = module.split('.');
-        const lastPart = parts[parts.length - 1];
-        
-        imports.push({
-          module: module,
-          symbols: [module],
-          isDefault: true,
-          line: lineNum,
-          raw: line
-        });
-        
-        // Also try just the last component
-        if (lastPart !== module) {
-          imports.push({
-            module: lastPart,
-            symbols: [lastPart],
-            isDefault: true,
-            line: lineNum,
-            raw: line
-          });
+    // Skip lines that begin with `from ... import ...` (handled above).
+    // Also skip if the word "import" doesn't begin the statement.
+    if (!line.startsWith('from ')) {
+      const importMatch = line.match(/^import\s+(.+)$/);
+      if (importMatch) {
+        const modulesStr = importMatch[1];
+        const modules = cleanSymbolsList(modulesStr);
+        for (const module of modules) {
+          // Handle package imports
+          if (module.includes('.')) {
+            const parts = module.split('.');
+            const lastPart = parts[parts.length - 1];
+            
+            imports.push({
+              module: module,
+              symbols: [module],
+              isDefault: true,
+              line: lineNum,
+              raw: line
+            });
+            
+            // Also try just the last component
+            if (lastPart !== module) {
+              imports.push({
+                module: lastPart,
+                symbols: [lastPart],
+                isDefault: true,
+                line: lineNum,
+                raw: line
+              });
+            }
+          } else {
+            imports.push({
+              module,
+              symbols: [module],
+              isDefault: true,
+              line: lineNum,
+              raw: line
+            });
+          }
         }
-      } else {
-        imports.push({
-          module,
-          symbols: [module],
-          isDefault: true,
-          line: lineNum,
-          raw: line
-        });
       }
     }
     
@@ -400,51 +437,148 @@ export class DependencyAnalyzer {
 
   /**
    * Parse JavaScript/TypeScript import statements
+   * Handles: named imports, default imports, namespace imports, side-effect imports,
+   * type imports, mixed imports, re-exports, and require() calls.
    */
   private parseJavaScriptImports(line: string, lineNum: number): ImportStatement[] {
     const imports: ImportStatement[] = [];
     
-    // import { symbols } from 'module'
-    const namedImportMatch = line.match(/import\s*\{\s*([^}]+)\s*\}\s*from\s*['"]([^'"]+)['"]/);
-    if (namedImportMatch) {
-      const symbolsStr = namedImportMatch[1];
-      const module = namedImportMatch[2];
-      const symbols = symbolsStr.split(',').map(s => s.trim().split(' as ')[0]);
-      
+    // Helper to extract module from quotes
+    const extractModule = (str: string): string | null => {
+      const match = str.match(/['"]([^'"]+)['"]/);
+      return match ? match[1] : null;
+    };
+    
+    // Helper to clean symbol names (remove 'as alias', 'type' prefix, whitespace)
+    const cleanSymbols = (symbolsStr: string): string[] => {
+      return symbolsStr
+        .split(',')
+        .map(s => s.trim())
+        .map(s => s.replace(/^type\s+/, '')) // Remove 'type' prefix
+        .map(s => s.split(/\s+as\s+/)[0].trim()) // Remove alias
+        .filter(s => s.length > 0 && s !== 'type');
+    };
+    
+    // Side-effect import: import 'module'
+    const sideEffectMatch = line.match(/^\s*import\s+['"]([^'"]+)['"]\s*;?\s*$/);
+    if (sideEffectMatch) {
       imports.push({
-        module,
-        symbols,
+        module: sideEffectMatch[1],
+        symbols: ['*'],
         isDefault: false,
         line: lineNum,
         raw: line
       });
+      return imports;
     }
     
-    // import defaultSymbol from 'module'
-    const defaultImportMatch = line.match(/import\s+(\w+)\s+from\s*['"]([^'"]+)['"]/);
-    if (defaultImportMatch) {
-      const symbol = defaultImportMatch[1];
-      const module = defaultImportMatch[2];
+    // Re-exports: export { x } from 'module' or export * from 'module'
+    const reExportNamedMatch = line.match(/^\s*export\s*\{\s*([^}]+)\s*\}\s*from\s*['"]([^'"]+)['"]/);
+    if (reExportNamedMatch) {
+      imports.push({
+        module: reExportNamedMatch[2],
+        symbols: cleanSymbols(reExportNamedMatch[1]),
+        isDefault: false,
+        line: lineNum,
+        raw: line
+      });
+      return imports;
+    }
+    
+    const reExportAllMatch = line.match(/^\s*export\s*\*\s*(?:as\s+\w+\s*)?from\s*['"]([^'"]+)['"]/);
+    if (reExportAllMatch) {
+      imports.push({
+        module: reExportAllMatch[1],
+        symbols: ['*'],
+        isDefault: false,
+        line: lineNum,
+        raw: line
+      });
+      return imports;
+    }
+    
+    // Combined import: import Default, { named } from 'module'
+    // or: import Default, * as ns from 'module'
+    const combinedMatch = line.match(/^\s*import\s+(?:type\s+)?(\w+)\s*,\s*(?:\{\s*([^}]+)\s*\}|\*\s*as\s+(\w+))\s*from\s*['"]([^'"]+)['"]/);
+    if (combinedMatch) {
+      const defaultSymbol = combinedMatch[1];
+      const namedSymbols = combinedMatch[2] ? cleanSymbols(combinedMatch[2]) : [];
+      const namespaceSymbol = combinedMatch[3];
+      const module = combinedMatch[4];
+      
+      const allSymbols = [defaultSymbol, ...namedSymbols];
+      if (namespaceSymbol) allSymbols.push(namespaceSymbol);
       
       imports.push({
         module,
-        symbols: [symbol],
+        symbols: allSymbols,
         isDefault: true,
         line: lineNum,
         raw: line
       });
+      return imports;
     }
     
-    // require() calls
+    // Namespace import: import * as name from 'module'
+    const namespaceMatch = line.match(/^\s*import\s+(?:type\s+)?\*\s*as\s+(\w+)\s*from\s*['"]([^'"]+)['"]/);
+    if (namespaceMatch) {
+      imports.push({
+        module: namespaceMatch[2],
+        symbols: [namespaceMatch[1]],
+        isDefault: true,
+        line: lineNum,
+        raw: line
+      });
+      return imports;
+    }
+    
+    // Named import: import { a, b as c } from 'module' (including import type)
+    const namedImportMatch = line.match(/^\s*import\s+(?:type\s+)?\{\s*([^}]+)\s*\}\s*from\s*['"]([^'"]+)['"]/);
+    if (namedImportMatch) {
+      imports.push({
+        module: namedImportMatch[2],
+        symbols: cleanSymbols(namedImportMatch[1]),
+        isDefault: false,
+        line: lineNum,
+        raw: line
+      });
+      return imports;
+    }
+    
+    // Default import: import name from 'module' (including import type)
+    const defaultImportMatch = line.match(/^\s*import\s+(?:type\s+)?(\w+)\s+from\s*['"]([^'"]+)['"]/);
+    if (defaultImportMatch) {
+      imports.push({
+        module: defaultImportMatch[2],
+        symbols: [defaultImportMatch[1]],
+        isDefault: true,
+        line: lineNum,
+        raw: line
+      });
+      return imports;
+    }
+    
+    // require() calls: const x = require('module') or const { a, b } = require('module')
     const requireMatch = line.match(/(?:const|let|var)\s+(?:\{\s*([^}]+)\s*\}|(\w+))\s*=\s*require\s*\(\s*['"]([^'"]+)['"]\s*\)/);
     if (requireMatch) {
-      const symbols = requireMatch[1] ? requireMatch[1].split(',').map(s => s.trim()) : [requireMatch[2]];
-      const module = requireMatch[3];
-      
+      const symbols = requireMatch[1] ? cleanSymbols(requireMatch[1]) : [requireMatch[2]];
       imports.push({
-        module,
+        module: requireMatch[3],
         symbols,
         isDefault: !requireMatch[1],
+        line: lineNum,
+        raw: line
+      });
+      return imports;
+    }
+    
+    // Dynamic import: import('module') - just detect the dependency
+    const dynamicImportMatch = line.match(/import\s*\(\s*['"]([^'"]+)['"]\s*\)/);
+    if (dynamicImportMatch) {
+      imports.push({
+        module: dynamicImportMatch[1],
+        symbols: ['*'],
+        isDefault: false,
         line: lineNum,
         raw: line
       });
@@ -478,18 +612,92 @@ export class DependencyAnalyzer {
 
   /**
    * Parse C# using statements
+   * Handles: using Namespace;, using static Namespace.Type;, using Alias = Namespace.Type;
    */
   private parseCSharpImports(line: string, lineNum: number): ImportStatement[] {
     const imports: ImportStatement[] = [];
     
-    const usingMatch = line.match(/using\s+([\w.]+);/);
+    // using Alias = Namespace.Type;
+    const aliasMatch = line.match(/^\s*using\s+(\w+)\s*=\s*([\w.]+)\s*;/);
+    if (aliasMatch) {
+      const alias = aliasMatch[1];
+      const module = aliasMatch[2];
+      imports.push({
+        module,
+        symbols: [alias],
+        isDefault: true,
+        line: lineNum,
+        raw: line
+      });
+      return imports;
+    }
+    
+    // using static Namespace.Type;
+    const staticMatch = line.match(/^\s*using\s+static\s+([\w.]+)\s*;/);
+    if (staticMatch) {
+      const module = staticMatch[1];
+      imports.push({
+        module,
+        symbols: ['*'],
+        isDefault: false,
+        line: lineNum,
+        raw: line
+      });
+      return imports;
+    }
+    
+    // using Namespace; or using Namespace.SubNamespace;
+    const usingMatch = line.match(/^\s*using\s+([\w.]+)\s*;/);
     if (usingMatch) {
       const module = usingMatch[1];
-      
       imports.push({
         module,
         symbols: [module.split('.').pop() || module],
         isDefault: true,
+        line: lineNum,
+        raw: line
+      });
+    }
+    
+    return imports;
+  }
+
+  /**
+   * Parse Go import statements
+   * Handles: import "pkg", import alias "pkg", import ( "pkg1" \n "pkg2" )
+   */
+  private parseGoImports(line: string, lineNum: number): ImportStatement[] {
+    const imports: ImportStatement[] = [];
+    
+    // Single import: import "pkg" or import alias "pkg" or import . "pkg" or import _ "pkg"
+    const singleImportMatch = line.match(/^\s*import\s+(?:([\w._]+)\s+)?"([^"]+)"/);
+    if (singleImportMatch) {
+      const alias = singleImportMatch[1] || '';
+      const module = singleImportMatch[2];
+      const pkgName = module.split('/').pop() || module;
+      
+      imports.push({
+        module,
+        symbols: alias === '.' ? ['*'] : alias === '_' ? [] : [alias || pkgName],
+        isDefault: alias !== '.' && alias !== '_',
+        line: lineNum,
+        raw: line
+      });
+      return imports;
+    }
+    
+    // Line inside import block: "pkg" or alias "pkg"
+    // (import blocks are handled line-by-line, so each line inside gets parsed separately)
+    const blockLineMatch = line.match(/^\s*(?:([\w._]+)\s+)?"([^"]+)"\s*$/);
+    if (blockLineMatch) {
+      const alias = blockLineMatch[1] || '';
+      const module = blockLineMatch[2];
+      const pkgName = module.split('/').pop() || module;
+      
+      imports.push({
+        module,
+        symbols: alias === '.' ? ['*'] : alias === '_' ? [] : [alias || pkgName],
+        isDefault: alias !== '.' && alias !== '_',
         line: lineNum,
         raw: line
       });
@@ -666,10 +874,28 @@ export class DependencyAnalyzer {
     }
     
     const sourceDir = path.dirname(sourceFile);
-    const extension = path.extname(sourceFile);
+    const extension = path.extname(sourceFile).toLowerCase();
     const { byBasename, byNormalizedPath, normalizedPathSet, byPackagePath } = this.fileIndex;
 
+    const allowedExtensionsForSource = (sourceExt: string): Set<string> => {
+      if (sourceExt === '.py') return new Set(['.py']);
+      if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(sourceExt)) {
+        return new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs']);
+      }
+      if (sourceExt === '.java') return new Set(['.java']);
+      if (sourceExt === '.cs') return new Set(['.cs']);
+      if (sourceExt === '.go') return new Set(['.go']);
+      return new Set();
+    };
+
+    const allowedTargetExts = allowedExtensionsForSource(extension);
+    const filterByAllowedExts = (candidates: string[]): string[] => {
+      if (allowedTargetExts.size === 0) return candidates;
+      return candidates.filter((c) => allowedTargetExts.has(path.extname(c).toLowerCase()));
+    };
+
     const chooseBestCandidate = (candidates: string[]): string | null => {
+      candidates = filterByAllowedExts(candidates);
       if (candidates.length === 0) return null;
       if (candidates.length === 1) return candidates[0];
 
@@ -681,7 +907,7 @@ export class DependencyAnalyzer {
       }
 
       // Prefer matching extension (when present)
-      const sameExt = candidates.filter((c) => path.extname(c).toLowerCase() === extension.toLowerCase());
+      const sameExt = candidates.filter((c) => path.extname(c).toLowerCase() === extension);
       if (sameExt.length === 1) return sameExt[0];
       if (sameExt.length > 1) candidates = sameExt;
 
@@ -711,13 +937,41 @@ export class DependencyAnalyzer {
     
     // Try relative path resolution first (O(1) lookup)
     for (const moduleVariant of moduleVariants) {
-      const candidates = [
-        path.resolve(sourceDir, moduleVariant + extension),
-        path.resolve(sourceDir, moduleVariant, 'index' + extension),
-        path.resolve(sourceDir, moduleVariant + '.py'),
-        path.resolve(sourceDir, moduleVariant + '.ts'),
-        path.resolve(sourceDir, moduleVariant + '.js'),
-      ];
+      const candidates: string[] = [];
+
+      if (extension === '.py') {
+        candidates.push(
+          path.resolve(sourceDir, moduleVariant + '.py'),
+          path.resolve(sourceDir, moduleVariant, '__init__.py')
+        );
+      } else if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(extension)) {
+        candidates.push(
+          path.resolve(sourceDir, moduleVariant + '.ts'),
+          path.resolve(sourceDir, moduleVariant + '.tsx'),
+          path.resolve(sourceDir, moduleVariant + '.js'),
+          path.resolve(sourceDir, moduleVariant + '.jsx'),
+          path.resolve(sourceDir, moduleVariant + '.mjs'),
+          path.resolve(sourceDir, moduleVariant + '.cjs'),
+          path.resolve(sourceDir, moduleVariant, 'index.ts'),
+          path.resolve(sourceDir, moduleVariant, 'index.tsx'),
+          path.resolve(sourceDir, moduleVariant, 'index.js'),
+          path.resolve(sourceDir, moduleVariant, 'index.jsx')
+        );
+      } else if (extension === '.go') {
+        // Go imports are package paths; try to find matching .go files
+        // Go packages are directories, so look for any .go file in a matching dir
+        const pkgName = moduleVariant.split('/').pop() || moduleVariant;
+        candidates.push(
+          path.resolve(sourceDir, moduleVariant + '.go'),
+          path.resolve(sourceDir, pkgName + '.go'),
+          path.resolve(sourceDir, moduleVariant, pkgName + '.go')
+        );
+      } else {
+        candidates.push(
+          path.resolve(sourceDir, moduleVariant + extension),
+          path.resolve(sourceDir, moduleVariant, 'index' + extension)
+        );
+      }
       
       for (const candidate of candidates) {
         const normalized = path.normalize(candidate);
@@ -734,30 +988,8 @@ export class DependencyAnalyzer {
     for (const moduleVariant of moduleVariants) {
       const filesWithBasename = byBasename.get(moduleVariant.toLowerCase());
       if (filesWithBasename && filesWithBasename.length > 0) {
-        // If only one match, return it
-        if (filesWithBasename.length === 1) {
-          return filesWithBasename[0];
-        }
-        
-        // Multiple matches: prefer files in same directory or package
-        for (const file of filesWithBasename) {
-          if (path.dirname(file) === sourceDir) {
-            return file;
-          }
-        }
-        
-        // For package imports, prefer matching package structure
-        if (module.includes('.')) {
-          const parts = module.split('.');
-          for (const file of filesWithBasename) {
-            if (file.includes(parts[0])) {
-              return file;
-            }
-          }
-        }
-        
-        // Return first match as fallback
-        return filesWithBasename[0];
+        const chosen = chooseBestCandidate(filesWithBasename);
+        if (chosen) return chosen;
       }
     }
 
