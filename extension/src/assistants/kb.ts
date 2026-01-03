@@ -426,15 +426,11 @@ async function generateArchitectureFile(
     const findings = state.s.findings;
 
     // Build finding counts per file for Orgalion-style hotspot ranking
-    const findingCounts = new Map<string, { total: number; critical: number }>();
+    // Note: findings are used as a lightweight "friction" signal; severity is not used.
+    const findingCounts = new Map<string, number>();
     for (const finding of findings) {
       if (classifyFile(finding.file, workspaceRoot.fsPath) !== 'app') continue;
-      if (!findingCounts.has(finding.file)) {
-        findingCounts.set(finding.file, { total: 0, critical: 0 });
-      }
-      const counts = findingCounts.get(finding.file)!;
-      counts.total++;
-      if (finding.severity === 'error') counts.critical++;
+      findingCounts.set(finding.file, (findingCounts.get(finding.file) || 0) + 1);
     }
 
     // ============================================================
@@ -444,16 +440,15 @@ async function generateArchitectureFile(
     const hubs = Array.from(depData.entries())
       .filter(([file]) => isStructuralAppFile(file, workspaceRoot.fsPath))
       .map(([file, info]) => {
-        const fc = findingCounts.get(file) || { total: 0, critical: 0 };
         const depScore = info.inDegree + info.outDegree;
-        const hotspotScore = (depScore * 2) + fc.total;
+        const fc = findingCounts.get(file) || 0;
+        const hotspotScore = (depScore * 2) + fc;
         return {
           file,
           inDegree: info.inDegree,
           outDegree: info.outDegree,
           totalDegree: depScore,
-          findings: fc.total,
-          criticalFindings: fc.critical,
+          findings: fc,
           hotspotScore
         };
       })
@@ -466,8 +461,8 @@ async function generateArchitectureFile(
       content += '> **These files are architectural load-bearing walls.**\n';
       content += '> Modify with extreme caution. Do not change signatures without checking `map.md`.\n\n';
       
-      content += '| Rank | File | Imports | Imported By | Issues | Risk |\n';
-      content += '|------|------|---------|-------------|--------|------|\n';
+      content += '| Rank | File | Imports | Imported By | Risk |\n';
+      content += '|------|------|---------|-------------|------|\n';
       
       for (let i = 0; i < hubs.length; i++) {
         const hub = hubs[i];
@@ -479,9 +474,9 @@ async function generateArchitectureFile(
             .filter(l => classifyFile(l.source, workspaceRoot.fsPath) === 'app'),
           l => l.source
         ).length;
-        const risk = appImportCount > 8 || hub.criticalFindings > 0 ? '🔴 High' : 
+        const risk = appImportCount > 8 ? '🔴 High' :
                      appImportCount > 4 || hub.findings > 3 ? '🟡 Medium' : '🟢 Low';
-        content += `| ${i + 1} | \`${relPath}\` | ${hub.outDegree} | ${appImportCount} | ${hub.findings} | ${risk} |\n`;
+        content += `| ${i + 1} | \`${relPath}\` | ${hub.outDegree} | ${appImportCount} | ${risk} |\n`;
       }
       content += '\n';
 

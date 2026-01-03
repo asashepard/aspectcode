@@ -312,10 +312,10 @@ _Read this first. Describes the project layout and "Do Not Break" zones._
 > **These files are architectural load-bearing walls.**
 > Modify with extreme caution. Do not change signatures without checking \`map.md\`.
 
-| Rank | File | Imports | Imported By | Issues | Risk |
-|------|------|---------|-------------|--------|------|
-| 1 | \`src/core/engine.ts\` | 8 | 12 | 2 | 🔴 High |
-| 2 | \`src/utils/helpers.ts\` | 2 | 8 | 0 | 🟡 Medium |
+| Rank | File | Imports | Imported By | Risk |
+|------|------|---------|-------------|------|
+| 1 | \`src/core/engine.ts\` | 8 | 12 | 🔴 High |
+| 2 | \`src/utils/helpers.ts\` | 2 | 8 | 🟡 Medium |
 
 ### Hub Details & Blast Radius
 

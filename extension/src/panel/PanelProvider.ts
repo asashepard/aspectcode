@@ -2197,7 +2197,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         }
 
         .instructions-regenerate-btn {
-            border-left: 1px solid var(--vscode-panel-border);
             padding: 0 6px;
             height: 24px;
             display: inline-flex;
@@ -2208,7 +2207,14 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         .instructions-icon-btn {
             width: 28px;
             padding: 0;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
             text-align: center;
+        }
+
+        .instructions-icon-btn .action-icon {
+            display: block;
         }
 
         #simple-enable-toggle-btn {
@@ -3974,17 +3980,14 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             <div class="simple-edit-instructions" id="simple-edit-instructions" role="button" tabindex="0" title="Edit .aspect/instructions.md">edit instructions</div>
         </div>
         <div class="simple-view-buttons">
-            <button id="simple-generate-btn" class="generate-instructions-btn" title="Generate AI instruction files" style="display: none;">
-                <svg class="action-icon" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5">
-                    <path d="M12 5v14M5 12h14"/>
-                </svg>
-            </button>
+            <!-- TEMPORARILY DISABLED: Plan with Structure button
             <button id="simple-propose-btn" class="action-button icon-only" title="Plan with Structure">
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M12 20h9"></path>
                     <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
                 </svg>
             </button>
+            -->
             <button id="simple-auto-regen-kb-btn" class="action-button icon-only" title="KB auto-regeneration: —">
                 <svg class="action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                     <circle cx="12" cy="12" r="9"/>
@@ -3992,6 +3995,12 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 </svg>
             </button>
             <span id="simple-auto-regen-kb-text" class="view-toggle-count">KB: —</span>
+            <!-- Orange + button replaces reindex button position when active -->
+            <button id="simple-generate-btn" class="generate-instructions-btn" title="Generate AI instruction files" style="display: none;">
+                <svg class="action-icon" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <path d="M12 5v14M5 12h14"/>
+                </svg>
+            </button>
             <button id="simple-reindex-btn" class="action-button icon-only" title="Rebuild analysis (clear caches)">
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
@@ -4022,11 +4031,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                         <option value="3d">3D Overview</option>
                     </select>
                     -->
-                    <button id="generate-instructions-btn" class="generate-instructions-btn" title="Generate AI instruction files" style="display: none;">
-                        <svg class="action-icon" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5">
-                            <path d="M12 5v14M5 12h14"/>
-                        </svg>
-                    </button>
                     <!-- TEMPORARILY DISABLED: Align button (ALIGNMENTS.json feature)
                     <button id="align-button" class="action-button icon-only" title="Align - Report AI issue" style="display: none;">
                         <svg class="action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
@@ -4045,6 +4049,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                         </svg>
                     </button>
                     -->
+                    <!-- TEMPORARILY DISABLED: Plan with Structure button
                     <div class="prompt-action-slot" id="prompt-action-slot" title="Plan with Structure">
                         <button id="propose-button" class="action-button icon-only" title="Plan with Structure">
                             <svg class="action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
@@ -4060,6 +4065,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                             </svg>
                         </div>
                     </div>
+                    -->
                     <button id="complex-auto-regen-kb-btn" class="action-button icon-only" title="KB auto-regeneration: —">
                         <svg class="action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                             <circle cx="12" cy="12" r="9"/>
@@ -4077,6 +4083,12 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                             </button>
                         </div>
                     </div>
+                    <!-- Orange + button replaces reindex button position when active -->
+                    <button id="generate-instructions-btn" class="generate-instructions-btn" title="Generate AI instruction files" style="display: none;">
+                        <svg class="action-icon" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5">
+                            <path d="M12 5v14M5 12h14"/>
+                        </svg>
+                    </button>
                     <button class="action-button icon-only" id="complex-reindex-btn" title="Rebuild analysis (clear caches)">
                         <svg class="action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
@@ -4144,7 +4156,12 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                         <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
                     </svg>
                 </button>
-                <button id="instructions-copy-receipt" class="instructions-mode-btn instructions-icon-btn" type="button" title="Copy KB receipt prompt">⧉</button>
+                <button id="instructions-copy-receipt" class="instructions-mode-btn instructions-icon-btn" type="button" title="Copy KB receipt prompt">
+                    <svg class="action-icon" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                </button>
                 <button id="simple-enable-toggle-btn" class="instructions-mode-btn instructions-icon-btn" type="button" title="Disable Aspect Code">⏻</button>
                 <button id="instructions-collapse" class="instructions-mode-btn instructions-icon-btn" type="button" title="Hide instruction bar">−</button>
             </div>
@@ -4285,14 +4302,20 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         // Simple view button handlers
         document.getElementById('simple-generate-btn').addEventListener('click', () => {
             vscode.postMessage({ type: 'COMMAND', command: 'aspectcode.configureAssistants' });
-            // Hide both setup buttons after clicking
+            // Hide both setup buttons after clicking and restore reindex buttons
             document.getElementById('simple-generate-btn').style.display = 'none';
             document.getElementById('generate-instructions-btn').style.display = 'none';
+            // Restore reindex buttons (they share position with generate buttons)
+            const simpleReindexBtn = document.getElementById('simple-reindex-btn');
+            const complexReindexBtn = document.getElementById('complex-reindex-btn');
+            if (simpleReindexBtn) simpleReindexBtn.style.display = '';
+            if (complexReindexBtn) complexReindexBtn.style.display = '';
         });
         
-        document.getElementById('simple-propose-btn').addEventListener('click', () => {
-            vscode.postMessage({ type: 'PROPOSE_FIXES', payload: { findings: currentFindings } });
-        });
+        // Note: simple-propose-btn is temporarily disabled (commented out in HTML)
+        // document.getElementById('simple-propose-btn').addEventListener('click', () => {
+        //     vscode.postMessage({ type: 'PROPOSE_FIXES', payload: { findings: currentFindings } });
+        // });
         
         document.getElementById('simple-expand-btn').addEventListener('click', toggleViewMode);
         document.getElementById('collapse-view-btn').addEventListener('click', toggleViewMode);
@@ -4958,6 +4981,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         });
         */
 
+        /* TEMPORARILY DISABLED: Plan with Structure button
         document.getElementById('propose-button').addEventListener('click', async () => {
             const btn = document.getElementById('propose-button');
             btn.disabled = true;
@@ -4973,6 +4997,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 btn.disabled = false;
             }
         });
+        */
 
         /* TEMPORARILY DISABLED: Align button (ALIGNMENTS.json feature)
         document.getElementById('align-button').addEventListener('click', async () => {
@@ -5013,10 +5038,15 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 command: 'aspectcode.configureAssistants'
             });
             
-            // Hide both setup buttons after clicking (files will be generated)
+            // Hide both setup buttons after clicking (files will be generated) and restore reindex buttons
             setTimeout(() => {
                 btn.style.display = 'none';
                 document.getElementById('simple-generate-btn').style.display = 'none';
+                // Restore reindex buttons (they share position with generate buttons)
+                const simpleReindexBtn = document.getElementById('simple-reindex-btn');
+                const complexReindexBtn = document.getElementById('complex-reindex-btn');
+                if (simpleReindexBtn) simpleReindexBtn.style.display = '';
+                if (complexReindexBtn) complexReindexBtn.style.display = '';
             }, 500);
         });
 
@@ -5039,12 +5069,18 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     command: 'aspectcode.configureAssistants'
                 });
                 
-                // Re-enable after a delay and hide the generate button
+                // Re-enable after a delay and hide the generate button, restore reindex buttons
                 setTimeout(() => {
                     btn.disabled = false;
                     textSpan.textContent = originalText;
                     // Also hide the generate-instructions button since files were generated
                     document.getElementById('generate-instructions-btn').style.display = 'none';
+                    document.getElementById('simple-generate-btn').style.display = 'none';
+                    // Restore reindex buttons (they share position with generate buttons)
+                    const simpleReindexBtn = document.getElementById('simple-reindex-btn');
+                    const complexReindexBtn = document.getElementById('complex-reindex-btn');
+                    if (simpleReindexBtn) simpleReindexBtn.style.display = '';
+                    if (complexReindexBtn) complexReindexBtn.style.display = '';
                 }, 2000);
             } catch (error) {
                 console.error('Failed to regenerate assistant files:', error);
@@ -6586,13 +6622,23 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     // But only if graph is ready - otherwise keep hidden until GRAPH_READY
                     if (graphReady) {
                         const generateBtn = document.getElementById('generate-instructions-btn');
+                        const complexReindexBtn = document.getElementById('complex-reindex-btn');
                         if (generateBtn) {
                             generateBtn.style.display = msg.hasFiles ? 'none' : 'flex';
                         }
+                        // Hide reindex button when generate button is visible (they share position)
+                        if (complexReindexBtn) {
+                            complexReindexBtn.style.display = msg.hasFiles ? '' : 'none';
+                        }
                         // Also sync simple view setup button
                         const simpleGenerateBtn = document.getElementById('simple-generate-btn');
+                        const simpleReindexBtn = document.getElementById('simple-reindex-btn');
                         if (simpleGenerateBtn) {
                             simpleGenerateBtn.style.display = msg.hasFiles ? 'none' : 'flex';
+                        }
+                        // Hide reindex button when generate button is visible (they share position)
+                        if (simpleReindexBtn) {
+                            simpleReindexBtn.style.display = msg.hasFiles ? '' : 'none';
                         }
                     }
                     // Store the status for when graph becomes ready
@@ -6607,12 +6653,22 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     // Now show the + button if instruction files don't exist
                     if (pendingInstructionFilesStatus === false) {
                         const generateBtn = document.getElementById('generate-instructions-btn');
+                        const complexReindexBtn = document.getElementById('complex-reindex-btn');
                         if (generateBtn) {
                             generateBtn.style.display = 'flex';
                         }
+                        // Hide reindex button when generate button is visible (they share position)
+                        if (complexReindexBtn) {
+                            complexReindexBtn.style.display = 'none';
+                        }
                         const simpleGenerateBtn = document.getElementById('simple-generate-btn');
+                        const simpleReindexBtn = document.getElementById('simple-reindex-btn');
                         if (simpleGenerateBtn) {
                             simpleGenerateBtn.style.display = 'flex';
+                        }
+                        // Hide reindex button when generate button is visible (they share position)
+                        if (simpleReindexBtn) {
+                            simpleReindexBtn.style.display = 'none';
                         }
                     }
                     break;

@@ -8,8 +8,8 @@
       "runtimeExecutable": "${execPath}",
       "args": [
         "--extensionDevelopmentPath=${workspaceFolder}",
-        //"${workspaceFolder}/../../_archive/aspectcode-bench-failed/benchmarks_repos/full-stack-fastapi-template/"
-        "${workspaceFolder}/../../_archive/aspectcode-bench-failed/benchmarks_repos/nextjs-prisma-boilerplate/"
+        "${workspaceFolder}/../../_archive/aspectcode-bench-failed/benchmarks_repos/full-stack-fastapi-template/"
+        //"${workspaceFolder}/../../_archive/aspectcode-bench-failed/benchmarks_repos/nextjs-prisma-boilerplate/"
         //"${workspaceFolder}/../../aspect-bench/repos/djangopackages/"
       ],
       "outFiles": ["${workspaceFolder}/dist/**/*.js"],
