@@ -172,6 +172,11 @@ function extractKBEnrichingFindings(
 /**
  * Automatically regenerate KB files when findings change.
  * Called after incremental validation or full validation.
+ * 
+ * IMPORTANT: This function only regenerates EXISTING KB files.
+ * It will NOT create .aspect/ if it doesn't already exist.
+ * To create the initial KB, use generateKnowledgeBase() directly
+ * (triggered by the '+' button or configureAssistants command).
  */
 export async function autoRegenerateKBFiles(
   state: AspectCodeState,
@@ -184,6 +189,17 @@ export async function autoRegenerateKBFiles(
   }
 
   const workspaceRoot = workspaceFolders[0].uri;
+  
+  // Check if .aspect/ already exists - don't auto-create on first save
+  // Users must explicitly generate via '+' button or configureAssistants command
+  try {
+    const aspectDir = vscode.Uri.joinPath(workspaceRoot, '.aspect');
+    await vscode.workspace.fs.stat(aspectDir);
+  } catch {
+    // .aspect/ doesn't exist - skip auto-regeneration
+    outputChannel.appendLine('[KB] Auto-regeneration skipped (.aspect/ not yet created - use + button to initialize)');
+    return;
+  }
   
   try {
     // Calculate score from current findings

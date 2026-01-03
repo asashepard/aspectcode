@@ -2175,11 +2175,13 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             background: transparent;
             color: var(--vscode-descriptionForeground);
             height: 24px;
-            line-height: 24px;
             padding: 0 8px;
             font-size: 11px;
             cursor: pointer;
             border-right: 1px solid var(--vscode-panel-border);
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
         }
 
         .instructions-mode-btn:focus {
@@ -4007,10 +4009,16 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 </svg>
             </button>
             <button id="simple-expand-btn" class="action-button icon-only" title="Show graph">
-                <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor">
-                    <rect x="2" y="3" width="12" height="2" rx="0.5"/>
-                    <rect x="2" y="7" width="12" height="2" rx="0.5"/>
-                    <rect x="2" y="11" width="12" height="2" rx="0.5"/>
+                <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
+                    <!-- Top node -->
+                    <circle cx="8" cy="2" r="1.5"/>
+                    <!-- Bottom left node -->
+                    <circle cx="3" cy="13" r="1.5"/>
+                    <!-- Bottom right node -->
+                    <circle cx="13" cy="13" r="1.5"/>
+                    <!-- Lines connecting nodes -->
+                    <line x1="7" y1="3.5" x2="4" y2="11.5"/>
+                    <line x1="9" y1="3.5" x2="12" y2="11.5"/>
                 </svg>
             </button>
         </div>
@@ -5194,32 +5202,33 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
             
             // Create arrow markers for different link types
-            const createArrowMarker = (id, color, size = 6) => {
+            // Smaller, cleaner arrows that don't poke through nodes
+            const createArrowMarker = (id, color, size = 4) => {
                 const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
                 marker.setAttribute('id', id);
                 marker.setAttribute('viewBox', '0 0 10 10');
-                marker.setAttribute('refX', '8');
-                marker.setAttribute('refY', '3');
+                marker.setAttribute('refX', '7');
+                marker.setAttribute('refY', '5');
                 marker.setAttribute('markerWidth', size);
                 marker.setAttribute('markerHeight', size);
                 marker.setAttribute('orient', 'auto');
                 marker.setAttribute('markerUnits', 'strokeWidth');
                 
                 const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-                path.setAttribute('d', 'M0,0 L0,6 L9,3 z');
+                path.setAttribute('d', 'M0,0 L10,5 L0,10 Z');
                 path.setAttribute('fill', color);
                 marker.appendChild(path);
                 return marker;
             };
             
-            // Add various arrow types
-            defs.appendChild(createArrowMarker('arrow-default', 'var(--vscode-descriptionForeground)', 5));
-            defs.appendChild(createArrowMarker('arrow-import', 'var(--vscode-symbolIcon-moduleForeground)', 6));
-            defs.appendChild(createArrowMarker('arrow-call', 'var(--vscode-symbolIcon-functionForeground)', 5));
-            defs.appendChild(createArrowMarker('arrow-circular', 'var(--vscode-errorForeground)', 6));
-            defs.appendChild(createArrowMarker('arrow-export', 'var(--vscode-symbolIcon-keywordForeground)', 6));
-            defs.appendChild(createArrowMarker('arrow-inherit', 'var(--vscode-symbolIcon-classForeground)', 7));
-            defs.appendChild(createArrowMarker('arrow-highlighted', 'var(--vscode-focusBorder)', 8));
+            // Add various arrow types - small sizes for clean appearance
+            defs.appendChild(createArrowMarker('arrow-default', 'var(--vscode-descriptionForeground)', 3));
+            defs.appendChild(createArrowMarker('arrow-import', 'var(--vscode-symbolIcon-moduleForeground)', 3.5));
+            defs.appendChild(createArrowMarker('arrow-call', 'var(--vscode-symbolIcon-functionForeground)', 3));
+            defs.appendChild(createArrowMarker('arrow-circular', 'var(--vscode-errorForeground)', 3.5));
+            defs.appendChild(createArrowMarker('arrow-export', 'var(--vscode-symbolIcon-keywordForeground)', 3.5));
+            defs.appendChild(createArrowMarker('arrow-inherit', 'var(--vscode-symbolIcon-classForeground)', 4));
+            defs.appendChild(createArrowMarker('arrow-highlighted', 'var(--vscode-focusBorder)', 4));
             
             const filter = document.createElementNS('http://www.w3.org/2000/svg', 'filter');
             filter.setAttribute('id', 'glow');
