@@ -116,13 +116,14 @@ export class WorkspaceFingerprint implements vscode.Disposable {
 
   /**
    * Check if KB is stale (fingerprint changed significantly since last generation).
+   * Returns false if no KB exists (no fingerprint file) - can't be stale if it doesn't exist.
    */
   async isKbStale(): Promise<boolean> {
     try {
       const stored = await this.loadFingerprint();
       if (!stored) {
-        // No fingerprint = no KB generated yet
-        return true;
+        // No fingerprint = no KB generated yet = NOT stale (it doesn't exist)
+        return false;
       }
 
       const current = await this.computeFingerprint();
@@ -142,7 +143,7 @@ export class WorkspaceFingerprint implements vscode.Disposable {
       return false;
     } catch (e) {
       this.outputChannel.appendLine(`[WorkspaceFingerprint] Error checking staleness: ${e}`);
-      return true; // Assume stale on error
+      return false; // On error, don't show stale indicator
     }
   }
 
@@ -161,7 +162,7 @@ export class WorkspaceFingerprint implements vscode.Disposable {
         lastGenerated: stored?.kbGeneratedAt || null
       };
     } catch {
-      return { isStale: true, fileCount: 0, lastGenerated: null };
+      return { isStale: false, fileCount: 0, lastGenerated: null };
     }
   }
 

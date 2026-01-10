@@ -10,11 +10,12 @@ import { AspectCodeCommands, AspectCodeCodeActionProvider } from './commands';
 import { PromptGenerationService } from './services/PromptGenerationService';
 import { AspectCodeState } from './state';
 import { detectAssistants, AssistantId } from './assistants/detection';
-import { generateInstructionFiles, regenerateInstructionFilesOnly } from './assistants/instructions';
+import { generateInstructionFiles, regenerateInstructionFilesOnly, AssistantsOverride } from './assistants/instructions';
+import { generateKnowledgeBase } from './assistants/kb';
 import { getBaseUrl, hasApiKeyConfigured, isApiKeyBlocked, hasValidApiKey } from './http';
 import type { ScoreResult } from './scoring/scoreEngine';
 import { stopIgnoringGeneratedFilesCommand } from './services/gitignoreService';
-import { InstructionsMode, getAssistantsSettings, getInstructionsModeSetting, setInstructionsModeSetting, updateAspectSettings, getExtensionEnabledSetting, setExtensionEnabledSetting } from './services/aspectSettings';
+import { InstructionsMode, getAssistantsSettings, getInstructionsModeSetting, setInstructionsModeSetting, updateAspectSettings, getExtensionEnabledSetting, setExtensionEnabledSetting, aspectDirExists } from './services/aspectSettings';
 import { cancelAndResetAllInFlightWork } from './services/enablementCancellation';
 
 /**
@@ -66,7 +67,9 @@ export function activateNewCommands(
       const enabled = await getExtensionEnabledSetting(root);
       const nextEnabled = !enabled;
 
-      await setExtensionEnabledSetting(root, nextEnabled);
+      // Only persist to .aspect/.settings.json if .aspect/ already exists
+      // Don't create .aspect/ just for the enable/disable toggle
+      await setExtensionEnabledSetting(root, nextEnabled, { createIfMissing: false });
 
       if (!nextEnabled) {
         // Stop any in-flight work immediately.
@@ -545,24 +548,6 @@ async function handleConfigureAssistants(
 
     const selectedIds = new Set(selected.map(item => item.id));
 
-    // Update project-local settings (.aspect/.settings.json)
-    const tCfg = Date.now();
-    await updateAspectSettings(workspaceRoot, {
-        assistants: {
-          copilot: selectedIds.has('copilot'),
-          cursor: selectedIds.has('cursor'),
-          claude: selectedIds.has('claude'),
-          other: selectedIds.has('other')
-        }
-    });
-    if (perfEnabled) {
-      outputChannel.appendLine(`[Perf][Assistants][configure] .aspect settings update tookMs=${Date.now() - tCfg}`);
-    }
-    // TEMPORARILY DISABLED: ALIGNMENTS.json feature
-    // await config.update('alignments', selectedIds.has('alignments'), vscode.ConfigurationTarget.Workspace);
-
-    outputChannel.appendLine(`[Assistants] Configuration updated: ${Array.from(selectedIds).join(', ')}`);
-
     // Generate files if any assistants were selected
     if (selectedIds.size > 0) {
       // Mark as configured
@@ -572,22 +557,45 @@ async function handleConfigureAssistants(
         await context.globalState.update('aspectcode.assistants.configured', true);
       }
 
+      // Build assistants override to pass to generateInstructionFiles.
+      // This ensures KB files are created BEFORE settings are written to disk,
+      // preventing orphan .settings.json files if generation is interrupted.
+      const assistantsOverride: AssistantsOverride = {
+        copilot: selectedIds.has('copilot'),
+        cursor: selectedIds.has('cursor'),
+        claude: selectedIds.has('claude'),
+        other: selectedIds.has('other')
+      };
+
       // Generate files directly without extra confirmation
       if (perfEnabled) {
         outputChannel.appendLine('[Perf][Assistants][configure] executing generateInstructionFiles');
       }
-      // Don't block the UI on potentially long-running EXAMINE/KB generation.
-      // Users can watch progress in the "Aspect Code" output channel.
-      void vscode.commands.executeCommand('aspectcode.generateInstructionFiles').then(
-        () => {
-          if (perfEnabled) {
-            outputChannel.appendLine('[Perf][Assistants][configure] generateInstructionFiles resolved');
-          }
-        },
-        (err) => {
-          outputChannel.appendLine(`[Assistants] generateInstructionFiles failed: ${err}`);
+      // IMPORTANT: Call handleGenerateInstructionFiles directly with the assistants override.
+      // This ensures KB is generated first (creating .aspect/ with KB files),
+      // then instruction files are generated based on the passed-in selection.
+      try {
+        await handleGenerateInstructionFiles(state, commands, outputChannel, context, assistantsOverride);
+        if (perfEnabled) {
+          outputChannel.appendLine('[Perf][Assistants][configure] generateInstructionFiles resolved');
         }
-      );
+      } catch (err) {
+        outputChannel.appendLine(`[Assistants] generateInstructionFiles failed: ${err}`);
+        // Don't write settings if KB generation failed
+        throw err;
+      }
+      
+      // NOW write settings after KB files are successfully created.
+      // This ensures .aspect/ is created with KB files first, then settings are added.
+      const tCfg = Date.now();
+      await updateAspectSettings(workspaceRoot, {
+          assistants: assistantsOverride
+      });
+      if (perfEnabled) {
+        outputChannel.appendLine(`[Perf][Assistants][configure] .aspect settings update tookMs=${Date.now() - tCfg}`);
+      }
+      
+      outputChannel.appendLine(`[Assistants] Configuration updated: ${Array.from(selectedIds).join(', ')}`);
     }
 
     if (perfEnabled) {
@@ -603,12 +611,17 @@ async function handleConfigureAssistants(
  * Handle aspectcode.generateInstructionFiles command.
  * Generates KB files and instruction files based on settings.
  * If no findings exist yet, runs INDEX and EXAMINE first.
+ * 
+ * @param assistantsOverride Optional assistants selection. If provided, uses these
+ *   values instead of reading from .aspect/.settings.json. This enables
+ *   generating instruction files before settings are written to disk.
  */
 async function handleGenerateInstructionFiles(
   state: AspectCodeState,
   commands: AspectCodeCommands,
   outputChannel: vscode.OutputChannel,
-  context?: vscode.ExtensionContext
+  context?: vscode.ExtensionContext,
+  assistantsOverride?: AssistantsOverride
 ): Promise<void> {
   try {
     const perfEnabled = vscode.workspace.getConfiguration().get<boolean>('aspectcode.devLogs', true);
@@ -689,9 +702,9 @@ async function handleGenerateInstructionFiles(
       scoreResult = scoreEngine.calculateScore(scoringFindings);
     }
 
-    // Generate instruction files
+    // Generate instruction files (pass assistants override if provided)
     const tGen = Date.now();
-    await generateInstructionFiles(workspaceRoot, state, scoreResult, outputChannel, context);
+    await generateInstructionFiles(workspaceRoot, state, scoreResult, outputChannel, context, assistantsOverride);
     if (perfEnabled) {
       outputChannel.appendLine(`[Perf][Instructions][cmd] generateInstructionFiles tookMs=${Date.now() - tGen}`);
     }

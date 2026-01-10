@@ -259,18 +259,18 @@ export async function generateKnowledgeBase(
   outputChannel: vscode.OutputChannel,
   context?: vscode.ExtensionContext
 ): Promise<void> {
+  outputChannel.appendLine('[KB] generateKnowledgeBase called');
+  
   const aspectCodeDir = vscode.Uri.joinPath(workspaceRoot, '.aspect');
   
   // Ensure .aspect directory exists
   try {
     await vscode.workspace.fs.createDirectory(aspectCodeDir);
+    outputChannel.appendLine('[KB] .aspect directory created/confirmed');
   } catch (e) {
     // Directory may already exist, ignore
+    outputChannel.appendLine(`[KB] .aspect directory create result: ${e}`);
   }
-
-  // Prompt user for .aspect/ gitignore preference (opt-in per target)
-  const aspectTarget: GitignoreTarget = '.aspect/';
-  await ensureGitignoreForTarget(workspaceRoot, aspectTarget, outputChannel);
 
   const kbStart = Date.now();
   outputChannel.appendLine('[KB] Generating V3 knowledge base in .aspect/');
@@ -303,14 +303,27 @@ export async function generateKnowledgeBase(
 
   // Generate all KB files in parallel (V3: 3 files)
   const tWrite = Date.now();
-  await Promise.all([
-    generateArchitectureFile(aspectCodeDir, state, workspaceRoot, files, depData, allLinks, outputChannel, fileContentCache),
-    generateMapFile(aspectCodeDir, state, workspaceRoot, files, depData, allLinks, outputChannel, grammars, fileContentCache),
-    generateContextFile(aspectCodeDir, state, workspaceRoot, files, allLinks, outputChannel, fileContentCache)
-  ]);
-  outputChannel.appendLine(`[KB][Perf] write KB files: ${Date.now() - tWrite}ms`);
+  outputChannel.appendLine(`[KB] Starting file generation: aspectCodeDir=${aspectCodeDir.fsPath}, files=${files.length}`);
+  try {
+    await Promise.all([
+      generateArchitectureFile(aspectCodeDir, state, workspaceRoot, files, depData, allLinks, outputChannel, fileContentCache),
+      generateMapFile(aspectCodeDir, state, workspaceRoot, files, depData, allLinks, outputChannel, grammars, fileContentCache),
+      generateContextFile(aspectCodeDir, state, workspaceRoot, files, allLinks, outputChannel, fileContentCache)
+    ]);
+    outputChannel.appendLine(`[KB][Perf] write KB files: ${Date.now() - tWrite}ms`);
+  } catch (writeErr) {
+    outputChannel.appendLine(`[KB] ERROR writing KB files: ${writeErr}`);
+    throw writeErr;
+  }
 
   outputChannel.appendLine(`[KB] Knowledge base generation complete (3 files) in ${Date.now() - kbStart}ms`);
+  
+  // Prompt user for .aspect/ gitignore preference AFTER KB is generated.
+  // This runs async (non-blocking) so it doesn't hold up the rest of the flow.
+  const aspectTarget: GitignoreTarget = '.aspect/';
+  void ensureGitignoreForTarget(workspaceRoot, aspectTarget, outputChannel).catch(e => {
+    outputChannel.appendLine(`[KB] Gitignore prompt failed (non-critical): ${e}`);
+  });
 }
 
 export type ImpactSummary = {

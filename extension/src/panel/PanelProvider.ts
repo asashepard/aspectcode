@@ -4565,7 +4565,17 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     return;
                 }
 
+                // Check if KB exists (pendingInstructionFilesStatus is false when no KB)
+                const kbExists = pendingInstructionFilesStatus !== false;
+                
                 // Keep this short; no timestamps.
+                if (!kbExists) {
+                    el.textContent = 'Aspect Code • Setup required';
+                    el.style.display = 'block';
+                    setSimpleOpenKbVisible(false);
+                    return;
+                }
+                
                 el.textContent = currentState.kbStale
                     ? 'Aspect Code • KB might be stale'
                     : 'Aspect Code • Up to date';
@@ -5046,15 +5056,9 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 command: 'aspectcode.configureAssistants'
             });
             
-            // Hide both setup buttons after clicking (files will be generated) and restore reindex buttons
+            // Re-enable button after command completes (visibility is controlled by INSTRUCTION_FILES_STATUS message)
             setTimeout(() => {
-                btn.style.display = 'none';
-                document.getElementById('simple-generate-btn').style.display = 'none';
-                // Restore reindex buttons (they share position with generate buttons)
-                const simpleReindexBtn = document.getElementById('simple-reindex-btn');
-                const complexReindexBtn = document.getElementById('complex-reindex-btn');
-                if (simpleReindexBtn) simpleReindexBtn.style.display = '';
-                if (complexReindexBtn) complexReindexBtn.style.display = '';
+                btn.disabled = false;
             }, 500);
         });
 
@@ -5077,18 +5081,10 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     command: 'aspectcode.configureAssistants'
                 });
                 
-                // Re-enable after a delay and hide the generate button, restore reindex buttons
+                // Re-enable after a delay (visibility is controlled by INSTRUCTION_FILES_STATUS message)
                 setTimeout(() => {
                     btn.disabled = false;
                     textSpan.textContent = originalText;
-                    // Also hide the generate-instructions button since files were generated
-                    document.getElementById('generate-instructions-btn').style.display = 'none';
-                    document.getElementById('simple-generate-btn').style.display = 'none';
-                    // Restore reindex buttons (they share position with generate buttons)
-                    const simpleReindexBtn = document.getElementById('simple-reindex-btn');
-                    const complexReindexBtn = document.getElementById('complex-reindex-btn');
-                    if (simpleReindexBtn) simpleReindexBtn.style.display = '';
-                    if (complexReindexBtn) complexReindexBtn.style.display = '';
                 }, 2000);
             } catch (error) {
                 console.error('Failed to regenerate assistant files:', error);
@@ -6652,6 +6648,10 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     }
                     // Store the status for when graph becomes ready
                     pendingInstructionFilesStatus = msg.hasFiles;
+                    // Update status text to reflect KB existence (after updating pendingInstructionFilesStatus)
+                    if (graphReady) {
+                        updateSimpleTopStatusIfIdle();
+                    }
                     break;
                 case 'GRAPH_READY':
                     // Dependency graph has loaded - now we can show the UI

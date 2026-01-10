@@ -93,6 +93,20 @@ function normalizeAutoRegenerateKbMode(value: unknown): AutoRegenerateKbMode | u
 }
 
 /**
+ * Check if the .aspect/ directory exists in the workspace.
+ * Used to prevent auto-creation of settings when KB hasn't been generated yet.
+ */
+export async function aspectDirExists(workspaceRoot: vscode.Uri): Promise<boolean> {
+  try {
+    const aspectDir = vscode.Uri.joinPath(workspaceRoot, '.aspect');
+    await vscode.workspace.fs.stat(aspectDir);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Get the path to the .aspect/.settings.json file for a workspace
  */
 function getSettingsPath(workspaceRoot: vscode.Uri): vscode.Uri {
@@ -149,14 +163,35 @@ export async function writeAspectSettings(
   SETTINGS_CACHE.set(cacheKey(workspaceRoot), { loadedAtMs: Date.now(), settings });
 }
 
+export interface UpdateAspectSettingsOptions {
+  /**
+   * If false, skip the update if .aspect/ directory doesn't exist.
+   * This prevents auto-creating .aspect/.settings.json on startup or toggle
+   * when KB hasn't been explicitly generated yet.
+   * Default: true (create if missing for backwards compat)
+   */
+  createIfMissing?: boolean;
+}
+
 /**
  * Update a specific setting in .aspect/.settings.json
  * Merges with existing settings
  */
 export async function updateAspectSettings(
   workspaceRoot: vscode.Uri,
-  update: Partial<AspectSettings>
-): Promise<AspectSettings> {
+  update: Partial<AspectSettings>,
+  options: UpdateAspectSettingsOptions = {}
+): Promise<AspectSettings | null> {
+  const { createIfMissing = true } = options;
+  
+  // If createIfMissing is false, check if .aspect/ exists first
+  if (!createIfMissing) {
+    const exists = await aspectDirExists(workspaceRoot);
+    if (!exists) {
+      return null; // Skip - don't create .aspect/ implicitly
+    }
+  }
+  
   const existing = await readAspectSettings(workspaceRoot);
   
   // Deep merge for nested objects
@@ -255,6 +290,12 @@ export async function migrateAspectSettingsFromVSCode(
 
   if (!changed) return false;
 
+  // Only write if .aspect/ already exists - don't create it during migration
+  const dirExists = await aspectDirExists(workspaceRoot);
+  if (!dirExists) {
+    return false;
+  }
+
   await updateAspectSettings(workspaceRoot, update);
   outputChannel?.appendLine('[Settings] Migrated Aspect Code settings from .vscode/settings.json to .aspect/.settings.json');
   return true;
@@ -287,9 +328,10 @@ export async function getAutoRegenerateKbSetting(
 
 export async function setAutoRegenerateKbSetting(
   workspaceRoot: vscode.Uri,
-  mode: AutoRegenerateKbMode
+  mode: AutoRegenerateKbMode,
+  options: UpdateAspectSettingsOptions = {}
 ): Promise<void> {
-  await updateAspectSettings(workspaceRoot, { autoRegenerateKb: mode });
+  await updateAspectSettings(workspaceRoot, { autoRegenerateKb: mode }, options);
 }
 
 export async function getExtensionEnabledSetting(
@@ -302,9 +344,10 @@ export async function getExtensionEnabledSetting(
 
 export async function setExtensionEnabledSetting(
   workspaceRoot: vscode.Uri,
-  enabled: boolean
+  enabled: boolean,
+  options: UpdateAspectSettingsOptions = {}
 ): Promise<void> {
-  await updateAspectSettings(workspaceRoot, { extensionEnabled: enabled });
+  await updateAspectSettings(workspaceRoot, { extensionEnabled: enabled }, options);
 }
 
 export async function getAssistantsSettings(

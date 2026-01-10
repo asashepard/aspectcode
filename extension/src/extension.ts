@@ -12,7 +12,7 @@ import Parser from 'web-tree-sitter';
 import { activateNewCommands } from './newCommandsIntegration';
 import { WorkspaceFingerprint } from './services/WorkspaceFingerprint';
 import { computeImpactSummaryForFile } from './assistants/kb';
-import { getAssistantsSettings, getAutoRegenerateKbSetting, migrateAspectSettingsFromVSCode, readAspectSettings, setAutoRegenerateKbSetting, getExtensionEnabledSetting } from './services/aspectSettings';
+import { getAssistantsSettings, getAutoRegenerateKbSetting, migrateAspectSettingsFromVSCode, readAspectSettings, setAutoRegenerateKbSetting, getExtensionEnabledSetting, aspectDirExists } from './services/aspectSettings';
 import { getEnablementCancellationToken } from './services/enablementCancellation';
 
 let examineOnSave = false;
@@ -2219,16 +2219,24 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Migrate project-scoped Aspect Code settings from .vscode/settings.json (if present)
   // into .aspect/.settings.json, and ensure reasonable defaults exist there.
+  // IMPORTANT: Only write to .aspect/.settings.json if .aspect/ already exists.
+  // We don't want to auto-create .aspect/ on extension startup - that should only
+  // happen when user explicitly generates KB via '+' button.
   try {
     const root = await getWorkspaceRoot();
     if (root) {
       const rootUri = vscode.Uri.file(root);
-      await migrateAspectSettingsFromVSCode(rootUri, outputChannel);
+      
+      // Only migrate/set defaults if .aspect/ already exists
+      const dirExists = await aspectDirExists(rootUri);
+      if (dirExists) {
+        await migrateAspectSettingsFromVSCode(rootUri, outputChannel);
 
-      // Ensure a default autoRegenerateKb is present in .aspect/.settings.json.
-      const settings = await readAspectSettings(rootUri);
-      if (settings.autoRegenerateKb === undefined) {
-        await setAutoRegenerateKbSetting(rootUri, 'onSave');
+        // Ensure a default autoRegenerateKb is present in .aspect/.settings.json.
+        const settings = await readAspectSettings(rootUri);
+        if (settings.autoRegenerateKb === undefined) {
+          await setAutoRegenerateKbSetting(rootUri, 'onSave');
+        }
       }
     }
   } catch (e) {

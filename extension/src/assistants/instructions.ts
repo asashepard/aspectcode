@@ -228,13 +228,27 @@ Use the Knowledge Base (KB) as orientation and ground truth for architecture and
 `.trim();
 }
 
+/**
+ * Optional override for assistant selection when called from configureAssistants.
+ * This allows generating instruction files BEFORE settings are written to disk,
+ * ensuring KB files are created first and .settings.json is only added after.
+ */
+export interface AssistantsOverride {
+  copilot?: boolean;
+  cursor?: boolean;
+  claude?: boolean;
+  other?: boolean;
+}
+
 async function generateInstructionFilesForEnabledAssistants(
   workspaceRoot: vscode.Uri,
   scoreResult: ScoreResult | null,
-  outputChannel: vscode.OutputChannel
+  outputChannel: vscode.OutputChannel,
+  assistantsOverride?: AssistantsOverride
 ): Promise<void> {
   const mode = await getInstructionsModeSetting(workspaceRoot, outputChannel);
-  const assistants = await getAssistantsSettings(workspaceRoot, outputChannel);
+  // Use override if provided, otherwise read from settings file
+  const assistants = assistantsOverride ?? await getAssistantsSettings(workspaceRoot, outputChannel);
   const wantCopilot = assistants.copilot;
   const wantCursor = assistants.cursor;
   const wantClaude = assistants.claude;
@@ -281,13 +295,19 @@ export async function regenerateInstructionFilesOnly(
  * 
  * Note: KB files should already be generated before calling this function.
  * Call autoRegenerateKBFiles() first if KB needs regeneration.
+ * 
+ * @param assistantsOverride Optional assistants selection override. If provided,
+ *   uses these values instead of reading from .aspect/.settings.json. This enables
+ *   generating instruction files before settings are written to disk, ensuring
+ *   KB files are created first.
  */
 export async function generateInstructionFiles(
   workspaceRoot: vscode.Uri,
   state: AspectCodeState,
   scoreResult: ScoreResult | null,
   outputChannel: vscode.OutputChannel,
-  context?: vscode.ExtensionContext
+  context?: vscode.ExtensionContext,
+  assistantsOverride?: AssistantsOverride
 ): Promise<void> {
   // Note: Gitignore prompts are now handled per-file in each generation function
 
@@ -303,10 +323,16 @@ export async function generateInstructionFiles(
   
   if (needsKbGeneration) {
     outputChannel.appendLine('[Instructions] KB files not found, generating...');
-    await generateKnowledgeBase(workspaceRoot, state, scoreResult, outputChannel, context);
+    try {
+      await generateKnowledgeBase(workspaceRoot, state, scoreResult, outputChannel, context);
+      outputChannel.appendLine('[Instructions] KB generation complete');
+    } catch (kbError) {
+      outputChannel.appendLine(`[Instructions] KB generation failed: ${kbError}`);
+      throw kbError; // Re-throw to propagate the error
+    }
   }
 
-  await generateInstructionFilesForEnabledAssistants(workspaceRoot, scoreResult, outputChannel);
+  await generateInstructionFilesForEnabledAssistants(workspaceRoot, scoreResult, outputChannel, assistantsOverride);
 }
 
 /**
