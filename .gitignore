@@ -86,6 +86,14 @@ temp/
 # Keep sample test payloads (do NOT ignore diffs/json in samples/)
 # (so no sample ignores here)
 
+# Archive folders (historical code kept for reference)
+extension/src/archive/
+extension/src/assistants/archive/
+server/tests/archive/
+
+# Extension build output
+extension/dist/
+
 # Playground repos
 /playground/
 

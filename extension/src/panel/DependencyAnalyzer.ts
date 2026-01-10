@@ -122,14 +122,9 @@ export class DependencyAnalyzer {
       onProgress?.(0, files.length, 'Loading file contents...');
       await this.loadFileContents(files, onProgress);
     }
-    const loadTime = Date.now() - startTime;
-    console.log(`[DependencyAnalyzer] Loaded ${this.workspaceFiles.size}/${files.length} files in ${loadTime}ms`);
-    
     // Build indexes for fast resolution (O(N) once)
     onProgress?.(0, files.length, 'Building file index...');
     this.fileIndex = this.buildFileIndex(files);
-    const indexTime = Date.now() - startTime - loadTime;
-    console.log(`[DependencyAnalyzer] Built index in ${indexTime}ms`);
     
     // Analyze each file
     for (let i = 0; i < files.length; i++) {
@@ -215,9 +210,6 @@ export class DependencyAnalyzer {
     
     // Clear index after use to free memory
     this.fileIndex = null;
-    
-    const totalTime = Date.now() - startTime;
-    console.log(`[DependencyAnalyzer] Analyzed ${files.length} files, found ${links.length} links in ${totalTime}ms`);
     
     return links;
   }

@@ -261,8 +261,6 @@ export function activateNewCommands(
   const saveListener = vscode.workspace.onDidSaveTextDocument((document) => {
     const config = vscode.workspace.getConfiguration('aspectcode');
     const validateOnSave = config.get<boolean>('validation.onSave', true);
-    // Auto-Fix on save disabled - feature temporarily disabled
-    // const autofixOnSave = config.get<boolean>('autofix.onSave', false);
     const enableLegacyPreflight = config.get<boolean>('enableLegacyPreflight', false);
     
     if (validateOnSave && enableLegacyPreflight) {
@@ -274,13 +272,6 @@ export function activateNewCommands(
         debouncedScan();
       });
     }
-    
-    // Optional: Apply safe autofixes on save - feature temporarily disabled
-    // if (autofixOnSave) {
-    //   setTimeout(() => {
-    //     commands.applyAutofix();
-    //   }, 1000); // Wait for scan to complete
-    // }
   });
 
   context.subscriptions.push(fileWatcher, saveListener);
@@ -720,18 +711,6 @@ async function handleGenerateInstructionFiles(
     } catch (e) {
       outputChannel.appendLine(`[KB] Failed to mark KB fresh (non-critical): ${e}`);
     }
-
-    // DISABLED: ALIGNMENTS.json feature - never generate this file
-    // const assistantsConfig = vscode.workspace.getConfiguration('aspectcode.assistants');
-    // if (assistantsConfig.get<boolean>('alignments', false)) {
-    //   await initializeAlignmentsFile(workspaceRoot, outputChannel);
-    //   
-    //   // Notify the panel to show the align button
-    //   const panelProvider = (state as any)._panelProvider;
-    //   if (panelProvider && typeof panelProvider.post === 'function') {
-    //     panelProvider.post({ type: 'ALIGNMENTS_FILE_STATUS', hasFile: true });
-    //   }
-    // }
 
     vscode.window.showInformationMessage('Aspect Code knowledge base and assistant instruction files have been updated.');
 

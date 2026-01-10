@@ -586,13 +586,6 @@ function renderDiagnostics(resp: any) {
     arr.push(d);
     map.set(file, arr);
   }
-
-  // Diagnostics rendering disabled - findings are shown in Aspect Code panel instead
-  // This prevents yellow underlines in the editor while keeping findings functional
-  // Uncomment the lines below to re-enable diagnostics in Problems panel:
-  // for (const [f, arr] of map) {
-  //   diag.set(vscode.Uri.file(f), arr);
-  // }
 }
 
 async function detectEOL(filePath: string): Promise<string> {
@@ -2453,12 +2446,6 @@ export async function activate(context: vscode.ExtensionContext) {
         const fixable = state.s.findings?.filter(f => f.fixable)?.length ?? 0;
         
         outputChannel?.appendLine(`=== EXAMINE: Found ${total} total issues, ${fixable} fixable ===`);
-        
-        // if (total > 0) {
-        //   vscode.window.showInformationMessage(`Examination complete: ${total} issues found (${fixable} fixable)`);
-        // } else {
-        //   vscode.window.showInformationMessage('Examination complete: No issues found');
-        // }
         
         // Show the panel to display results
         await vscode.commands.executeCommand('aspectcode.showPanel');

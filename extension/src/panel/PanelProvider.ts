@@ -3,9 +3,6 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { AspectCodeState } from '../state';
 import { fetchCapabilities, getApiKeyAuthStatus, hasValidApiKey, onDidChangeApiKeyAuthStatus, resetApiKeyAuthStatus, type ApiKeyAuthStatus } from '../http';
-// NOTE: ScoreEngine imports kept but not used - score calculation disabled for performance
-// import { ScoreEngine, ScoreResult } from '../scoring/scoreEngine';
-// import { defaultScoreConfig } from '../scoring/scoreConfig';
 import { DependencyAnalyzer, DependencyLink } from './DependencyAnalyzer';
 import { detectAssistants } from '../assistants/detection';
 import { getAutoRegenerateKbSetting, getInstructionsModeSetting, setAutoRegenerateKbSetting, getExtensionEnabledSetting } from '../services/aspectSettings';
@@ -1403,10 +1400,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           
           // Send instruction files status (using already-computed values)
           this.post({ type: 'INSTRUCTION_FILES_STATUS', hasFiles: setupComplete });
-          
-          // TEMPORARILY DISABLED: Check if ALIGNMENTS.json exists to show align button
-          // const hasAlignmentsFile = await alignmentsFileExists(workspaceRoot);
-          // this.post({ type: 'ALIGNMENTS_FILE_STATUS', hasFile: hasAlignmentsFile });
           break;
 
         case 'REQUEST_DEPENDENCY_GRAPH':
@@ -1512,23 +1505,12 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           break;
         }
 
-        case 'FIX_FINDING': {
-          // Auto-Fix feature temporarily disabled
-          // Support both single ID and array of IDs
-          // const id = msg?.id as string | undefined;
-          // const ids = msg?.ids as string[] | undefined;
-          // 
-          // if (ids && ids.length > 0) {
-          //   await vscode.commands.executeCommand('aspectcode.previewAutofix', ids);
-          // } else if (id) {
-          //   await vscode.commands.executeCommand('aspectcode.previewAutofix', [id]);
-          // }
+        case 'FIX_FINDING':
+          // Feature not currently enabled
           break;
-        }
 
         case 'FIX_SAFE':
-          // Auto-Fix feature temporarily disabled
-          // await vscode.commands.executeCommand('aspectcode.applyAutofix');
+          // Feature not currently enabled
           break;
 
         case 'REGENERATE_KB':
@@ -1718,16 +1700,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'AUTO_FIX_SAFE':
-          // Auto-Fix feature temporarily disabled
-          // try {
-          //   await vscode.commands.executeCommand('aspectcode.autoFixSafe');
-          // } finally {
-          //   // Send message back to webview to re-enable the button regardless of outcome
-          //   this._view?.webview.postMessage({
-          //     type: 'AUTO_FIX_SAFE_COMPLETE',
-          //     payload: {}
-          //   });
-          // }
+          // Feature not currently enabled
           break;
 
         case 'EXPLAIN_FILE': {
@@ -5116,9 +5089,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             } else {
                 document.getElementById('findings-view').classList.add('active');
                 updateViewToggleButton('Show graph', currentGraph?.nodes?.length || 0);
-                
-                // Settings menu is now always visible
-                // document.querySelector('.graph-settings-container').style.display = 'none';
             }
         }
         
@@ -5131,23 +5101,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 document.getElementById('view-toggle-count').textContent = '(' + count + ')';
             }
         }
-        
-        // Settings menu toggle - disabled, settings button replaced with reindex button
-        // The settings-toggle button no longer exists in the HTML
-        // document.getElementById('settings-toggle').addEventListener('click', (e) => {
-        //     e.stopPropagation();
-        //     const menu = document.getElementById('settings-menu');
-        //     menu.classList.toggle('hidden');
-        // });
-        
-        // Close settings menu when clicking elsewhere - disabled since settings button removed
-        // document.addEventListener('click', (e) => {
-        //     const menu = document.getElementById('settings-menu');
-        //     const toggle = document.getElementById('settings-toggle');
-        //     if (!menu.contains(e.target) && e.target !== toggle) {
-        //         menu.classList.add('hidden');
-        //     }
-        // });
         
         function renderDependencyGraph(graph) {
             currentGraph = graph || { nodes: [], links: [] };
@@ -5170,15 +5123,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 if (emptyGraph) emptyGraph.classList.add('hidden');
                 if (svg) svg.style.display = '';
             }
-            
-            // 3D mode disabled - always use 2D
-            // const graphTypeSelect = document.getElementById('graph-type-select');
-            // const currentGraphType = graphTypeSelect ? graphTypeSelect.value : '2d';
-            // 
-            // if (currentGraphType === '3d') {
-            //     render3DGraph(currentGraph);
-            //     return;
-            // }
             
             if (!svg) {
                 console.warn('SVG elements not found, retrying...');
@@ -6258,15 +6202,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             setupGraphControls();
             
             // Apply selected layout
-            // Always use circular layout
             applyLayoutAlgorithm(nodes, 'circular');
-            render(); // Single render for static layout
-            
-            // Legacy force simulation code (no longer used)
-            if (false) {
-                // Only use animated force simulation when explicitly selected
-                requestAnimationFrame(tick); // Animated force simulation
-            }
+            render();
         }
         
         function renderFindings(findings, filterRule = '', state = null) {
