@@ -6,14 +6,23 @@
       "type": "shell",
       "command": "npm run compile",
       "options": { "cwd": "${workspaceFolder}/extension" },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
       "problemMatcher": []
     },
     {
-      "label": "Aspect Code: Start Server",
+      "label": "Aspect Code: Start Server (optional)",
       "type": "shell",
       "command": "${config:python.defaultInterpreterPath} -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload",
       "options": { "cwd": "${workspaceFolder}/server" },
       "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": false
+      },
       "problemMatcher": []
     }
   ]
