@@ -44,8 +44,8 @@ export async function loadGrammarsOnce(context: vscode.ExtensionContext, outputC
     try {
       outputChannel?.appendLine('Tree-sitter: initializing WASM runtime...');
       
-      // Try alternative initialization for VS Code extension environment
-      const wasmPath = context.asAbsolutePath(path.join('node_modules', 'web-tree-sitter', 'tree-sitter.wasm'));
+      // Use bundled tree-sitter.wasm in parsers folder (node_modules not included in VSIX)
+      const wasmPath = context.asAbsolutePath(path.join('parsers', 'tree-sitter.wasm'));
       outputChannel?.appendLine(`Tree-sitter: WASM path: ${wasmPath}`);
       
       // Initialize with explicit WASM path

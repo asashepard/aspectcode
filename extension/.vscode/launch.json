@@ -7,17 +7,10 @@
       "request": "launch",
       "runtimeExecutable": "${execPath}",
       "args": [
-        "--extensionDevelopmentPath=${workspaceFolder}",
-        "${workspaceFolder}/../../_archive/aspectcode-bench-failed/benchmarks_repos/full-stack-fastapi-template/"
-        //"${workspaceFolder}/../../_archive/aspectcode-bench-failed/benchmarks_repos/nextjs-prisma-boilerplate/"
-        //"${workspaceFolder}/../../aspect-bench/repos/djangopackages/"
+        "--extensionDevelopmentPath=${workspaceFolder}"
       ],
       "outFiles": ["${workspaceFolder}/dist/**/*.js"],
-      "preLaunchTask": "npm: build",
-      "env": {
-        // uncomment if you haven't set the OS env var:
-        // "ASPECT_CODE_PLAYGROUND": "C:\\code\\aspect-code-playground"
-      }
+      "preLaunchTask": "Aspect Code: Build Extension"
     }
   ]
 }

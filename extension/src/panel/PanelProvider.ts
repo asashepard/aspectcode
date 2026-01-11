@@ -2688,6 +2688,17 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             display: none;
         }
 
+        .simple-status-link {
+            color: inherit;
+            text-decoration: none;
+            cursor: pointer;
+        }
+
+        .simple-status-link:hover {
+            color: inherit;
+            text-decoration: none;
+        }
+
         .simple-kb-actions {
             position: absolute;
             top: 30px;
@@ -3877,7 +3888,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 </circle>
             </svg>
         </div>
-        <div class="simple-loading-text" id="simple-loading-text"></div>
+        <div class="simple-loading-text" id="simple-loading-text"><a href="https://aspectcode.com/docs" id="simple-status-link" class="simple-status-link">Aspect Code</a><span id="simple-status-suffix"></span></div>
         <div class="simple-kb-actions" id="simple-kb-actions">
             <div class="simple-open-kb" id="simple-open-kb" role="button" tabindex="0" title="Open architecture.md">open kb</div>
             <div class="simple-edit-instructions" id="simple-edit-instructions" role="button" tabindex="0" title="Edit .aspect/instructions.md">edit instructions</div>
@@ -4442,8 +4453,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 const hasApiKey = currentState?.hasApiKey;
 
                 if (currentState && currentState.extensionEnabled === false) {
-                    el.textContent = 'Aspect Code • Disabled';
-                    el.style.display = 'block';
+                    setLoadingText('Aspect Code • Disabled');
                     setSimpleOpenKbVisible(false);
                     return;
                 }
@@ -4455,16 +4465,14 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 
                 // Keep this short; no timestamps.
                 if (!kbExists) {
-                    el.textContent = 'Aspect Code • Setup required';
-                    el.style.display = 'block';
+                    setLoadingText('Aspect Code • Setup required');
                     setSimpleOpenKbVisible(false);
                     return;
                 }
                 
-                el.textContent = currentState.kbStale
+                setLoadingText(currentState.kbStale
                     ? 'Aspect Code • KB might be stale'
-                    : 'Aspect Code • Up to date';
-                el.style.display = 'block';
+                    : 'Aspect Code • Up to date');
                 syncSimpleOpenKbVisibility();
             } catch (e) {
                 console.error('[Panel] updateSimpleTopStatusIfIdle failed:', e);
@@ -6571,19 +6579,13 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 if (percentage > 0 && percentage < 100) {
                     validationSpinner?.classList.add('active');
                     simpleSpinner?.classList.add('active');
-                    if (simpleLoadingText) {
-                        simpleLoadingText.textContent = message;
-                        simpleLoadingText.style.display = 'block';
-                    }
+                    setLoadingText(message);
                     setSimpleOpenKbVisible(false);
                     syncBusyUi();
                 } else if (percentage >= 100 || percentage === 0) {
                     validationSpinner?.classList.remove('active');
                     simpleSpinner?.classList.remove('active');
-                    if (simpleLoadingText) {
-                        simpleLoadingText.textContent = '';
-                        simpleLoadingText.style.display = 'none';
-                    }
+                    setLoadingText('');
                     syncBusyUi();
                     updateSimpleTopStatusIfIdle();
                 }
@@ -6635,9 +6637,25 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         // Set loading text in simple view
         function setLoadingText(text) {
             const simpleLoadingText = document.getElementById('simple-loading-text');
+            const statusLink = document.getElementById('simple-status-link');
+            const statusSuffix = document.getElementById('simple-status-suffix');
             if (simpleLoadingText) {
-                simpleLoadingText.textContent = text;
-                simpleLoadingText.style.display = text ? 'block' : 'none';
+                if (!text) {
+                    // Clear - hide everything
+                    if (statusLink) statusLink.style.display = 'none';
+                    if (statusSuffix) statusSuffix.textContent = '';
+                    simpleLoadingText.style.display = 'none';
+                } else if (text.startsWith('Aspect Code')) {
+                    // Status message - show link + suffix
+                    if (statusLink) statusLink.style.display = '';
+                    if (statusSuffix) statusSuffix.textContent = text.replace('Aspect Code', '');
+                    simpleLoadingText.style.display = 'block';
+                } else {
+                    // Progress message - hide link, show only text
+                    if (statusLink) statusLink.style.display = 'none';
+                    if (statusSuffix) statusSuffix.textContent = text;
+                    simpleLoadingText.style.display = 'block';
+                }
             }
         }
         

@@ -7,23 +7,17 @@
       "request": "launch",
       "runtimeExecutable": "${execPath}",
       "args": ["--extensionDevelopmentPath=${workspaceFolder}/extension"],
-      "outFiles": ["${workspaceFolder}/extension/out/**/*.js"],
+      "outFiles": ["${workspaceFolder}/extension/dist/**/*.js"],
       "preLaunchTask": "Aspect Code: Build Extension"
     },
     {
       "name": "Test Aspect Code Extension",
       "type": "extensionHost",
       "request": "launch",
+      "runtimeExecutable": "${execPath}",
       "args": ["--extensionDevelopmentPath=${workspaceFolder}/extension"],
-      "outFiles": ["${workspaceFolder}/extension/dist/**/*.js"]
-    }
-  ],
-  "compounds": [
-    {
-      "name": "Panel E2E (tiny)",
-      "configurations": ["Run Aspect Code Extension (Panel)"],
-      "preLaunchTask": "Aspect Code: Start Server",
-      "postDebugTask": "Aspect Code: Open Playground (tiny)"
+      "outFiles": ["${workspaceFolder}/extension/dist/**/*.js"],
+      "preLaunchTask": "Aspect Code: Build Extension"
     }
   ]
 }

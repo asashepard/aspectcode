@@ -83,6 +83,9 @@ temp/
 
 # ---- Project-specific ----
 
+# GitHub Actions workflows
+.github/workflows/
+
 # Keep sample test payloads (do NOT ignore diffs/json in samples/)
 # (so no sample ignores here)
 

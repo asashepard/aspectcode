@@ -458,7 +458,9 @@ async function handleConfigureAssistants(
     }
 
     if (!selected) {
-      return; // User cancelled
+      // User cancelled - re-check instruction files status so '+' button reappears if needed
+      await checkInstructionFilesExist(context, state, outputChannel, false);
+      return;
     }
 
     const selectedIds = new Set(selected.map(item => item.id));
