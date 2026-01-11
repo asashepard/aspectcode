@@ -9,14 +9,11 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { AspectCodeEngineService } from './engineService';
 import { Finding, ScanResult, createSuppressionComment } from './types/protocol';
-import { AutofixV1Service } from './archive/autofix/service';
-import { isAutoFixV1Finding } from './archive/autofix/config';
 import { AspectCodeState } from './state';
 import { hasApiKeyConfigured, isApiKeyBlocked } from './http';
 
 export class AspectCodeCommands {
   private engineService: AspectCodeEngineService;
-  private autofixService: AutofixV1Service;
   private outputChannel: vscode.OutputChannel;
   private diagnostics: vscode.DiagnosticCollection;
   private state: AspectCodeState;
@@ -25,7 +22,6 @@ export class AspectCodeCommands {
   constructor(context: vscode.ExtensionContext, state: AspectCodeState) {
     this.outputChannel = vscode.window.createOutputChannel('Aspect Code');
     this.engineService = new AspectCodeEngineService({}, this.outputChannel);
-    this.autofixService = new AutofixV1Service(this.outputChannel);
     this.diagnostics = vscode.languages.createDiagnosticCollection('aspectcode');
     this.state = state;
 
@@ -354,103 +350,6 @@ export class AspectCodeCommands {
   }
 
   /**
-   * Apply autofix command using Auto-Fix v1 pipeline.
-   */
-  async applyAutofix(findings?: Finding[]): Promise<void> {
-    let targetFindings = findings;
-
-    if (!targetFindings) {
-      // Get all findings from state/diagnostics
-      targetFindings = this.getCurrentFindings();
-
-      if (targetFindings.length === 0) {
-        vscode.window.showInformationMessage('No findings available to fix');
-        return;
-      }
-    }
-
-    // Filter for Auto-Fix v1 compatible findings
-    const autofixableFindings = this.autofixService.filterAutoFixableFindings(targetFindings);
-    
-    if (autofixableFindings.length === 0) {
-      vscode.window.showInformationMessage('No Auto-Fix v1 compatible findings available');
-      return;
-    }
-
-    // Auto-apply fixes without confirmation dialog
-    const result = 'Apply'; // Skip modal and proceed directly
-
-    if (result !== 'Apply') {
-      // Clear busy state on cancel
-      this.state.update({ busy: false });
-      return;
-    }
-
-    // Get workspace root
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    if (!workspaceFolder) {
-      vscode.window.showErrorMessage('No workspace folder found');
-      return;
-    }
-
-    this.outputChannel.appendLine(`=== Applying ${autofixableFindings.length} Auto-Fix v1 fixes ===`);
-
-    try {
-      // Set busy state for panel integration
-      this.state.update({ busy: true });
-      
-      const result = await this.autofixService.applyBatchAutofix(
-        autofixableFindings, 
-        workspaceFolder.uri.fsPath
-      );
-      
-      this.outputChannel.appendLine(`Auto-Fix applied: ${result.applied} fixes, ${result.failed} failed`);
-      
-      if (result.applied > 0) {
-        this.outputChannel.appendLine(`[Auto-Fix v1] Applied ${result.applied} fixes`);
-        this.outputChannel.appendLine(`[Auto-Fix v1] Modified files: ${result.modifiedFiles.map(f => path.basename(f)).join(', ')}`);
-        
-        // Explicitly save all modified documents
-        this.outputChannel.appendLine(`[Auto-Fix v1] Saving all modified files...`);
-        const saveSuccess = await vscode.workspace.saveAll();
-        
-        if (saveSuccess) {
-          this.outputChannel.appendLine(`[Auto-Fix v1] Successfully saved all files`);
-        } else {
-          this.outputChannel.appendLine(`[Auto-Fix v1] Warning: Some files may not have been saved`);
-        }
-        
-        // Re-run analysis to refresh panel state - use incremental if available
-        this.outputChannel.appendLine(`[Auto-Fix v1] Re-running validation to update findings...`);
-        await this.rerunAnalysis(result.modifiedFiles);
-        
-        // Clear loading state after re-validation completes
-        this.state.update({ busy: false });
-        
-        vscode.window.showInformationMessage(
-          `Auto-Fix v1: Applied ${result.applied} fixes successfully! Analysis refreshed.`
-        );
-        this.outputChannel.appendLine(`[Auto-Fix v1] SUCCESS: Applied ${result.applied} fixes and refreshed analysis`);
-      } else if (result.failed > 0) {
-        // Clear loading state on no fixes applied
-        this.state.update({ busy: false });
-        
-        vscode.window.showWarningMessage(
-          `Auto-Fix v1: No fixes could be applied. Check output for details.`
-        );
-        this.outputChannel.appendLine(`[Auto-Fix v1] WARNING: No fixes applied, ${result.failed} failed`);
-      }
-
-    } catch (error) {
-      // Clear loading state on error
-      this.state.update({ busy: false });
-      
-      this.outputChannel.appendLine(`[Auto-Fix v1] ERROR: ${error}`);
-      vscode.window.showErrorMessage(`Auto-Fix v1 failed: ${error}`);
-    }
-  }
-
-  /**
    * Open finding command.
    */
   async openFinding(finding: Finding): Promise<void> {
@@ -617,24 +516,6 @@ export class AspectCodeCodeActionProvider implements vscode.CodeActionProvider {
 
     for (const diagnostic of aspectcodeDiagnostics) {
       const finding = (diagnostic as any).aspectcodeFinding as Finding;
-      
-      // Auto-fix action disabled - feature temporarily disabled
-      /*
-      // Add autofix action if available
-      if (finding.autofix && finding.autofix.length > 0 && finding.meta?.autofix_safety === 'safe') {
-        const autofixAction = new vscode.CodeAction(
-          `Aspect Code: Apply autofix for ${finding.rule_id}`,
-          vscode.CodeActionKind.QuickFix
-        );
-        autofixAction.command = {
-          title: 'Apply autofix',
-          command: 'aspectcode.applyAutofix',
-          arguments: [[finding]]
-        };
-        autofixAction.diagnostics = [diagnostic];
-        actions.push(autofixAction);
-      }
-      */
 
       // Add suppression action
       const suppressAction = new vscode.CodeAction(

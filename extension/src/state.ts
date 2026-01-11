@@ -34,7 +34,7 @@ type ValidateStats = {
 
 type HistoryItem = {
   ts: number;
-  kind: "index" | "reindex" | "validate";
+  kind: "index" | "reindex" | "validate" | "autofix";
   meta: Record<string, any>;
 };
 

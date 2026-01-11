@@ -8,7 +8,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { spawn, ChildProcess } from 'child_process';
-import { ScanResult, Finding, ValidationResult, decodeScanResult, groupFindingsByFile, extractSafeAutofixes } from './types/protocol';
+import { ScanResult, Finding, ValidationResult, decodeScanResult, groupFindingsByFile } from './types/protocol';
 
 export interface EngineConfig {
   pythonPath?: string;
@@ -445,95 +445,6 @@ export class AspectCodeEngineService {
       success: true,
       data: combinedResult
     };
-  }
-
-  /**
-   * Apply safe autofixes for findings.
-   */
-  async applySafeAutofixes(findings: Finding[], cancellationToken?: vscode.CancellationToken): Promise<boolean> {
-    const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (!workspaceFolders || workspaceFolders.length === 0) {
-      this.outputChannel.appendLine('No workspace folder found for autofix');
-      return false;
-    }
-
-    const workspaceRoot = workspaceFolders[0].uri.fsPath;
-    
-    this.outputChannel.appendLine(`Applying ${findings.length} safe autofixes...`);
-
-    try {
-      // Group edits by file to optimize application
-      const editsByFile = new Map<string, { uri: vscode.Uri; edits: any[] }>();
-
-      for (const finding of findings) {
-        if (!finding.autofix || finding.autofix.length === 0) {
-          continue;
-        }
-
-        // Verify this is a safe autofix
-        if (finding.meta?.autofix_safety !== 'safe') {
-          this.outputChannel.appendLine(`Skipping non-safe autofix for rule ${finding.rule_id}`);
-          continue;
-        }
-
-        for (const edit of finding.autofix) {
-          // Resolve file path
-          let uri: vscode.Uri;
-          try {
-            if (path.isAbsolute(edit.file_path)) {
-              uri = vscode.Uri.file(edit.file_path);
-            } else {
-              uri = vscode.Uri.file(path.join(workspaceRoot, edit.file_path));
-            }
-          } catch (error) {
-            this.outputChannel.appendLine(`Invalid file path in autofix: ${edit.file_path}`);
-            continue;
-          }
-
-          // Add to edits map
-          const key = uri.toString();
-          if (!editsByFile.has(key)) {
-            editsByFile.set(key, { uri, edits: [] });
-          }
-          editsByFile.get(key)!.edits.push(edit);
-        }
-      }
-
-      // Apply all edits as a single workspace operation
-      const workspaceEdit = new vscode.WorkspaceEdit();
-
-      for (const { uri, edits } of editsByFile.values()) {
-        // Sort edits by position (reverse order for proper application)
-        edits.sort((a, b) => b.start_byte - a.start_byte);
-
-        // Apply each edit for this file
-        for (const edit of edits) {
-          const range = new vscode.Range(
-            new vscode.Position(edit.range.startLine - 1, edit.range.startCol),
-            new vscode.Position(edit.range.endLine - 1, edit.range.endCol)
-          );
-          workspaceEdit.replace(uri, range, edit.replacement);
-        }
-      }
-
-      // Apply the combined edit
-      const success = await vscode.workspace.applyEdit(workspaceEdit);
-      
-      if (success) {
-        this.outputChannel.appendLine(`Successfully applied ${findings.length} safe autofixes`);
-        vscode.window.showInformationMessage(`Applied ${findings.length} safe autofixes`);
-      } else {
-        this.outputChannel.appendLine('Failed to apply workspace edits');
-        vscode.window.showErrorMessage('Failed to apply autofixes');
-      }
-
-      return success;
-
-    } catch (error) {
-      this.outputChannel.appendLine(`Autofix error: ${error}`);
-      vscode.window.showErrorMessage(`Autofix failed: ${error}`);
-      return false;
-    }
   }
 
   /**

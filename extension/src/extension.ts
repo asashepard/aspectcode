@@ -15,6 +15,27 @@ import { computeImpactSummaryForFile } from './assistants/kb';
 import { getAssistantsSettings, getAutoRegenerateKbSetting, migrateAspectSettingsFromVSCode, readAspectSettings, setAutoRegenerateKbSetting, getExtensionEnabledSetting, aspectDirExists } from './services/aspectSettings';
 import { getEnablementCancellationToken } from './services/enablementCancellation';
 
+// --- Type Definitions for API Responses ---
+
+/** Extended vscode.Diagnostic with violation tracking */
+interface AspectCodeDiagnostic extends vscode.Diagnostic {
+  violationId?: string;
+}
+
+/** Snapshot info from the server */
+interface SnapshotInfo {
+  snapshot_id: string;
+  repo_root: string;
+  created_at: string;
+  file_count: number;
+}
+
+/** Storage stats from the server */
+interface StorageStats {
+  total_bytes?: number;
+  snapshot_count?: number;
+}
+
 let examineOnSave = false;
 const diag = vscode.languages.createDiagnosticCollection('aspectcode');
 
@@ -139,13 +160,6 @@ let lastTouchedFiles: string[] = [];
 
 // Track applied violations to prevent re-showing diagnostics
 const appliedViolationIds = new Set<string>();
-
-// Store last validation response for autofix operations
-let lastExaminationResponse: any = null;
-
-// Store workspace edit for preview/apply functionality
-let pendingWorkspaceEdit: vscode.WorkspaceEdit | null = null;
-let pendingAutofixData: any = null;
 
 async function getWorkspaceRoot(): Promise<string | undefined> {
   const folders = vscode.workspace.workspaceFolders;
@@ -529,10 +543,6 @@ async function examineWorkspaceDiff(context?: vscode.ExtensionContext) {
 
 function renderDiagnostics(resp: any) {
   outputChannel?.appendLine(`=== renderDiagnostics called ===`);
-  // Violations received (verbose JSON logging removed for performance)
-
-  // Store validation response for autofix operations
-  lastExaminationResponse = resp;
 
   diag.clear();
   const map = new Map<string, vscode.Diagnostic[]>();
@@ -573,13 +583,13 @@ function renderDiagnostics(resp: any) {
     }
     if (!file) continue;
 
-    const d = new vscode.Diagnostic(range, v.explain || 'Aspect Code issue', vscode.DiagnosticSeverity.Warning);
+    const d: AspectCodeDiagnostic = new vscode.Diagnostic(range, v.explain || 'Aspect Code issue', vscode.DiagnosticSeverity.Warning);
     d.source = 'Aspect Code';
     d.code = v.rule || 'ASPECT_CODE_RULE';
 
     // Store violation ID in diagnostic for later tracking
     if (v.id) {
-      (d as any).violationId = v.id;
+      d.violationId = v.id;
     }
 
     const arr = map.get(file) || [];
@@ -700,430 +710,12 @@ async function applyUnifiedDiffToWorkspace(repoRoot: string, patchedDiff: string
   }
 }
 
-// Create WorkspaceEdit from autofix response for preview
-async function createWorkspaceEditFromAutofix(repoRoot: string, autofixResponse: any): Promise<vscode.WorkspaceEdit | null> {
-  const edit = new vscode.WorkspaceEdit();
-
-  try {
-    // Prefer files[] if available
-    if (autofixResponse.files && autofixResponse.files.length > 0) {
-      for (const file of autofixResponse.files) {
-        const abs = path.join(repoRoot, file.relpath);
-
-        // Security check
-        if (!abs.startsWith(path.resolve(repoRoot))) {
-          outputChannel?.appendLine(`Skipping ${file.relpath} - outside workspace`);
-          continue;
-        }
-
-        const uri = vscode.Uri.file(abs);
-
-        try {
-          // Detect current EOL style
-          const eol = await detectEOL(abs);
-
-          // Convert LF content to match current file's EOL style
-          const content = file.content.replace(/\n/g, eol);
-
-          // Get current document if open, otherwise read from disk
-          let currentContent = '';
-          const doc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === abs);
-          if (doc) {
-            currentContent = doc.getText();
-          } else {
-            try {
-              currentContent = (await vscode.workspace.fs.readFile(uri)).toString();
-            } catch {
-              outputChannel?.appendLine(`Could not read ${file.relpath} - treating as new file`);
-              currentContent = '';
-            }
-          }
-
-          // Create full document replacement
-          const fullRange = new vscode.Range(
-            new vscode.Position(0, 0),
-            new vscode.Position(currentContent.split('\n').length, 0)
-          );
-
-          edit.replace(uri, fullRange, content);
-
-        } catch (e) {
-          outputChannel?.appendLine(`Error processing ${file.relpath}: ${e}`);
-          return null;
-        }
-      }
-      return edit;
-    }
-
-    // Fallback to unified diff parsing
-    if (!autofixResponse.patched_diff || !autofixResponse.patched_diff.trim()) {
-      outputChannel?.appendLine('No patched_diff in autofix response');
-      return null;
-    }
-
-    const parsed = parsePatch(autofixResponse.patched_diff);
-    if (!parsed || parsed.length === 0) {
-      outputChannel?.appendLine('No parseable hunks in diff');
-      return null;
-    }
-
-    for (const filePatch of parsed) {
-      let rel = (filePatch.newFileName || filePatch.oldFileName || '').trim();
-      rel = rel.replace(/^a\//, '').replace(/^b\//, '');
-      if (!rel) continue;
-
-      const abs = path.join(repoRoot, rel);
-      if (!abs.startsWith(path.resolve(repoRoot))) continue;
-
-      const uri = vscode.Uri.file(abs);
-
-      try {
-        // Load current content
-        let cur = '';
-        const doc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === abs);
-        if (doc) {
-          cur = doc.getText();
-        } else {
-          try {
-            cur = (await vscode.workspace.fs.readFile(uri)).toString();
-          } catch {
-            outputChannel?.appendLine(`Could not read ${rel} for diff preview`);
-            continue;
-          }
-        }
-
-        // Detect EOL and normalize for patching
-        const eol = cur.includes('\r\n') ? '\r\n' : '\n';
-        const curLF = cur.replace(/\r\n/g, '\n');
-
-        // Apply the patch
-        const nextLF = applyPatch(curLF, filePatch);
-        if (typeof nextLF !== 'string') {
-          outputChannel?.appendLine(`Failed to apply patch to ${rel}`);
-          continue;
-        }
-
-        // Convert back to original EOL style
-        const next = eol === '\r\n' ? nextLF.replace(/\n/g, '\r\n') : nextLF;
-
-        // Create full document replacement
-        const fullRange = new vscode.Range(
-          new vscode.Position(0, 0),
-          new vscode.Position(cur.split(eol === '\r\n' ? '\r\n' : '\n').length, 0)
-        );
-
-        edit.replace(uri, fullRange, next);
-
-      } catch (e) {
-        outputChannel?.appendLine(`Error processing diff for ${rel}: ${e}`);
-        continue;
-      }
-    }
-
-    return edit;
-
-  } catch (e) {
-    outputChannel?.appendLine(`Error creating workspace edit: ${e}`);
-    return null;
-  }
-}
-
-// Preview autofix changes using workspace edit
-async function previewAutofixChanges(autofixResponse: any, context?: vscode.ExtensionContext) {
-  const root = await getWorkspaceRoot();
-  if (!root) {
-    vscode.window.showErrorMessage('No workspace root found');
-    return;
-  }
-
-  const edit = await createWorkspaceEditFromAutofix(root, autofixResponse);
-  if (!edit) {
-    vscode.window.showErrorMessage('Could not create preview from autofix response');
-    return;
-  }
-
-  // Store for later application
-  pendingWorkspaceEdit = edit;
-  pendingAutofixData = autofixResponse;
-
-  // Apply edit in preview mode
-  const applied = await vscode.workspace.applyEdit(edit);
-  if (!applied) {
-    vscode.window.showErrorMessage('Failed to preview changes');
-    return;
-  }
-
-  // Show information message with action buttons
-  const result = await vscode.window.showInformationMessage(
-    'Aspect Code auto-fix preview applied. Review changes and choose action.',
-    { modal: false },
-    'Apply & Re-examine',
-    'Revert'
-  );
-
-  if (result === 'Apply & Re-examine') {
-    await applyAndReexamine(context);
-  } else if (result === 'Revert') {
-    await revertPendingChanges();
-  }
-}
-
-// Apply pending changes and Re-examine
-async function applyAndReexamine(context?: vscode.ExtensionContext) {
-  if (!pendingWorkspaceEdit || !pendingAutofixData) {
-    vscode.window.showErrorMessage('No pending changes to apply');
-    return;
-  }
-
-  try {
-    // Save all modified documents
-    await vscode.workspace.saveAll();
-
-    // Store original diagnostics to compare later
-    const originalDiagnostics = new Map<string, vscode.Diagnostic[]>();
-    diag.forEach((uri, diagnostics) => {
-      originalDiagnostics.set(uri.fsPath, [...diagnostics]);
-    });
-
-    // Mark applied violations as handled
-    if (pendingAutofixData.fixed_violations) {
-      for (const violationId of pendingAutofixData.fixed_violations) {
-        appliedViolationIds.add(violationId);
-      }
-    }
-
-    // Re-examine workspace
-    await examineWorkspaceDiff(context);
-
-    // Check if validation introduced new problems
-    let hasNewProblems = false;
-    diag.forEach((uri, newDiagnostics) => {
-      const originalDiags = originalDiagnostics.get(uri.fsPath) || [];
-      if (newDiagnostics.length > originalDiags.length) {
-        hasNewProblems = true;
-      }
-    });
-
-    if (hasNewProblems) {
-      // Auto-revert and show toast
-      await revertPendingChanges();
-      vscode.window.showWarningMessage('Auto-fix introduced new issues. Changes reverted.');
-    } else {
-      vscode.window.showInformationMessage('Auto-fix applied successfully!');
-    }
-
-  } catch (e) {
-    vscode.window.showErrorMessage(`Failed to apply changes: ${(e as Error).message}`);
-  } finally {
-    // Clear pending state
-    pendingWorkspaceEdit = null;
-    pendingAutofixData = null;
-  }
-}
-
-// Revert pending workspace changes
-async function revertPendingChanges() {
-  if (!pendingWorkspaceEdit) {
-    return;
-  }
-
-  try {
-    // Create inverse edit to undo changes
-    const undoEdit = new vscode.WorkspaceEdit();
-
-    // For each file that was changed, reload from disk
-    for (const [uri, edits] of pendingWorkspaceEdit.entries()) {
-      if (edits.length > 0) {
-        try {
-          // Read original content from disk
-          const originalContent = (await vscode.workspace.fs.readFile(uri)).toString();
-
-          // Create full document replacement with original content
-          const doc = vscode.workspace.textDocuments.find(d => d.uri.toString() === uri.toString());
-          if (doc) {
-            const fullRange = new vscode.Range(
-              new vscode.Position(0, 0),
-              new vscode.Position(doc.lineCount, 0)
-            );
-            undoEdit.replace(uri, fullRange, originalContent);
-          }
-        } catch (e) {
-          outputChannel?.appendLine(`Could not revert ${uri.fsPath}: ${e}`);
-        }
-      }
-    }
-
-    await vscode.workspace.applyEdit(undoEdit);
-    vscode.window.showInformationMessage('Changes reverted');
-
-  } catch (e) {
-    vscode.window.showErrorMessage(`Failed to revert changes: ${(e as Error).message}`);
-  } finally {
-    pendingWorkspaceEdit = null;
-    pendingAutofixData = null;
-  }
-}
-
-// Autofix functions
-async function callAutofixAPI(violationIds?: string[], context?: vscode.ExtensionContext, violationFiles?: string[]) {
-  const root = await getWorkspaceRoot();
-  if (!root) {
-    vscode.window.showErrorMessage('No workspace root found');
-    return null;
-  }
-
-  const apiUrl = getBaseUrl();
-
-  try {
-    // Build payload same as validate
-    const diff = await runGitDiff(root);
-    
-    // Use files from violations if provided, otherwise fall back to git diff
-    let files: vscode.Uri[];
-    if (violationFiles && violationFiles.length > 0) {
-      outputChannel?.appendLine(`Using ${violationFiles.length} files from violations: ${violationFiles.join(', ')}`);
-      files = violationFiles.map(f => vscode.Uri.file(f));
-    } else {
-      files = await computeTouchedFilesFromGit(root);
-    }
-    
-    const ir = await buildIRForFiles(files, root, context);
-    ir.lang = "python";
-
-    // Run Pyright for type facts
-    const pyrightData = await runPyright(root, files);
-    const type_facts = pyrightData ? {
-      lang: "python",
-      checker: "pyright",
-      data: pyrightData
-    } : { data: {} };
-
-    const payload: any = {
-      repo_root: root,
-      diff,
-      ir,
-      type_facts
-    };
-
-    // Add violation selection if provided
-    if (violationIds && violationIds.length > 0) {
-      payload.select = violationIds;
-    }
-
-    outputChannel?.appendLine(`Calling /autofix with ${violationIds ? violationIds.length : 'all'} violations`);
-
-    const headers = await getHeaders();
-    const res = await fetch(apiUrl + '/autofix', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload)
-    });
-
-    if (!res.ok) {
-      handleHttpError(res.status, res.statusText);
-    }
-
-    const response = await res.json();
-    outputChannel?.appendLine(`Autofix response: ${JSON.stringify(response, null, 2)}`);
-
-    return response;
-
-  } catch (e) {
-    outputChannel?.appendLine(`Autofix API exception: ${e}`);
-    vscode.window.showErrorMessage(`Aspect Code autofix failed: ${(e as Error).message}`);
-    return null;
-  }
-}
-
-async function previewAutofix(violationIds?: string[], context?: vscode.ExtensionContext) {
-  outputChannel?.appendLine(`=== previewAutofix called with ${violationIds ? violationIds.length : 'all'} violations ===`);
-
-  const autofixResponse = await callAutofixAPI(violationIds, context);
-  if (!autofixResponse) {
-    vscode.window.showWarningMessage('Auto-fix request failed. Check the output for details.');
-    return;
-  }
-
-  // Check if any fixes were applied
-  const fixesApplied = (autofixResponse as any).fixes_applied || 0;
-  outputChannel?.appendLine(`Autofix result: ${fixesApplied} fixes applied`);
-
-  if (!(autofixResponse as any).patched_diff && (!(autofixResponse as any).files || (autofixResponse as any).files.length === 0)) {
-    if (fixesApplied === 0) {
-      vscode.window.showInformationMessage('No auto-fixes available for this finding. It may require manual intervention.');
-    } else {
-      vscode.window.showInformationMessage('No preview available, but fixes were applied.');
-    }
-    return;
-  }
-
-  await previewAutofixChanges(autofixResponse, context);
-}
-
-async function autofixSelectedProblems(context?: vscode.ExtensionContext) {
-  // Get all diagnostics from Problems panel
-  const allDiagnostics: { uri: vscode.Uri; diagnostic: vscode.Diagnostic }[] = [];
-
-  diag.forEach((uri, diagnostics) => {
-    for (const diagnostic of diagnostics) {
-      if (diagnostic.source === 'Aspect Code') {
-        allDiagnostics.push({ uri, diagnostic });
-      }
-    }
-  });
-
-  if (allDiagnostics.length === 0) {
-    vscode.window.showInformationMessage('No Aspect Code violations found');
-    return;
-  }
-
-  // Separate fixable and non-fixable violations
-  const fixableItems = allDiagnostics
-    .filter(item => (item.diagnostic as any).violationId)
-    .map((item, index) => ({
-      label: `${path.basename(item.uri.fsPath)}: ${item.diagnostic.message}`,
-      description: item.diagnostic.code?.toString() || '',
-      detail: item.uri.fsPath,
-      picked: true, // Default to selected
-      violationId: (item.diagnostic as any).violationId,
-      index
-    }));
-
-  const nonFixableCount = allDiagnostics.length - fixableItems.length;
-
-  if (fixableItems.length === 0) {
-    vscode.window.showInformationMessage(`No auto-fixable violations found (${nonFixableCount} violations cannot be automatically fixed)`);
-    return;
-  }
-
-  let title = `Select violations to auto-fix (${fixableItems.length} fixable`;
-  if (nonFixableCount > 0) {
-    title += `, ${nonFixableCount} not auto-fixable`;
-  }
-  title += ')';
-
-  const selected = await vscode.window.showQuickPick(fixableItems, {
-    canPickMany: true,
-    title,
-    placeHolder: 'Choose which violations to fix automatically'
-  });
-
-  if (!selected || selected.length === 0) {
-    return;
-  }
-
-  // Extract violation IDs
-  const violationIds = selected.map(item => item.violationId);
-
-  outputChannel?.appendLine(`Multi-select autofix: ${violationIds.length} violations selected`);
-  await previewAutofix(violationIds, context);
-}
-
 // Helper function to send progress updates to the panel
 function sendProgressToPanel(state: AspectCodeState | undefined, phase: string, percentage: number, message: string) {
-  if (state && (state as any)._panelProvider) {
+  const panelProvider = (state as AspectCodeState & { _panelProvider?: AspectCodePanelProvider })?._panelProvider;
+  if (panelProvider) {
     try {
-      ((state as any)._panelProvider as any).post({ 
+      panelProvider.post({ 
         type: 'PROGRESS_UPDATE', 
         phase, 
         percentage, 
@@ -1687,7 +1279,7 @@ async function showRepositoryStatus() {
       handleHttpError(snapshotsRes.status, snapshotsRes.statusText);
     }
 
-    const snapshots = await snapshotsRes.json() as any[];
+    const snapshots = await snapshotsRes.json() as SnapshotInfo[];
 
     // Get storage stats
     const statsHeaders = await getHeaders();
@@ -1696,10 +1288,10 @@ async function showRepositoryStatus() {
       handleHttpError(statsRes.status, statsRes.statusText);
     }
 
-    const stats: any = await statsRes.json();
+    const stats = await statsRes.json() as StorageStats;
 
     // Find current repo snapshot
-    const currentSnapshot = snapshots.find((s: any) => s.repo_root === root);
+    const currentSnapshot = snapshots.find((s) => s.repo_root === root);
 
     let message = 'Repository Status:\n\n';
 
@@ -1902,235 +1494,6 @@ async function fetchCapabilitiesIfNeeded(state: AspectCodeState, force: boolean 
 }
 
 /**
- * Execute the Fix (safe) command with safety auto-revert.
- */
-async function executeFixSafeCommand(state: AspectCodeState, context: vscode.ExtensionContext, panelProvider?: any) {
-  try {
-    // Guard: if busy → return
-    if (state.s.busy) {
-      outputChannel?.appendLine('Fix (safe) already in progress');
-      return;
-    }
-
-    // Mark as busy
-    state.update({ busy: true });
-    const startTime = Date.now();
-    
-    outputChannel?.appendLine('Starting Fix (safe) operation...');
-    
-    // Get capabilities first
-    let safeRuleSet = state.getSafeRuleSet();
-    
-    outputChannel?.appendLine(`Safe rule set size: ${safeRuleSet.size}`);
-    outputChannel?.appendLine(`Safe rules: ${Array.from(safeRuleSet).join(', ')}`);
-    
-    if (safeRuleSet.size === 0) {
-      outputChannel?.appendLine('No capabilities available. Attempting to fetch now...');
-      await fetchCapabilitiesIfNeeded(state, true); // Force refresh
-      const newSafeRuleSet = state.getSafeRuleSet();
-      outputChannel?.appendLine(`After fetch attempt: ${newSafeRuleSet.size} safe rules`);
-      
-      if (newSafeRuleSet.size === 0) {
-        vscode.window.showInformationMessage('No capabilities available. Try reloading the window.');
-        state.update({ busy: false });
-        return;
-      }
-      
-      // Update safeRuleSet for the rest of the function
-      safeRuleSet = newSafeRuleSet;
-    }
-
-    // Get current findings from state (may have cached snapshot IDs)
-    const currentFindings = state.s.findings || [];
-    outputChannel?.appendLine(`Current findings: ${currentFindings.length}`);
-
-    // Filter to fixable + allowed rules  
-    const fixableFindings = currentFindings.filter(f => {
-      const ruleCode = f._raw?.rule || f.code;
-      const isFixable = f.fixable;
-      const isSafe = safeRuleSet.has(ruleCode);
-      
-      outputChannel?.appendLine(`Finding ${f.id}: rule=${ruleCode}, fixable=${isFixable}, safe=${isSafe}`);
-      
-      return isFixable && isSafe;
-    });
-
-    if (fixableFindings.length === 0) {
-      vscode.window.showInformationMessage('No safe fixable findings found.');
-      state.update({ busy: false });
-      return;
-    }
-
-    // Build selection list of finding IDs (cap at 200 per batch)
-    const findingIds = fixableFindings.slice(0, 200).map(f => f.id).filter(Boolean);
-    
-    if (findingIds.length === 0) {
-      vscode.window.showInformationMessage('No findings with valid IDs found.');
-      state.update({ busy: false });
-      return;
-    }
-
-    outputChannel?.appendLine(`Found ${findingIds.length} safe fixable findings`);
-
-    // Group by file to enforce max files constraint
-    const fileGroups = new Map<string, string[]>();
-    for (const finding of fixableFindings) {
-      if (!finding.id) continue;
-      
-      // Get file path from finding.file or extract from locations in _raw
-      let file = finding.file;
-      if (!file && finding._raw && finding._raw.locations && finding._raw.locations.length > 0) {
-        const loc = finding._raw.locations[0];
-        const match = loc.match(/^(.*):(\d+):(\d+)-(\d+):(\d+)$/);
-        if (match) {
-          file = match[1]; // Extract file path from location
-          outputChannel?.appendLine(`Extracted file from location: ${loc} → ${file}`);
-        }
-      }
-      
-      if (!file) {
-        outputChannel?.appendLine(`Warning: No file path found for finding ${finding.id}`);
-        continue;
-      }
-      
-      if (!fileGroups.has(file)) {
-        fileGroups.set(file, []);
-      }
-      fileGroups.get(file)!.push(finding.id);
-    }
-
-    // Enforce max 3 files per batch
-    const fileList = Array.from(fileGroups.keys());
-    if (fileList.length > 3) {
-      const limitedIds: string[] = [];
-      for (let i = 0; i < 3; i++) {
-        limitedIds.push(...fileGroups.get(fileList[i])!);
-      }
-      findingIds.splice(0, findingIds.length, ...limitedIds);
-      outputChannel?.appendLine(`Limited to first 3 files (${limitedIds.length} findings)`);
-    }
-
-    // Extract unique file paths from the fixable findings
-    const violationFiles = Array.from(new Set(
-      fixableFindings.map(f => {
-        let file = f.file;
-        if (!file && f._raw && f._raw.locations && f._raw.locations.length > 0) {
-          const loc = f._raw.locations[0];
-          const match = loc.match(/^(.*):(\d+):(\d+)-(\d+):(\d+)$/);
-          if (match) {
-            file = match[1];
-          }
-        }
-        // Normalize path separators for deduplication
-        return file ? path.resolve(file) : null;
-      }).filter((file): file is string => Boolean(file))
-    ));
-    
-    outputChannel?.appendLine(`Violation files: ${violationFiles.join(', ')}`);
-
-    // Since cached findings have snapshot-* IDs but server expects detector-* IDs,
-    // we need to call autofix without specific IDs to let it find all fixable violations
-    outputChannel?.appendLine('Calling autofix without specific violation IDs to avoid ID mismatch...');
-    const resp = await callAutofixAPI([], context, violationFiles);  // Empty array = fix all found violations
-    if (!resp) {
-      state.update({ busy: false });
-      return;
-    }
-
-    outputChannel?.appendLine(`Autofix response keys: ${Object.keys(resp).join(', ')}`);
-
-    // If server returns a unified diff, apply it
-    const patchedDiff = (resp as any)?.patched_diff;
-    const files = (resp as any)?.files;
-    
-    outputChannel?.appendLine(`Patched diff length: ${patchedDiff?.length || 0}`);
-    outputChannel?.appendLine(`Files array length: ${files?.length || 0}`);
-    
-    if (files && files.length > 0) {
-      outputChannel?.appendLine(`Files to patch: ${files.map((f: any) => f.relpath).join(', ')}`);
-    }
-    
-    if (patchedDiff && typeof patchedDiff === 'string') {
-      outputChannel?.appendLine(`Diff preview: ${patchedDiff.substring(0, 200)}...`);
-    } else {
-      outputChannel?.appendLine(`Diff is not a string: ${typeof patchedDiff}`);
-    }
-    
-    if (patchedDiff && patchedDiff.trim()) {
-      const root = await getWorkspaceRoot();
-      if (!root) {
-        outputChannel?.appendLine('ERROR: No workspace root found');
-        state.update({ busy: false });
-        return;
-      }
-      
-      outputChannel?.appendLine(`Using workspace root: ${root}`);
-
-      // Track which files we're changing
-      const touchedFiles = extractFilesFromDiff(patchedDiff);
-      const linesChanged = countLinesInDiff(patchedDiff);
-      
-      outputChannel?.appendLine(`Applying diff: ${touchedFiles.length} files, ${linesChanged} lines`);
-
-      // Apply diff to workspace  
-      await applyUnifiedDiffToWorkspace(root, patchedDiff, files);
-      await vscode.workspace.saveAll();
-
-      // Re-EXAMINE: First on touched files, then full repo
-      outputChannel?.appendLine('Re-validating touched files...');
-      
-      // Simple re-validation approach: just validate the whole workspace
-      await examineWorkspaceDiff(context);
-      
-      // Check for safety violations in the updated state
-      // Note: In a full implementation, we'd specifically check touched files for safety.* or exc.* violations
-      // and auto-revert if any are found. For now, we'll log success.
-      
-      const tookMs = Date.now() - startTime;
-      
-      // Update state history
-      const historyEntry = {
-        ts: Date.now(),
-        kind: 'autofix' as any, // Add to HistoryItem type if needed
-        meta: {
-          fixed_by: 'fixSafe',
-          filesChanged: touchedFiles.length,
-          linesChanged,
-          fixedCount: findingIds.length,
-          tookMs
-        }
-      };
-      
-      state.update({
-        busy: false,
-        history: [...state.s.history, historyEntry]
-      });
-
-      // Show success message
-      const successMsg = `Applied: ${touchedFiles.length} files / ${linesChanged} lines • Fixed ${findingIds.length} findings • Re-examine OK`;
-      vscode.window.showInformationMessage(successMsg);
-      
-      // Update panel last action
-      if (panelProvider) {
-        panelProvider.setLastAction(successMsg);
-      }
-      
-      outputChannel?.appendLine(`Fix (safe) completed in ${tookMs}ms`);
-      
-    } else {
-      outputChannel?.appendLine('No changes from autofix');
-      state.update({ busy: false });
-      vscode.window.showInformationMessage('No changes applied by autofix.');
-    }
-
-  } catch (error) {
-    outputChannel?.appendLine(`Fix (safe) error: ${error}`);
-    vscode.window.showErrorMessage(`Fix (safe) failed: ${error}`);
-    state.update({ busy: false });
-  }
-}
-
-/**
  * Extract file paths from a unified diff.
  */
 function extractFilesFromDiff(diff: string): string[] {
@@ -2218,7 +1581,7 @@ export async function activate(context: vscode.ExtensionContext) {
   const panelProvider = new AspectCodePanelProvider(context, state, outputChannel);
   
   // Store panel provider reference in state for progress updates
-  (state as any)._panelProvider = panelProvider;
+  (state as AspectCodeState & { _panelProvider?: AspectCodePanelProvider })._panelProvider = panelProvider;
   
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider('aspectcode.panel', panelProvider, {
@@ -2564,8 +1927,7 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
   
-  // 3. FIX SAFE - Removed legacy command, now uses Auto-Fix V1 pipeline
-  // All fix operations now go through Aspect Code.applyAutofix for consistency
+  // 3. FIX SAFE - Removed legacy auto-fix command
   
   // 2. SHOW PANEL - Display the main Aspect Code panel
   context.subscriptions.push(
@@ -2680,16 +2042,6 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
   
-  // 6. PREVIEW AUTOFIX - Auto-Fix feature temporarily disabled
-  // context.subscriptions.push(
-  //   vscode.commands.registerCommand('aspectcode.previewAutofix', async (violationIds?: string[]) => {
-  //     await previewAutofix(violationIds, context);
-  //   })
-  // );
-  
-  // 6. AUTO FIX SAFE - Now handled by Auto-Fix V1 pipeline in newCommandsIntegration.ts
-  // Removed duplicate registration to avoid conflicts
-  
   // Note: Aspect Code.openFinding command is now registered in newCommandsIntegration.ts
 
   // ===== EXTENSION SETUP =====
@@ -2801,183 +2153,11 @@ export async function activate(context: vscode.ExtensionContext) {
   const codeActionProvider: vscode.CodeActionProvider = {
     provideCodeActions(doc, range, ctx) {
       const actions: vscode.CodeAction[] = [];
-      const aspectCodeDiagnostics = ctx.diagnostics.filter(d => d.source === 'Aspect Code');
-
-      for (const d of aspectCodeDiagnostics) {
-        // Legacy specific fixes
-        if (d.code === 'symbols_missing') {
-          const action = new vscode.CodeAction('Aspect Code: Apply Suggested Import', vscode.CodeActionKind.QuickFix);
-          action.command = {
-            title: 'Apply Suggested Import',
-            command: 'aspectcode.applySuggestedImport',
-            arguments: [doc.uri, d]
-          };
-          action.diagnostics = [d];
-          actions.push(action);
-        } else if (d.code === 'signature_compatibility') {
-          const action = new vscode.CodeAction('Aspect Code: Insert Optional Guard', vscode.CodeActionKind.QuickFix);
-          action.command = {
-            title: 'Insert Optional Guard',
-            command: 'aspectcode.applyOptionalGuard',
-            arguments: [doc.uri, d]
-          };
-          action.diagnostics = [d];
-          actions.push(action);
-        }
-
-        // General autofix for any Aspect Code diagnostic
-        if ((d as any).violationId) {
-          const action = new vscode.CodeAction('Aspect Code: Preview Auto-fix', vscode.CodeActionKind.QuickFix);
-          action.command = {
-            title: 'Preview Auto-fix',
-            command: 'aspectcode.previewAutofix',
-            arguments: [[(d as any).violationId]]
-          };
-          action.diagnostics = [d];
-          actions.push(action);
-        }
-      }
-
-      // Add multi-select autofix if multiple diagnostics
-      if (aspectCodeDiagnostics.length > 1) {
-        const violationIds = aspectCodeDiagnostics
-          .map(d => (d as any).violationId)
-          .filter(id => id !== undefined);
-
-        if (violationIds.length > 0) {
-          const action = new vscode.CodeAction(`Aspect Code: Auto-fix All (${violationIds.length})`, vscode.CodeActionKind.QuickFix);
-          action.command = {
-            title: 'Auto-fix All Issues',
-            command: 'aspectcode.previewAutofix',
-            arguments: [violationIds]
-          };
-          action.diagnostics = aspectCodeDiagnostics;
-          actions.push(action);
-        }
-      }
-
+      // NOTE: Autofix actions removed - feature disabled
       return actions;
     }
   };
   context.subscriptions.push(vscode.languages.registerCodeActionsProvider({ scheme: 'file', language: 'python' }, codeActionProvider));
-
-  // Command implementation
-  context.subscriptions.push(vscode.commands.registerCommand('aspectcode.applySuggestedImport', async (uri: vscode.Uri, diag: vscode.Diagnostic) => {
-    const root = await getWorkspaceRoot();
-    if (!root) return;
-    const apiUrl = getBaseUrl();
-
-    // Build payload same as validate
-    const diff = await runGitDiff(root);
-    const files = await computeTouchedFilesFromGit(root);
-    const ir = await buildIRForFiles(files, root, context);
-    ir.lang = "python";
-
-    // Run Pyright for type facts
-    const pyrightData = await runPyright(root, files);
-    const type_facts = pyrightData ? {
-      lang: "python",
-      checker: "pyright",
-      data: pyrightData
-    } : { data: {} };
-
-    // We need the violation id; stash it in Diagnostic? For MVP, re-call validate and pick the one matching this location/explain
-    const validatePayload = {
-      repo_root: root, diff, ir,
-      type_facts, modes: ['structure', 'types'], autofix: false
-    };
-    const validateHeaders = await getHeaders();
-    const vr = await fetch(apiUrl + '/validate', { method: 'POST', headers: validateHeaders, body: JSON.stringify(validatePayload) });
-    if (!vr.ok) { handleHttpError(vr.status, vr.statusText); }
-    const vjson: any = await vr.json();
-
-    // Select first fixable import_insert violation at this file position
-    const abs = uri.fsPath;
-    const pick = (vjson.violations || []).find((v: any) =>
-      v.fixable && v.suggested_fix_kind === 'import_insert' &&
-      v.locations && v.locations[0] && v.locations[0].startsWith(abs)
-    );
-    if (!pick) {
-      vscode.window.showInformationMessage('No applicable Aspect Code import fix found.');
-      return;
-    }
-
-    const afPayload = { repo_root: root, diff, ir, select: [pick.id] };
-    const afHeaders = await getHeaders();
-    const ar = await fetch(apiUrl + '/autofix', { method: 'POST', headers: afHeaders, body: JSON.stringify(afPayload) });
-    if (!ar.ok) { handleHttpError(ar.status, ar.statusText); }
-    const aj: any = await ar.json();
-
-    if (!aj?.patched_diff || !aj.patched_diff.trim()) {
-      vscode.window.showInformationMessage('No changes from autofix.');
-      return;
-    }
-
-    await applyUnifiedDiffToWorkspace(root, aj.patched_diff, aj.files);
-
-    // Save file, then Re-examine
-    await vscode.workspace.saveAll();
-    await examineWorkspaceDiff(context);
-  }));
-
-  // Command implementation for optional guard
-  context.subscriptions.push(vscode.commands.registerCommand('aspectcode.applyOptionalGuard', async (uri: vscode.Uri, diag: vscode.Diagnostic) => {
-    const root = await getWorkspaceRoot();
-    if (!root) return;
-    const apiUrl = getBaseUrl();
-
-    // Build payload same as validate
-    const diff = await runGitDiff(root);
-    const files = await computeTouchedFilesFromGit(root);
-    const ir = await buildIRForFiles(files, root, context);
-    ir.lang = "python";
-
-    // Run Pyright for type facts
-    const pyrightData = await runPyright(root, files);
-    const type_facts = pyrightData ? {
-      lang: "python",
-      checker: "pyright",
-      data: pyrightData
-    } : { data: {} };
-
-    // We need the violation id; re-call validate and pick the one matching this location/explain
-    const validatePayload = {
-      repo_root: root, diff, ir,
-      type_facts, modes: ['structure', 'types'], autofix: false
-    };
-    const validateHeaders = await getHeaders();
-    const vr = await fetch(apiUrl + '/validate', { method: 'POST', headers: validateHeaders, body: JSON.stringify(validatePayload) });
-    if (!vr.ok) { handleHttpError(vr.status, vr.statusText); }
-    const vjson: any = await vr.json();
-
-    // Select first fixable optional_return_guard violation at this file position
-    const abs = uri.fsPath;
-    const pick = (vjson.violations || []).find((v: any) =>
-      v.fixable && v.suggested_fix_kind === 'optional_return_guard' &&
-      v.locations && v.locations[0] && v.locations[0].startsWith(abs)
-    );
-    if (!pick) {
-      vscode.window.showInformationMessage('No applicable Aspect Code optional guard fix found.');
-      return;
-    }
-
-    const afPayload = { repo_root: root, diff, ir, select: [pick.id] };
-    const afHeaders = await getHeaders();
-    const ar = await fetch(apiUrl + '/autofix', { method: 'POST', headers: afHeaders, body: JSON.stringify(afPayload) });
-    if (!ar.ok) { handleHttpError(ar.status, ar.statusText); }
-    const aj: any = await ar.json();
-
-    if (!aj?.patched_diff || !aj.patched_diff.trim()) {
-      vscode.window.showInformationMessage('No changes from optional guard autofix.');
-      return;
-    }
-
-    await applyUnifiedDiffToWorkspace(root, aj.patched_diff, aj.files);
-
-    // Save file, then Re-examine
-    await vscode.workspace.saveAll();
-    await examineWorkspaceDiff(context);
-  }));
 
   // Activate new JSON Protocol v1 commands
   activateNewCommands(context, state, outputChannel);

@@ -91,8 +91,6 @@ export function activateNewCommands(
       if (!(await requireExtensionEnabled())) return;
       return commands.scanActiveFile();
     }),
-    // Auto-Fix commands temporarily disabled
-    // vscode.commands.registerCommand('aspectcode.applyAutofix', (findings?: any) => commands.applyAutofix(findings)),
     vscode.commands.registerCommand('aspectcode.openFinding', async (finding: any) => {
       if (!(await requireExtensionEnabled())) return;
       return commands.openFinding(finding);
@@ -372,25 +370,6 @@ export function activateNewCommands(
     configStatusBarItem.show();
     
     context.subscriptions.push(statusBarItem, configStatusBarItem);
-  }
-}
-
-async function handleAutoFixSafe(commands: AspectCodeCommands): Promise<void> {
-  try {
-    // Get all findings currently in state (primary) and diagnostics (fallback)
-    const allFindings = commands.getCurrentFindings();
-
-    if (allFindings.length === 0) {
-      vscode.window.showInformationMessage('No findings available. Please run analysis first.');
-      return;
-    }
-
-    // Apply Auto-Fix v1 to existing findings (this will filter for compatible rules)
-    // The applyAutofix method will handle all state management including busy state
-    await commands.applyAutofix(allFindings);
-    
-  } catch (error) {
-    vscode.window.showErrorMessage(`Auto-Fix v1 failed: ${error}`);
   }
 }
 
