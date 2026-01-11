@@ -1,6 +1,6 @@
 # Proprietary License
 
-Copyright © 2025 Aspect Code. All rights reserved.
+Copyright © 2025-2026 Aspect Code. All rights reserved.
 
 ## Terms and Conditions
 
@@ -35,4 +35,4 @@ This license is effective until terminated. It will terminate automatically with
 
 ---
 
-For licensing inquiries, contact: [Insert Contact Information]
+For licensing inquiries, contact: info@aspectcode.com

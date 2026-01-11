@@ -409,12 +409,15 @@ export class WorkspaceFingerprint implements vscode.Disposable {
 
   private async saveFingerprint(data: FingerprintData): Promise<void> {
     try {
-      // Ensure .aspect directory exists
+      // IMPORTANT: Never create .aspect/ implicitly.
+      // The first time we write anything into the workspace must be user-initiated
+      // (e.g., via the '+' setup button / explicit KB generation).
       const aspectDir = vscode.Uri.file(path.join(this.workspaceRoot, '.aspect'));
       try {
         await vscode.workspace.fs.stat(aspectDir);
       } catch {
-        await vscode.workspace.fs.createDirectory(aspectDir);
+        // No KB directory yet; skip writing fingerprint.
+        return;
       }
 
       const uri = vscode.Uri.file(this.getFingerprintPath());
