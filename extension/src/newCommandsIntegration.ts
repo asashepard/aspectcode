@@ -459,7 +459,16 @@ async function handleConfigureAssistants(
 
     if (!selected) {
       // User cancelled - re-check instruction files status so '+' button reappears if needed
-      await checkInstructionFilesExist(context, state, outputChannel, false);
+      const panelProvider = (state as any)._panelProvider;
+      const detected = await detectAssistants(workspaceRoot);
+      const hasAspectKB = detected.has('aspectKB');
+      const instructionAssistants = new Set(detected);
+      instructionAssistants.delete('aspectKB');
+      const hasInstructionFiles = instructionAssistants.size > 0;
+      const setupComplete = hasAspectKB && hasInstructionFiles;
+      if (panelProvider && typeof panelProvider.post === 'function') {
+        panelProvider.post({ type: 'INSTRUCTION_FILES_STATUS', hasFiles: setupComplete });
+      }
       return;
     }
 
