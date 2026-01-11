@@ -211,10 +211,12 @@ export class AspectCodeCommands {
 
   /**
    * Scan workspace command with category filtering.
+   * Note: This uses the local Python engine which requires server/ folder.
+   * Not available in OSS builds. For OSS, use dependency graph + KB instead.
    */
   async scanWorkspace(): Promise<void> {
     if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
-      vscode.window.showErrorMessage('Aspect Code: Scanning is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+      vscode.window.showErrorMessage('Aspect Code: Scanning requires server setup or API key.', 'Enter API Key').then(sel => {
         if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
       });
       return;
@@ -292,10 +294,12 @@ export class AspectCodeCommands {
 
   /**
    * Scan active file command.
+   * Note: This uses the local Python engine which requires server/ folder.
+   * Not available in OSS builds.
    */
   async scanActiveFile(): Promise<void> {
     if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
-      vscode.window.showErrorMessage('Aspect Code: Scanning is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+      vscode.window.showErrorMessage('Aspect Code: Scanning requires server setup or API key.', 'Enter API Key').then(sel => {
         if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
       });
       return;

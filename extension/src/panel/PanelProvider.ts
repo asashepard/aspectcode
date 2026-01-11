@@ -650,25 +650,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             return;
         }
 
-        // API-key gate: block dependency graph + workspace scanning unless a key is configured.
-        // Do NOT require auth status to be 'ok' here; first server request will validate.
-        const hasApiKey = await this.computeHasApiKey();
-        const authStatus = getApiKeyAuthStatus();
-        if (!hasApiKey || authStatus === 'invalid' || authStatus === 'revoked') {
-            const isFirstGraphLoad = !this._initialGraphSent;
-            this.post({
-                type: 'DEPENDENCY_GRAPH',
-                graph: { nodes: [], links: [], focusMode: true, centerFile: null },
-                stats: { totalFiles: 0, totalDeps: 0, totalCycles: 0 }
-            });
-
-            if (isFirstGraphLoad) {
-                this._initialGraphSent = true;
-                this.post({ type: 'GRAPH_READY' });
-                this._setupInProgress = false;
-            }
-            return;
-        }
+        // Dependency graph is now always available offline (no API key required)
 
         // Track if this is the first graph load (enables UI + suppresses startup warning)
         const isFirstGraphLoad = !this._initialGraphSent;
@@ -1514,16 +1496,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'REGENERATE_KB':
-          // Regenerate knowledge base files
+          // Regenerate knowledge base files (works offline - no API key required)
           try {
-                                                const hasApiKey = await this.computeHasApiKey();
-                                                const authStatus = getApiKeyAuthStatus();
-                                                if (!hasApiKey || authStatus === 'invalid' || authStatus === 'revoked') {
-                                                        vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
-                                                                if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
-                                                        });
-                                                        break;
-                                                }
             await vscode.commands.executeCommand('aspectcode.generateKB');
           } catch (e) {
             console.error('[PanelProvider] Failed to regenerate KB:', e);
@@ -1531,14 +1505,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           break;
 
                 case 'CYCLE_AUTO_REGENERATE_KB': {
-                    const hasApiKey = await this.computeHasApiKey();
-                    const authStatus = getApiKeyAuthStatus();
-                    if (!hasApiKey || authStatus === 'invalid' || authStatus === 'revoked') {
-                        vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
-                            if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
-                        });
-                        break;
-                    }
+                    // Cycling auto-regenerate setting works offline - no API key required
                     const current = this.getAutoRegenerateKbMode();
                     const next: 'off' | 'onSave' | 'idle' = current === 'off'
                         ? 'onSave'
@@ -1559,16 +1526,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 }
 
         case 'FORCE_REINDEX':
-                    {
-                        const hasApiKey = await this.computeHasApiKey();
-                        const authStatus = getApiKeyAuthStatus();
-                        if (!hasApiKey || authStatus === 'invalid' || authStatus === 'revoked') {
-                            vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
-                                if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
-                            });
-                            break;
-                        }
-                    }
+          // Force reindex works offline - rebuilds local dependency graph
           // Show native VS Code confirmation dialog
           const confirmed = await vscode.window.showWarningMessage(
                         'Rebuild analysis caches and re-index the workspace? This rebuilds the dependency/indexing data and may take a moment.',
@@ -1582,12 +1540,23 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
 
         case 'COMMAND':
           if (msg?.command) {
-                        if (msg.command !== 'aspectcode.enterApiKey' && msg.command !== 'aspectcode.clearApiKey') {
+                        // Server-only commands that truly require API key (local Python engine)
+                        const serverOnlyCommands = [
+                            'aspectcode.scanWorkspace',
+                            'aspectcode.scanActiveFile'
+                        ];
+                        // Note: aspectcode.examine is NOT in this list - it gracefully skips
+                        // server validation when no API key (still useful for local KB refresh)
+                        
+                        const isServerCommand = serverOnlyCommands.includes(msg.command);
+                        
+                        // Only gate API key management and actual server commands
+                        if (msg.command !== 'aspectcode.enterApiKey' && msg.command !== 'aspectcode.clearApiKey' && isServerCommand) {
                             const hasApiKey = await this.computeHasApiKey();
                             const authStatus = getApiKeyAuthStatus();
                             const blocked = !hasApiKey || authStatus === 'invalid' || authStatus === 'revoked';
                             if (blocked) {
-                                vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
+                                vscode.window.showErrorMessage('Aspect Code: Server features require an API key.', 'Enter API Key').then(sel => {
                                     if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
                                 });
                                 break;
@@ -1704,42 +1673,21 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'EXPLAIN_FILE': {
-                    const hasApiKey = await this.computeHasApiKey();
-                    const authStatus = getApiKeyAuthStatus();
-                    if (!hasApiKey || authStatus === 'invalid' || authStatus === 'revoked') {
-                        vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
-                            if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
-                        });
-                        break;
-                    }
+          // Note: This command may not be registered - kept for future use
           await vscode.commands.executeCommand('aspectcode.explainFile');
           break;
         }
 
         case 'PROPOSE_FIXES': {
-                        const hasApiKey = await this.computeHasApiKey();
-                        const authStatus = getApiKeyAuthStatus();
-                        if (!hasApiKey || authStatus === 'invalid' || authStatus === 'revoked') {
-                            vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
-                                if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
-                            });
-                            break;
-                        }
                     // Propose Fixes was removed; keep the panel button working by invoking
                     // the single user-input prompt generator command.
+                    // Note: aspectcode.generatePrompt works offline - no API key required
                     await vscode.commands.executeCommand('aspectcode.generatePrompt');
           break;
         }
 
         case 'ALIGN_ISSUE': {
-                    const hasApiKey = await this.computeHasApiKey();
-                    const authStatus = getApiKeyAuthStatus();
-                    if (!hasApiKey || authStatus === 'invalid' || authStatus === 'revoked') {
-                        vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
-                            if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
-                        });
-                        break;
-                    }
+          // Note: This command may not be registered - kept for future use
           await vscode.commands.executeCommand('aspectcode.alignIssue');
           break;
         }
@@ -4519,24 +4467,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     setSimpleOpenKbVisible(false);
                     return;
                 }
-                if (hasApiKey === false) {
-                    el.textContent = 'Aspect Code • API key required';
-                    el.style.display = 'block';
-                    setSimpleOpenKbVisible(false);
-                    return;
-                }
-                if (authStatus === 'revoked') {
-                    el.textContent = 'Aspect Code • API key revoked';
-                    el.style.display = 'block';
-                    setSimpleOpenKbVisible(false);
-                    return;
-                }
-                if (authStatus === 'invalid') {
-                    el.textContent = 'Aspect Code • API key invalid';
-                    el.style.display = 'block';
-                    setSimpleOpenKbVisible(false);
-                    return;
-                }
+                // Note: We don't show special status for missing/invalid/revoked API key.
+                // The UI should look the same regardless - KB and graph work offline.
 
                 // Check if KB exists (pendingInstructionFilesStatus is false when no KB)
                 const kbExists = pendingInstructionFilesStatus !== false;
@@ -4567,11 +4499,10 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 const simpleSpinnerActive = !!(simpleSpinner && simpleSpinner.classList && simpleSpinner.classList.contains('active'));
                 const isBusy = !!(currentState && currentState.busy) || graphSpinnerActive || simpleSpinnerActive;
 
-                const apiBlocked = !!(currentState && (
-                    currentState.hasApiKey === false
-                    || currentState.apiKeyAuthStatus === 'invalid'
-                    || currentState.apiKeyAuthStatus === 'revoked'
-                ));
+                // Note: We no longer disable buttons based on API key status.
+                // All KB/graph features work offline. Server-only commands will show
+                // an error message when triggered without an API key.
+                const apiBlocked = false; // Disabled - buttons work without API key
 
                 const extensionDisabled = !!(currentState && currentState.extensionEnabled === false);
 
@@ -4836,25 +4767,23 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             const cyclesEl = document.getElementById('panel-status-cycles');
             const kbWarnEl = document.getElementById('panel-status-kb-warning');
 
-            // If API key is missing/invalid/revoked, replace the entire footer row with a clickable banner.
-            const hasApiKey = currentState?.hasApiKey;
+            // Note: We no longer show a banner for missing API key - the UI looks the same.
+            // Only show banner for invalid/revoked key when user actually HAS a key configured.
+            // If hasApiKey is false, don't show the banner even if authStatus is 'invalid'
+            // (that just means they never had a key, not that their key was rejected).
             const authStatus = currentState?.apiKeyAuthStatus;
-            const showMissing = hasApiKey === false;
-            const showInvalid = !showMissing && (authStatus === 'invalid' || authStatus === 'revoked');
+            const hasApiKey = currentState?.hasApiKey;
+            const showInvalid = hasApiKey && (authStatus === 'invalid' || authStatus === 'revoked');
 
-            if (showMissing || showInvalid) {
+            if (showInvalid) {
                 if (leftEl) leftEl.style.display = 'none';
                 if (rightEl) rightEl.style.display = 'none';
                 if (apiKeyMissingEl) {
-                    const message = showMissing
-                        ? '⚠ API key missing • Click to enter'
-                        : (authStatus === 'revoked'
-                            ? '⚠ API key revoked • Click to re-enter'
-                            : '⚠ API key invalid • Click to re-enter');
+                    const message = authStatus === 'revoked'
+                        ? '⚠ API key revoked • Click to re-enter'
+                        : '⚠ API key invalid • Click to re-enter';
                     apiKeyMissingEl.textContent = message;
-                    apiKeyMissingEl.title = showMissing
-                        ? 'Aspect Code requires an API key. Click to enter your API key.'
-                        : 'Your API key was rejected by the server. Click to re-enter your API key.';
+                    apiKeyMissingEl.title = 'Your API key was rejected by the server. Click to re-enter your API key.';
                     apiKeyMissingEl.style.display = 'flex';
                 }
                 return;

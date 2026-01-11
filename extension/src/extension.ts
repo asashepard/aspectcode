@@ -1295,6 +1295,18 @@ async function examineFullRepository(
   modesOverride?: string[]
 ) {
   outputChannel?.appendLine(`[examineFullRepository] Called with state: ${state ? 'YES' : 'NO'}`);
+  
+  // Check if API key is available - if not, skip server validation gracefully
+  const hasKey = await hasApiKeyConfigured();
+  if (!hasKey || isApiKeyBlocked()) {
+    outputChannel?.appendLine('[examineFullRepository] No API key configured - skipping server validation');
+    // Just complete without error - KB and graph still work
+    if (state) {
+      state.update({ busy: false });
+    }
+    return;
+  }
+  
   const perfEnabled = vscode.workspace.getConfiguration().get<boolean>('aspectcode.devLogs', true);
   const root = await getWorkspaceRoot();
   if (!root) {
@@ -2172,17 +2184,19 @@ export async function activate(context: vscode.ExtensionContext) {
   // Initialize HTTP module with secrets storage for API key management
   initHttp(context);
 
-  // Check if API key is configured - prompt user if not
+  // Check if API key is configured - inform user about optional server features (only once)
   const existingApiKey = await context.secrets.get('aspectcode.apiKey');
   const configApiKey = vscode.workspace.getConfiguration('aspectcode').get<string>('apiKey');
+  const apiKeyPromptDismissed = context.globalState.get<boolean>('aspectcode.apiKeyPromptDismissed', false);
   
-  if (!existingApiKey && !configApiKey) {
-    // No API key configured - prompt user (non-blocking; do not stall activation)
+  if (!existingApiKey && !configApiKey && !apiKeyPromptDismissed) {
+    // No API key configured and user hasn't dismissed - show info once
+    // Note: KB and dependency graph work without API key
     vscode.window
-      .showWarningMessage(
-        'Aspect Code requires an API key to function. Please enter your API key.',
+      .showInformationMessage(
+        'Aspect Code: Enter an API key to enable server-backed analysis (optional - KB features work offline).',
         'Enter API Key',
-        'Later'
+        'Don\'t show again'
       )
       .then((choice) => {
         if (choice === 'Enter API Key') {
@@ -2190,6 +2204,8 @@ export async function activate(context: vscode.ExtensionContext) {
           setTimeout(() => {
             vscode.commands.executeCommand('aspectcode.enterApiKey');
           }, 500);
+        } else if (choice === 'Don\'t show again') {
+          context.globalState.update('aspectcode.apiKeyPromptDismissed', true);
         }
       });
   }
@@ -2275,17 +2291,11 @@ export async function activate(context: vscode.ExtensionContext) {
     // Set up KB regeneration callback for idle/onSave auto-regeneration
     workspaceFingerprint.setKbRegenerateCallback(async () => {
       try {
-        if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
-          outputChannel.appendLine('[KB] Auto-regeneration skipped (API key missing/blocked)');
-          return;
-        }
         const regenStart = Date.now();
-        outputChannel.appendLine('[KB] Auto-regenerating (examine + KB)...');
+        outputChannel.appendLine('[KB] Auto-regenerating KB...');
 
-        // Ensure server-backed analysis is up to date before regenerating KB.
-        // This keeps the KB accurate over time even if only auto-regeneration runs.
-        await vscode.commands.executeCommand('aspectcode.examine');
-
+        // KB generation works offline (uses local dependency analysis)
+        // Skip server examine if no API key - KB will be less enriched but still useful
         const { autoRegenerateKBFiles } = await import('./assistants/kb');
         await autoRegenerateKBFiles(state, outputChannel, context);
         await workspaceFingerprint?.markKbFresh();
@@ -2431,12 +2441,7 @@ export async function activate(context: vscode.ExtensionContext) {
             return;
           }
         }
-        if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
-          vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
-            if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
-          });
-          return;
-        }
+        // Note: examineFullRepository will skip server validation if no API key (works offline)
         outputChannel?.appendLine('=== EXAMINE: Starting repository examination ===');
         
         // Validate the entire repository
@@ -2482,12 +2487,7 @@ export async function activate(context: vscode.ExtensionContext) {
           return;
         }
       }
-      if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
-        vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
-          if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
-        });
-        return;
-      }
+      // Note: KB generation works offline - no API key required
 
       try {
         const regenStart = Date.now();
@@ -2652,12 +2652,7 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('aspectcode.forceReindex', async () => {
       try {
-        if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
-          vscode.window.showErrorMessage('Aspect Code: This action is disabled until an API key is configured.', 'Enter API Key').then(sel => {
-            if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
-          });
-          return;
-        }
+        // Note: Force reindex works offline - rebuilds local dependency graph
         outputChannel?.appendLine('=== FORCE REINDEX: Clearing state and reindexing ===');
         
         // Clear state and run full index + examine

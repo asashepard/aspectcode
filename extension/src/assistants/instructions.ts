@@ -380,9 +380,11 @@ async function generateCopilotInstructions(
   await vscode.workspace.fs.writeFile(instructionsFile, Buffer.from(newContent, 'utf-8'));
   outputChannel.appendLine('[Instructions] Generated .github/copilot-instructions.md');
 
-  // Prompt user for gitignore preference for this specific file
+  // Prompt user for gitignore preference for this specific file (fire-and-forget, don't block)
   const target: GitignoreTarget = '.github/copilot-instructions.md';
-  await ensureGitignoreForTarget(workspaceRoot, target, outputChannel);
+  void ensureGitignoreForTarget(workspaceRoot, target, outputChannel).catch(e => {
+    outputChannel.appendLine(`[Instructions] Gitignore prompt failed (non-critical): ${e}`);
+  });
 }
 
 function generateCopilotContent(mode: InstructionsMode): string {
@@ -445,9 +447,11 @@ async function generateCursorRules(
   await vscode.workspace.fs.writeFile(rulesFile, Buffer.from(newContent, 'utf-8'));
   outputChannel.appendLine('[Instructions] Generated .cursor/rules/aspectcode.mdc');
 
-  // Prompt user for gitignore preference for this specific file
+  // Prompt user for gitignore preference for this specific file (fire-and-forget, don't block)
   const target: GitignoreTarget = '.cursor/rules/aspectcode.mdc';
-  await ensureGitignoreForTarget(workspaceRoot, target, outputChannel);
+  void ensureGitignoreForTarget(workspaceRoot, target, outputChannel).catch(e => {
+    outputChannel.appendLine(`[Instructions] Gitignore prompt failed (non-critical): ${e}`);
+  });
 }
 
 function generateCursorContent(mode: InstructionsMode): string {
@@ -524,9 +528,11 @@ async function generateClaudeInstructions(
   await vscode.workspace.fs.writeFile(claudeFile, Buffer.from(newContent, 'utf-8'));
   outputChannel.appendLine('[Instructions] Generated CLAUDE.md');
 
-  // Prompt user for gitignore preference for this specific file
+  // Prompt user for gitignore preference for this specific file (fire-and-forget, don't block)
   const target: GitignoreTarget = 'CLAUDE.md';
-  await ensureGitignoreForTarget(workspaceRoot, target, outputChannel);
+  void ensureGitignoreForTarget(workspaceRoot, target, outputChannel).catch(e => {
+    outputChannel.appendLine(`[Instructions] Gitignore prompt failed (non-critical): ${e}`);
+  });
 }
 
 function generateClaudeContent(mode: InstructionsMode): string {
@@ -588,9 +594,11 @@ async function generateOtherInstructions(
   await vscode.workspace.fs.writeFile(agentsFile, Buffer.from(newContent, 'utf-8'));
   outputChannel.appendLine('[Instructions] Generated AGENTS.md');
 
-  // Prompt user for gitignore preference for this specific file
+  // Prompt user for gitignore preference for this specific file (fire-and-forget, don't block)
   const target: GitignoreTarget = 'AGENTS.md';
-  await ensureGitignoreForTarget(workspaceRoot, target, outputChannel);
+  void ensureGitignoreForTarget(workspaceRoot, target, outputChannel).catch(e => {
+    outputChannel.appendLine(`[Instructions] Gitignore prompt failed (non-critical): ${e}`);
+  });
 }
 
 /**

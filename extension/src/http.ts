@@ -42,16 +42,26 @@ export function resetApiKeyAuthStatus(): void {
  * status/statusText (not the full Response).
  *
  * This updates API key auth status and throws.
+ * Note: For 401/403, we only show error toasts if a key was actually configured
+ * (to avoid spamming users in offline mode).
  */
 export function handleHttpError(status: number, statusText: string): never {
   if (status === 401) {
     setApiKeyAuthStatus('invalid');
-    void vscode.window.showErrorMessage(
-      'Aspect Code: API key is missing or invalid.',
-      'Enter API Key'
-    ).then(choice => {
-      if (choice === 'Enter API Key') {
-        void vscode.commands.executeCommand('aspectcode.enterApiKey');
+    // Only show error toast if user had configured a key (not in offline mode)
+    // Check is async but we use cached apiKeyAuthStatus as proxy
+    // If status was 'ok' before, user had a working key that's now invalid
+    // Otherwise they never had a key configured
+    hasApiKeyConfigured().then(hasKey => {
+      if (hasKey) {
+        void vscode.window.showErrorMessage(
+          'Aspect Code: API key is invalid.',
+          'Enter API Key'
+        ).then(choice => {
+          if (choice === 'Enter API Key') {
+            void vscode.commands.executeCommand('aspectcode.enterApiKey');
+          }
+        });
       }
     });
     throw new Error('Authentication failed: Invalid or missing API key');
@@ -216,6 +226,8 @@ export async function getHeaders(requestId?: string): Promise<Record<string, str
 /**
  * Handle HTTP errors with user-friendly messages.
  * Returns retry info for retryable errors, throws for non-retryable.
+ * Note: For 401/403, we only show error toasts if a key was actually configured
+ * (to avoid spamming users in offline mode).
  */
 async function handleHttpResponseError(
   res: Response,
@@ -226,14 +238,18 @@ async function handleHttpResponseError(
   
   if (status === 401) {
     setApiKeyAuthStatus('invalid');
-    vscode.window.showErrorMessage(
-      "Aspect Code: API key is missing or invalid.",
-      "Enter API Key"
-    ).then(choice => {
-      if (choice === "Enter API Key") {
-        vscode.commands.executeCommand("aspectcode.enterApiKey");
-      }
-    });
+    // Only show error if user had configured a key (not in offline mode)
+    const hasKey = await hasApiKeyConfigured();
+    if (hasKey) {
+      vscode.window.showErrorMessage(
+        "Aspect Code: API key is invalid.",
+        "Enter API Key"
+      ).then(choice => {
+        if (choice === "Enter API Key") {
+          vscode.commands.executeCommand("aspectcode.enterApiKey");
+        }
+      });
+    }
     throw new Error("Authentication failed: Invalid or missing API key");
   }
   
