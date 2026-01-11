@@ -187,7 +187,7 @@
     "build": "npm run build:extension && npm run build:webview && npm run copy:css",
     "build:extension": "esbuild src/extension.ts --bundle --platform=node --outfile=dist/extension.js --external:vscode",
     "build:webview": "esbuild src/panel/webview/main.ts --bundle --platform=browser --outfile=dist/panel-webview.js",
-    "copy:css": "copy src\\panel\\webview\\style.css dist\\panel-webview.css",
+    "copy:css": "node -e \"const fs=require('fs'); fs.mkdirSync('dist',{recursive:true}); fs.copyFileSync('src/panel/webview/style.css','dist/panel-webview.css');\"",
     "watch": "npm run watch:extension & npm run watch:webview",
     "watch:extension": "esbuild src/extension.ts --bundle --platform=node --outfile=dist/extension.js --external:vscode --watch",
     "watch:webview": "esbuild src/panel/webview/main.ts --bundle --platform=browser --outfile=dist/panel-webview.js --watch",
