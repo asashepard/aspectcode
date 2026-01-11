@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
 import { AspectCodeState } from '../state';
-import { ScoreResult } from '../scoring/scoreEngine';
 import { generateKnowledgeBase } from './kb';
 import { ensureGitignoreForTarget } from '../services/gitignoreService';
 import { GitignoreTarget, InstructionsMode, getAssistantsSettings, getInstructionsModeSetting } from '../services/aspectSettings';
@@ -242,7 +241,6 @@ export interface AssistantsOverride {
 
 async function generateInstructionFilesForEnabledAssistants(
   workspaceRoot: vscode.Uri,
-  scoreResult: ScoreResult | null,
   outputChannel: vscode.OutputChannel,
   assistantsOverride?: AssistantsOverride
 ): Promise<void> {
@@ -259,7 +257,7 @@ async function generateInstructionFilesForEnabledAssistants(
   const promises: Promise<void>[] = [];
 
   if (wantCopilot) {
-    promises.push(generateCopilotInstructions(workspaceRoot, scoreResult, outputChannel, mode));
+    promises.push(generateCopilotInstructions(workspaceRoot, outputChannel, mode));
   }
 
   if (wantCursor) {
@@ -267,11 +265,11 @@ async function generateInstructionFilesForEnabledAssistants(
   }
 
   if (wantClaude) {
-    promises.push(generateClaudeInstructions(workspaceRoot, scoreResult, outputChannel, mode));
+    promises.push(generateClaudeInstructions(workspaceRoot, outputChannel, mode));
   }
 
   if (wantOther) {
-    promises.push(generateOtherInstructions(workspaceRoot, scoreResult, outputChannel, mode));
+    promises.push(generateOtherInstructions(workspaceRoot, outputChannel, mode));
   }
 
   await Promise.all(promises);
@@ -284,10 +282,9 @@ async function generateInstructionFilesForEnabledAssistants(
  */
 export async function regenerateInstructionFilesOnly(
   workspaceRoot: vscode.Uri,
-  scoreResult: ScoreResult | null,
   outputChannel: vscode.OutputChannel
 ): Promise<void> {
-  await generateInstructionFilesForEnabledAssistants(workspaceRoot, scoreResult, outputChannel);
+  await generateInstructionFilesForEnabledAssistants(workspaceRoot, outputChannel);
 }
 
 /**
@@ -304,7 +301,6 @@ export async function regenerateInstructionFilesOnly(
 export async function generateInstructionFiles(
   workspaceRoot: vscode.Uri,
   state: AspectCodeState,
-  scoreResult: ScoreResult | null,
   outputChannel: vscode.OutputChannel,
   context?: vscode.ExtensionContext,
   assistantsOverride?: AssistantsOverride
@@ -324,7 +320,7 @@ export async function generateInstructionFiles(
   if (needsKbGeneration) {
     outputChannel.appendLine('[Instructions] KB files not found, generating...');
     try {
-      await generateKnowledgeBase(workspaceRoot, state, scoreResult, outputChannel, context);
+      await generateKnowledgeBase(workspaceRoot, state, outputChannel, context);
       outputChannel.appendLine('[Instructions] KB generation complete');
     } catch (kbError) {
       outputChannel.appendLine(`[Instructions] KB generation failed: ${kbError}`);
@@ -332,7 +328,7 @@ export async function generateInstructionFiles(
     }
   }
 
-  await generateInstructionFilesForEnabledAssistants(workspaceRoot, scoreResult, outputChannel, assistantsOverride);
+  await generateInstructionFilesForEnabledAssistants(workspaceRoot, outputChannel, assistantsOverride);
 }
 
 /**
@@ -340,7 +336,6 @@ export async function generateInstructionFiles(
  */
 async function generateCopilotInstructions(
   workspaceRoot: vscode.Uri,
-  scoreResult: ScoreResult | null,
   outputChannel: vscode.OutputChannel,
   mode: InstructionsMode
 ): Promise<void> {
@@ -490,7 +485,6 @@ ${generateCanonicalContentForMode(mode)}
  */
 async function generateClaudeInstructions(
   workspaceRoot: vscode.Uri,
-  scoreResult: ScoreResult | null,
   outputChannel: vscode.OutputChannel,
   mode: InstructionsMode
 ): Promise<void> {
@@ -556,7 +550,6 @@ function generateClaudeContent(mode: InstructionsMode): string {
  */
 async function generateOtherInstructions(
   workspaceRoot: vscode.Uri,
-  scoreResult: ScoreResult | null,
   outputChannel: vscode.OutputChannel,
   mode: InstructionsMode
 ): Promise<void> {

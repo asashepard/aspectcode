@@ -13,7 +13,6 @@ import { detectAssistants, AssistantId } from './assistants/detection';
 import { generateInstructionFiles, regenerateInstructionFilesOnly, AssistantsOverride } from './assistants/instructions';
 import { generateKnowledgeBase } from './assistants/kb';
 import { getBaseUrl, hasApiKeyConfigured, isApiKeyBlocked, hasValidApiKey } from './http';
-import type { ScoreResult } from './scoring/scoreEngine';
 import { stopIgnoringGeneratedFilesCommand } from './services/gitignoreService';
 import { InstructionsMode, getAssistantsSettings, getInstructionsModeSetting, setInstructionsModeSetting, updateAspectSettings, getExtensionEnabledSetting, setExtensionEnabledSetting, aspectDirExists } from './services/aspectSettings';
 import { cancelAndResetAllInFlightWork } from './services/enablementCancellation';
@@ -319,7 +318,7 @@ export function activateNewCommands(
       const assistants = await getAssistantsSettings(workspaceRoot, channel);
       const hasEnabledAssistants = assistants.copilot || assistants.cursor || assistants.claude || assistants.other;
       if (hasEnabledAssistants) {
-        await regenerateInstructionFilesOnly(workspaceRoot, null, channel);
+        await regenerateInstructionFilesOnly(workspaceRoot, channel);
       }
     } catch (e) {
       channel.appendLine(`[Watcher] Failed to auto-switch from custom to off: ${e}`);
@@ -584,43 +583,9 @@ async function handleGenerateInstructionFiles(
       outputChannel.appendLine(`[Instructions] Examination complete, ${findings.length} findings`);
     }
 
-    // Calculate score from current findings
-    let scoreResult: ScoreResult | null = null;
-
-    if (findings.length > 0) {
-      // Import score engine dynamically to avoid circular deps
-      const { AsymptoticScoreEngine } = await import('./scoring/scoreEngine');
-      const scoreEngine = new AsymptoticScoreEngine();
-      
-      // Convert state findings to scoreEngine format
-      const scoringFindings = findings.map(f => {
-        // Map severity from state format to scoring format
-        let severity: 'critical' | 'high' | 'medium' | 'low' | 'info' = 'info';
-        if (f.severity === 'error') {
-          severity = 'critical';
-        } else if (f.severity === 'warn') {
-          severity = 'medium';
-        } else {
-          severity = 'info';
-        }
-
-        return {
-          id: f.id || '',
-          rule: f.code,
-          severity,
-          message: f.message,
-          file: f.file,
-          locations: [],
-          fixable: f.fixable
-        };
-      });
-
-      scoreResult = scoreEngine.calculateScore(scoringFindings);
-    }
-
     // Generate instruction files (pass assistants override if provided)
     const tGen = Date.now();
-    await generateInstructionFiles(workspaceRoot, state, scoreResult, outputChannel, context, assistantsOverride);
+    await generateInstructionFiles(workspaceRoot, state, outputChannel, context, assistantsOverride);
     if (perfEnabled) {
       outputChannel.appendLine(`[Perf][Instructions][cmd] generateInstructionFiles tookMs=${Date.now() - tGen}`);
     }
@@ -750,7 +715,7 @@ async function handleSetInstructionMode(mode: InstructionsMode, outputChannel: v
 
     if (hasEnabledAssistants) {
       // Regenerate instruction files only; do not run EXAMINE or KB generation.
-      await regenerateInstructionFilesOnly(workspaceRoot, null, outputChannel);
+      await regenerateInstructionFilesOnly(workspaceRoot, outputChannel);
     } else {
       // No assistants configured - nothing to regenerate.
       outputChannel.appendLine('[Instructions] No assistants enabled; skipped instruction file regeneration');
@@ -810,7 +775,7 @@ async function handleEditCustomInstructions(outputChannel: vscode.OutputChannel)
     const assistants = await getAssistantsSettings(workspaceRoot, outputChannel);
     const hasEnabledAssistants = assistants.copilot || assistants.cursor || assistants.claude || assistants.other;
     if (hasEnabledAssistants) {
-      await regenerateInstructionFilesOnly(workspaceRoot, null, outputChannel);
+      await regenerateInstructionFilesOnly(workspaceRoot, outputChannel);
     }
 
     const doc = await vscode.workspace.openTextDocument(customFile);

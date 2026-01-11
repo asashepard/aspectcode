@@ -84,34 +84,6 @@ body {
   min-width: 120px;
 }
 
-/* Repository Score */
-.repo-score {
-  text-align: center;
-  padding: 8px 16px;
-  background: var(--vscode-badge-background);
-  border-radius: 8px;
-  border: 1px solid var(--vscode-panel-border);
-}
-
-.score-label {
-  font-size: 10px;
-  color: var(--vscode-descriptionForeground);
-  text-transform: uppercase;
-  font-weight: 500;
-}
-
-.score-value {
-  font-size: 24px;
-  font-weight: 700;
-  color: var(--vscode-charts-green);
-  margin: 4px 0;
-}
-
-.score-subtext {
-  font-size: 10px;
-  color: var(--vscode-descriptionForeground);
-}
-
 /* Content Area Layout */
 .content-area {
   flex: 1;

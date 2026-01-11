@@ -1,9 +1,9 @@
 {
-  "name": "aspect-code",
+  "name": "aspectcode",
   "displayName": "Aspect Code",
-  "description": "AI-powered static analysis with Tree-sitter for bug detection, security vulnerabilities, and AI assistant integration",
+  "description": "AI-powered static analysis with Tree-sitter for AI assistant integration",
   "version": "0.1.0",
-  "publisher": "aspect-code",
+  "publisher": "aspectcode",
   "license": "SEE LICENSE IN LICENSE.md",
   "preview": true,
   "repository": {

@@ -1547,32 +1547,6 @@ export async function activate(context: vscode.ExtensionContext) {
   // Initialize HTTP module with secrets storage for API key management
   initHttp(context);
 
-  // Check if API key is configured - inform user about optional server features (only once)
-  const existingApiKey = await context.secrets.get('aspectcode.apiKey');
-  const configApiKey = vscode.workspace.getConfiguration('aspectcode').get<string>('apiKey');
-  const apiKeyPromptDismissed = context.globalState.get<boolean>('aspectcode.apiKeyPromptDismissed', false);
-  
-  if (!existingApiKey && !configApiKey && !apiKeyPromptDismissed) {
-    // No API key configured and user hasn't dismissed - show info once
-    // Note: KB and dependency graph work without API key
-    vscode.window
-      .showInformationMessage(
-        'Aspect Code: Enter an API key to enable server-backed analysis (optional - KB features work offline).',
-        'Enter API Key',
-        'Don\'t show again'
-      )
-      .then((choice) => {
-        if (choice === 'Enter API Key') {
-          // Delay slightly to ensure extension is fully activated
-          setTimeout(() => {
-            vscode.commands.executeCommand('aspectcode.enterApiKey');
-          }, 500);
-        } else if (choice === 'Don\'t show again') {
-          context.globalState.update('aspectcode.apiKeyPromptDismissed', true);
-        }
-      });
-  }
-
   // Initialize state
   const state = new AspectCodeState(context);
   state.load();

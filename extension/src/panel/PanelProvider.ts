@@ -2301,26 +2301,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             padding: 6px 8px;
         }
         
-        /* Score improvement badge on Auto-Fix button */
-        .improvement-badge {
-            position: absolute;
-            top: -6px;
-            right: -6px;
-            background: var(--vscode-charts-green);
-            color: var(--vscode-editor-background);
-            font-size: 9px;
-            font-weight: 700;
-            padding: 2px 5px;
-            border-radius: 8px;
-            min-width: 20px;
-            text-align: center;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
-        }
-        
-        #auto-fix-safe-button {
-            position: relative;
-        }
-        
         /* View container */
         .view-container {
             flex: 1;
@@ -6181,12 +6161,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 informational: sortedFindings.filter(f => isInformational(f)).length
             };
             
-            // Calculate autofix potential using same value as badge
-            let autofixScore = 0;
-            if (state && state.score && state.score.potentialImprovement) {
-                autofixScore = state.score.potentialImprovement;
-            }
-            
             // Create summary bar and insert it at the top of findings view
             const summaryBar = document.createElement('div');
             summaryBar.className = 'findings-summary';\n            summaryBar.style.marginTop = '-4px';
@@ -6886,29 +6860,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 toast.classList.add('fade-out');
                 setTimeout(() => toast.remove(), 300);
             }, 2000);
-        }
-        
-        function updateAutoFixBadge(button, state) {
-            // Remove existing badge if present
-            const existingBadge = button.querySelector('.improvement-badge');
-            if (existingBadge) {
-                existingBadge.remove();
-            }
-            
-            // Calculate potential improvement from score
-            let potentialImprovement = 0;
-            if (state.score && state.score.potentialImprovement) {
-                potentialImprovement = state.score.potentialImprovement;
-            }
-            
-            // Add badge if there's potential improvement
-            if (potentialImprovement > 0) {
-                const badge = document.createElement('span');
-                badge.className = 'improvement-badge';
-                badge.textContent = '+' + potentialImprovement.toFixed(1);
-                badge.title = 'Auto-fixing could improve score by ' + potentialImprovement.toFixed(1) + ' points';
-                button.appendChild(badge);
-            }
         }
         
         // Initialize default tab (graph tab is already active in HTML)

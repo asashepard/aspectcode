@@ -61,26 +61,6 @@ export type StateSnapshot = {
   processingPhase?: string;
   progress?: number;
   kbStale?: boolean;
-  score?: {
-    overall: number;
-    breakdown: {
-      totalFindings: number;
-      severityBreakdown: { [key: string]: number };
-      categoryBreakdown: { [key: string]: number };
-      fileTypeBreakdown: { [key: string]: number };
-      concentrationPenalty: number;
-      volumePenalty: number;
-      totalDeductions: number;
-      categoryImpacts: { [key: string]: number };
-    };
-    subScores: {
-      complexity: number | null;
-      coverage: number | null;
-      documentation: number | null;
-    };
-    insights: string[];
-    potentialImprovement?: number;
-  };
 };
 
 export type Snapshot = { renderedFindings: number; filters: any; history: StateSnapshot['history']; lastDiffMeta?: StateSnapshot['lastDiffMeta'] };
@@ -253,26 +233,16 @@ function updateStats(state: StateSnapshot) {
 }
 
 function updateRepositoryScore(state: StateSnapshot) {
-  // Use the asymptotic score from the scoring engine if available
-  let score = 0;
-  let grade = 'F';
-  let potentialImprovement = 0;
-  
-  if (state.score && state.score.overall !== undefined) {
-    // Use asymptotic scoring engine result
-    score = state.score.overall;
-    potentialImprovement = state.score.potentialImprovement || 0;
-  } else {
-    // Fallback: simple scoring algorithm (legacy)
-    const totalIssues = state.findings.length;
-    const criticalIssues = state.findings.filter(f => f.severity === 'error').length;
-    score = 100;
-    score -= criticalIssues * 10;
-    score -= (totalIssues - criticalIssues) * 2;
-    score = Math.max(0, Math.min(100, score));
-  }
+  // Simple scoring algorithm based on findings
+  const totalIssues = state.findings.length;
+  const criticalIssues = state.findings.filter(f => f.severity === 'error').length;
+  let score = 100;
+  score -= criticalIssues * 10;
+  score -= (totalIssues - criticalIssues) * 2;
+  score = Math.max(0, Math.min(100, score));
   
   // Determine letter grade based on score
+  let grade = 'F';
   if (score >= 90) grade = 'A+';
   else if (score >= 85) grade = 'A';
   else if (score >= 80) grade = 'A-';
@@ -296,32 +266,6 @@ function updateRepositoryScore(state: StateSnapshot) {
     score >= 80 ? 'var(--vscode-charts-green)' :
     score >= 60 ? 'var(--vscode-charts-yellow)' :
     'var(--vscode-charts-red)';
-  
-  // Update Auto-Fix button with potential improvement badge
-  updateAutoFixBadge(potentialImprovement);
-}
-
-function updateAutoFixBadge(improvement: number) {
-  const button = document.getElementById('auto-fix-safe-button');
-  if (!button) {
-    return;
-  }
-  
-  // Remove existing badge if present
-  const existingBadge = button.querySelector('.improvement-badge');
-  if (existingBadge) {
-    existingBadge.remove();
-  }
-  
-  // Add badge if there's potential improvement
-  if (improvement > 0) {
-    const badge = document.createElement('span');
-    badge.className = 'improvement-badge';
-    badge.textContent = `+${improvement.toFixed(1)}`;
-    badge.title = `Auto-fixing could improve score by ${improvement.toFixed(1)} points`;
-    badge.style.cssText = 'position: absolute; top: -6px; right: -6px; background: #4CAF50; color: white; font-size: 9px; font-weight: 700; padding: 2px 5px; border-radius: 8px; z-index: 1000;';
-    button.appendChild(badge);
-  }
 }
 
 function updateFindingsDisplay() {

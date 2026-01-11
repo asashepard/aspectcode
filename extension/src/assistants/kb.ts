@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { AspectCodeState } from '../state';
-import { ScoreResult } from '../scoring/scoreEngine';
 import { DependencyAnalyzer, DependencyLink } from '../panel/DependencyAnalyzer';
 import { loadGrammarsOnce, LoadedGrammars } from '../tsParser';
 import { ensureGitignoreForTarget } from '../services/gitignoreService';
@@ -202,41 +201,8 @@ export async function autoRegenerateKBFiles(
   }
   
   try {
-    // Calculate score from current findings
-    const findings = state.s.findings;
-    let scoreResult: ScoreResult | null = null;
-
-    if (findings.length > 0) {
-      const { AsymptoticScoreEngine } = await import('../scoring/scoreEngine');
-      const scoreEngine = new AsymptoticScoreEngine();
-      
-      // Convert state findings to scoring format
-      const scoringFindings = findings.map(f => {
-        let severity: 'critical' | 'high' | 'medium' | 'low' | 'info' = 'info';
-        if (f.severity === 'error') {
-          severity = 'critical';
-        } else if (f.severity === 'warn') {
-          severity = 'medium';
-        } else {
-          severity = 'info';
-        }
-
-        return {
-          id: f.id || '',
-          rule: f.code,
-          severity,
-          message: f.message,
-          file: f.file,
-          locations: [],
-          fixable: f.fixable
-        };
-      });
-
-      scoreResult = scoreEngine.calculateScore(scoringFindings);
-    }
-
     // Regenerate KB files
-    await generateKnowledgeBase(workspaceRoot, state, scoreResult, outputChannel, context);
+    await generateKnowledgeBase(workspaceRoot, state, outputChannel, context);
     
     outputChannel.appendLine('[KB] Auto-regenerated after examination update');
   } catch (error) {
@@ -255,7 +221,6 @@ export async function autoRegenerateKBFiles(
 export async function generateKnowledgeBase(
   workspaceRoot: vscode.Uri,
   state: AspectCodeState,
-  scoreResult: ScoreResult | null,
   outputChannel: vscode.OutputChannel,
   context?: vscode.ExtensionContext
 ): Promise<void> {
