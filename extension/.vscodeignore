@@ -1,0 +1,42 @@
+# Source files (compiled to dist/)
+src/**
+test/**
+scripts/**
+
+# Development files
+.vscode/**
+.vscode-test/**
+node_modules/**
+
+# TypeScript artifacts
+**/*.ts
+!dist/**/*.js
+**/tsconfig.json
+**/*.map
+
+# Build tools
+esbuild.js
+webpack.config.js
+
+# Test fixtures
+**/test/**
+**/*.test.js
+
+# Documentation source
+docs/**
+
+# Git
+.git/**
+.gitignore
+
+# Editor files
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Package files
+*.vsix

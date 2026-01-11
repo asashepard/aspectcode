@@ -1,0 +1,81 @@
+name: Publish to Marketplace
+
+on:
+  # Manual trigger with version input
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Release type'
+        required: true
+        default: 'pre-release'
+        type: choice
+        options:
+          - pre-release
+          - stable
+  
+  # Trigger on version tags
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Install dependencies
+        working-directory: extension
+        run: npm ci
+
+      - name: Build extension
+        working-directory: extension
+        run: npm run build
+
+      - name: Install vsce
+        run: npm install -g @vscode/vsce
+
+      - name: Determine release type
+        id: release_type
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "type=${{ github.event.inputs.release_type }}" >> $GITHUB_OUTPUT
+          else
+            # Default to pre-release for tag pushes during alpha
+            echo "type=pre-release" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Publish to Marketplace (Pre-release)
+        if: steps.release_type.outputs.type == 'pre-release'
+        working-directory: extension
+        run: vsce publish --pre-release -p ${{ secrets.VSCE_PAT }}
+
+      - name: Publish to Marketplace (Stable)
+        if: steps.release_type.outputs.type == 'stable'
+        working-directory: extension
+        run: vsce publish -p ${{ secrets.VSCE_PAT }}
+
+      - name: Get version
+        id: version
+        working-directory: extension
+        run: echo "version=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Aspect Code v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: ${{ steps.release_type.outputs.type == 'pre-release' }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

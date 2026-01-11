@@ -1,12 +1,48 @@
 {
   "name": "aspect-code",
   "displayName": "Aspect Code",
-  "version": "0.0.1",
+  "description": "AI-powered static analysis with Tree-sitter for bug detection, security vulnerabilities, and AI assistant integration",
+  "version": "0.1.0",
+  "publisher": "aspect-code",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "preview": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/asashepard/aspectcode"
+  },
+  "bugs": {
+    "url": "https://github.com/asashepard/aspectcode/issues"
+  },
+  "homepage": "https://github.com/asashepard/aspectcode#readme",
+  "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#1a1a2e",
+    "theme": "dark"
+  },
+  "keywords": [
+    "static analysis",
+    "linter",
+    "code quality",
+    "security",
+    "bugs",
+    "tree-sitter",
+    "copilot",
+    "cursor",
+    "claude",
+    "AI",
+    "typescript",
+    "python",
+    "java",
+    "csharp",
+    "javascript",
+    "code review"
+  ],
   "engines": {
     "vscode": "^1.92.0"
   },
   "categories": [
-    "Other"
+    "Linters",
+    "Programming Languages"
   ],
   "activationEvents": [
     "onStartupFinished"
