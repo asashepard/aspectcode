@@ -5,7 +5,8 @@ import { AspectCodeState } from '../state';
 import { fetchCapabilities, getApiKeyAuthStatus, hasValidApiKey, onDidChangeApiKeyAuthStatus, resetApiKeyAuthStatus, type ApiKeyAuthStatus } from '../http';
 import { DependencyAnalyzer, DependencyLink } from './DependencyAnalyzer';
 import { detectAssistants } from '../assistants/detection';
-import { getAutoRegenerateKbSetting, getInstructionsModeSetting, setAutoRegenerateKbSetting, getExtensionEnabledSetting } from '../services/aspectSettings';
+import { getAutoRegenerateKbSetting, getInstructionsModeSetting, setAutoRegenerateKbSetting, getExtensionEnabledSetting, getExclusionSettings } from '../services/aspectSettings';
+import { DirectoryExclusionService, getDefaultExcludeGlob } from '../services/DirectoryExclusion';
 
 type Finding = { 
   id?: string;
@@ -74,8 +75,10 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
   private _workspaceFilesCache: string[] | null = null;
   private _dependencyCache = new Map<string, any[]>();
   private _graphCache = new Map<string, DependencyGraphData>();
-  private _cacheTimestamp = 0;
-  private readonly _cacheTimeout = 30000; // 30 seconds
+  private _cacheTimestamp = 0; // Timestamp for file discovery cache
+  private _dependencyCacheTimestamp = 0; // Separate timestamp for dependency cache
+  private readonly _cacheTimeout = 30000; // 30 seconds for graph/dependency cache
+  private readonly _fileCacheTimeout = 300000; // 5 minutes for file discovery cache (expensive operation)
   private _fileChangeDebounceTimer: NodeJS.Timeout | null = null;
   private readonly _debounceDelay = 10; // Very fast response - 10ms to batch rapid switches only
   private _lastProcessedFile: string | null = null; // Track last processed file to avoid duplicates
@@ -85,6 +88,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
   private _isProcessingNodeClick: boolean = false; // Flag to indicate node click is being processed
   private _cacheCleanupInterval: NodeJS.Timeout | null = null; // Periodic cache cleanup
   private _kbStale: boolean = false; // Track KB staleness for UI indicator
+  private _fileDiscoveryInFlight: Promise<string[]> | null = null; // Prevent concurrent file discovery
+  private _exclusionService: DirectoryExclusionService | null = null; // Centralized directory exclusion
 
     private _globalGraphStats: DependencyGraphStats | null = null;
     private _globalGraphStatsAt = 0;
@@ -162,13 +167,16 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
       }
       
       // Send dependency graph after state update (async)
-      (async () => {
-        try {
-          await this.sendDependencyGraph();
-        } catch (error) {
-          console.error('[Aspect Code:panel] Error sending dependency graph:', error);
-        }
-      })();
+      // BUT: Skip during busy states to avoid duplicate analysis during reindex
+      if (!s.busy) {
+        (async () => {
+          try {
+            await this.sendDependencyGraph();
+          } catch (error) {
+            console.error('[Aspect Code:panel] Error sending dependency graph:', error);
+          }
+        })();
+      }
     });
 
         // Initialize and live-update API key auth status.
@@ -267,13 +275,28 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         if (cacheSize > 0) {
           this._graphCache.clear();
           this._dependencyCache.clear();
-          this._workspaceFilesCache = null;
+          // NOTE: Don't clear _workspaceFilesCache here - file discovery is expensive
+          // and only needs to refresh on actual file system changes, not time-based
           this._cacheTimestamp = 0;
                     this._globalGraphStats = null;
                     this._globalGraphStatsAt = 0;
         }
       }
     }, 60000); // Every 60 seconds
+
+    // Invalidate file cache only when files are actually created or deleted
+    vscode.workspace.onDidCreateFiles(() => {
+      this._workspaceFilesCache = null;
+      this._outputChannel?.appendLine('[PanelProvider] File created - invalidating file cache');
+    });
+    vscode.workspace.onDidDeleteFiles(() => {
+      this._workspaceFilesCache = null;
+      this._outputChannel?.appendLine('[PanelProvider] File deleted - invalidating file cache');
+    });
+    vscode.workspace.onDidRenameFiles(() => {
+      this._workspaceFilesCache = null;
+      this._outputChannel?.appendLine('[PanelProvider] File renamed - invalidating file cache');
+    });
 
     // Listen for active file changes to refresh dependency graph
     vscode.window.onDidChangeActiveTextEditor(async (editor) => {
@@ -527,8 +550,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
   }
 
     private ensureGlobalGraphStats(allFiles: string[], allDependencies: DependencyLink[]): DependencyGraphStats {
-        // Recompute only when the underlying cache epoch changes.
-        if (this._globalGraphStats && this._globalGraphStatsAt === this._cacheTimestamp) {
+        // Recompute only when the underlying dependency cache epoch changes.
+        if (this._globalGraphStats && this._globalGraphStatsAt === this._dependencyCacheTimestamp) {
             return this._globalGraphStats;
         }
 
@@ -537,7 +560,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         const totalCycles = this.computeCycleGroupCountFromLinks(allFiles, allDependencies);
 
         this._globalGraphStats = { totalFiles, totalDeps, totalCycles };
-        this._globalGraphStatsAt = this._cacheTimestamp;
+        this._globalGraphStatsAt = this._dependencyCacheTimestamp;
         return this._globalGraphStats;
     }
 
@@ -708,11 +731,11 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     // Normalize file path to avoid mismatches
     const normalizedFile = path.normalize(activeFile);
     
-    // Check cache first
+    // Check cache first - use dependency cache timestamp since graphs depend on dependencies
     const now = Date.now();
     const cacheKey = `focused_${normalizedFile}`;
     
-    if (this._graphCache.has(cacheKey) && (now - this._cacheTimestamp) < this._cacheTimeout) {
+    if (this._graphCache.has(cacheKey) && (now - this._dependencyCacheTimestamp) < this._cacheTimeout) {
       const cachedGraph = this._graphCache.get(cacheKey)!;
 
             const cachedAllFiles = this._workspaceFilesCache;
@@ -754,43 +777,45 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         // Always emit a phase message so the spinner has text even if caches are warm.
         setPhase('Preparing dependency graph...');
     
-    // Get all files in workspace (cached)
-    let allFiles = this._workspaceFilesCache;
-    if (!allFiles || (now - this._cacheTimestamp) > this._cacheTimeout) {
-            setPhase('Discovering workspace files...');
-      allFiles = await this.discoverAllWorkspaceFiles();
-      this._workspaceFilesCache = allFiles;
-      this._cacheTimestamp = now;
-    }
+    // Get all files in workspace (uses internal caching and deduplication)
+    let allFiles = await this.discoverAllWorkspaceFiles(setPhase);
     
-    // Ensure the active file is valid (with normalized path comparison)
+    // Ensure the active file is valid (with normalized, case-insensitive path comparison on Windows)
     const normalizedAllFiles = allFiles.map(f => path.normalize(f));
-    let fileIndex = normalizedAllFiles.findIndex(f => f === normalizedFile);
+    const normalizedLower = normalizedFile.toLowerCase();
+    let fileIndex = normalizedAllFiles.findIndex(f => 
+      f === normalizedFile || f.toLowerCase() === normalizedLower
+    );
     
-    if (fileIndex === -1) {
-      console.warn(`[Dependency Graph] Active file not found in workspace: ${normalizedFile}`);
-      console.warn(`[Dependency Graph] Workspace has ${allFiles.length} files. Rescanning...`);
-      
-      // Force rescan and try once more
-      this._workspaceFilesCache = null;
-      allFiles = await this.discoverAllWorkspaceFiles();
-      this._workspaceFilesCache = allFiles;
-      
-      // Update the normalized list and try again
-      const updatedNormalizedFiles = allFiles.map(f => path.normalize(f));
-      fileIndex = updatedNormalizedFiles.findIndex(f => f === normalizedFile);
+    // If file wasn't found in cache, add it dynamically instead of invalidating entire cache.
+    // This handles newly opened files without expensive full rescans.
+    // File watchers handle actual file creations/deletions.
+    if (fileIndex === -1 && this._workspaceFilesCache) {
+      // Check if file actually exists before adding to cache
+      try {
+        await vscode.workspace.fs.stat(vscode.Uri.file(normalizedFile));
+        // File exists - add to cache for this session
+        this._workspaceFilesCache.push(normalizedFile);
+        allFiles = this._workspaceFilesCache;
+        fileIndex = allFiles.length - 1;
+        this._outputChannel?.appendLine(`[PanelProvider] Added missing file to cache: ${path.basename(normalizedFile)}`);
+      } catch {
+        // File doesn't exist on disk - don't add to cache
+        this._outputChannel?.appendLine(`[PanelProvider] File not found on disk: ${normalizedFile}`);
+      }
     }
     
     // Even if file not in workspace, we still need to analyze dependencies to get global stats
-    // Get dependencies (cached)
+    // Get dependencies (cached) - use separate dependency cache timestamp
     let allDependencies = this._dependencyCache.get('all');
-    if (!allDependencies || (now - this._cacheTimestamp) > this._cacheTimeout) {
+    if (!allDependencies || (now - this._dependencyCacheTimestamp) > this._cacheTimeout) {
             setPhase(`Analyzing dependencies (0/${allFiles.length} files)...`);
       allDependencies = await this._dependencyAnalyzer.analyzeDependencies(allFiles, (current, total, phase) => {
         // The phase string from DependencyAnalyzer already includes progress info
         setPhase(phase);
       });
       this._dependencyCache.set('all', allDependencies);
+      this._dependencyCacheTimestamp = Date.now(); // Update dependency-specific timestamp
     }
 
     const stats = this.ensureGlobalGraphStats(allFiles, allDependencies as DependencyLink[]);
@@ -1186,7 +1211,31 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     return maxDepth > 0 ? commonDepth / maxDepth : 0;
   }
   
-  private async discoverAllWorkspaceFiles(): Promise<string[]> {
+  private async discoverAllWorkspaceFiles(onProgress?: (phase: string) => void): Promise<string[]> {
+    // If discovery is already in flight, wait for it instead of starting a new one
+    if (this._fileDiscoveryInFlight) {
+      onProgress?.('Discovering files...');
+      return this._fileDiscoveryInFlight;
+    }
+    
+    // Check cache first (but not if it was just cleared)
+    if (this._workspaceFilesCache && this._workspaceFilesCache.length > 0) {
+      return this._workspaceFilesCache;
+    }
+    
+    // Start new discovery and store the promise
+    this._fileDiscoveryInFlight = this._doDiscoverAllWorkspaceFiles(onProgress);
+    try {
+      const result = await this._fileDiscoveryInFlight;
+      this._workspaceFilesCache = result;
+      this._cacheTimestamp = Date.now();
+      return result;
+    } finally {
+      this._fileDiscoveryInFlight = null;
+    }
+  }
+  
+  private async _doDiscoverAllWorkspaceFiles(onProgress?: (phase: string) => void): Promise<string[]> {
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
       return [];
@@ -1208,33 +1257,95 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
       '**/*.php'
     ];
 
-        // Note: VS Code expects a single glob pattern here; comma-separated lists are not treated as multiple excludes.
-        const exclude = '**/{node_modules,.git,__pycache__,build,dist,target,e2e,playwright,cypress,.venv,venv}/**';
-        const maxResultsPerPattern = 300;
-        const perPatternTimeoutMs = 15_000;
+        // Use centralized directory exclusion service for consistent exclusions
+        let explicitExclude: string;
+        try {
+          const workspaceRoot = workspaceFolders[0].uri.fsPath;
+          
+          // Initialize exclusion service if needed
+          if (!this._exclusionService) {
+            this._exclusionService = new DirectoryExclusionService(workspaceRoot, this._outputChannel);
+          }
+          
+          // Get exclusion settings from .aspect/.settings.json
+          const exclusionSettings = await getExclusionSettings(workspaceFolders[0].uri);
+          const exclusions = await this._exclusionService.computeExclusions(exclusionSettings);
+          explicitExclude = exclusions.excludeGlob || getDefaultExcludeGlob();
+          
+          this._outputChannel?.appendLine(`[PanelProvider] Using exclusion glob: ${explicitExclude.substring(0, 100)}...`);
+        } catch (e) {
+          // Fallback to default exclusions
+          explicitExclude = getDefaultExcludeGlob();
+          this._outputChannel?.appendLine(`[PanelProvider] Using default exclusion glob (error: ${e})`);
+        }
+        
+        // Also build a combined exclude from files.exclude and search.exclude settings
+        // to respect user's gitignore-like configuration.
+        const config = vscode.workspace.getConfiguration();
+        const filesExclude = config.get<Record<string, boolean>>('files.exclude', {});
+        const searchExclude = config.get<Record<string, boolean>>('search.exclude', {});
+        
+        // Collect enabled exclude patterns from settings
+        const settingsExcludes: string[] = [];
+        for (const [pattern, enabled] of Object.entries(filesExclude)) {
+            if (enabled) settingsExcludes.push(pattern);
+        }
+        for (const [pattern, enabled] of Object.entries(searchExclude)) {
+            if (enabled && !settingsExcludes.includes(pattern)) settingsExcludes.push(pattern);
+        }
+        
+        // High limit to catch all files in most repos, but prevent runaway in massive monorepos.
+        // 5000 per pattern = plenty for any reasonable project.
+        const maxResultsPerPattern = 5000;
+        
+        // Run all patterns in parallel for speed, track cumulative file count for progress
+        let totalFilesFound = 0;
+        let completedPatterns = 0;
+        const totalPatterns = patterns.length;
+        
+        const updateProgress = () => {
+            const pct = Math.round((completedPatterns / totalPatterns) * 100);
+            onProgress?.(`Discovering files (${pct}%)...`);
+        };
+        
+        updateProgress();
+        
+        const patternPromises = patterns.map(async (pattern) => {
+            try {
+                const files = await vscode.workspace.findFiles(pattern, explicitExclude, maxResultsPerPattern);
+                completedPatterns++;
+                totalFilesFound += files.length;
+                updateProgress();
+                return files;
+            } catch (error) {
+                console.warn('Error finding files with pattern:', pattern, error);
+                completedPatterns++;
+                updateProgress();
+                return [] as readonly vscode.Uri[];
+            }
+        });
+        
+        const results = await Promise.all(patternPromises);
 
-        const results = await Promise.allSettled(
-            patterns.map(async (pattern) => {
-                try {
-                    const files = await Promise.race<readonly vscode.Uri[]>([
-                        vscode.workspace.findFiles(pattern, exclude, maxResultsPerPattern),
-                        new Promise<readonly vscode.Uri[]>((resolve) => setTimeout(() => resolve([]), perPatternTimeoutMs))
-                    ]);
-                    return files;
-                } catch (error) {
-                    console.warn('Error finding files with pattern:', pattern, error);
-                    return [];
-                }
+        // Build a set of directory/file names to exclude from settings.
+        // Only use patterns that look like directory names (not wildcards like "*" or ".*")
+        const excludeNames = settingsExcludes
+            .map(p => {
+                // Extract just the directory/file name, stripping glob syntax
+                const normalized = p.replace(/\*\*\//g, '').replace(/\/\*\*/g, '').replace(/^\*+/, '').replace(/\*+$/, '');
+                return normalized.toLowerCase();
             })
-        );
+            .filter(p => p.length > 2 && !p.includes('*')); // Must be meaningful name, no remaining wildcards
 
-        for (const result of results) {
-            if (result.status === 'fulfilled') {
-                for (const file of result.value) {
+        for (const fileList of results) {
+            for (const file of fileList) {
+                const filePath = file.fsPath.toLowerCase();
+                // Filter out files matching settings excludes (only if meaningful patterns exist)
+                const excluded = excludeNames.length > 0 && excludeNames.some(name => filePath.includes(name));
+                if (!excluded) {
                     allFiles.add(file.fsPath);
                 }
             }
-            // Ignore rejected results (already logged)
         }
 
         return Array.from(allFiles);
@@ -1320,10 +1431,9 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           if (workspaceRootForKB) {
             const detected = await detectAssistants(workspaceRootForKB);
             hasAspectKB = detected.has('aspectKB');
-            // Check for instruction files (exclude aspectKB and alignments from count)
+            // Check for instruction files (exclude aspectKB)
             const instructionAssistants = new Set(detected);
             instructionAssistants.delete('aspectKB');
-            instructionAssistants.delete('alignments');
             hasInstructionFiles = instructionAssistants.size > 0;
             setupComplete = hasAspectKB && hasInstructionFiles;
           }
@@ -1634,11 +1744,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     break;
                 }
 
-        case 'REQUEST_OVERVIEW_GRAPH':
-          // 3D graph disabled - code kept for future use
-          // await this.sendRandomDependencyGraph();
-          break;
-
         case 'REQUEST_FOCUSED_GRAPH':
           // Always send focused data for 2D graph
           const activeEditorFocused = vscode.window.activeTextEditor;
@@ -1693,7 +1798,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         }
 
         case 'GENERATE_AUTO_FIX_PROMPT': {
-          // Auto-Fix feature temporarily disabled
+          // Auto-Fix feature disabled
           // const findings = msg.payload?.findings || [];
           // await vscode.commands.executeCommand('aspectcode.generateAutoFixPrompt', findings);
           break;
@@ -1757,6 +1862,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     this._graphCache.clear();
     this._workspaceFilesCache = null;
     this._cacheTimestamp = 0;
+    this._dependencyCacheTimestamp = 0; // Also reset dependency cache timestamp
     this._outputChannel?.appendLine('[PanelProvider] Dependency cache invalidated');
   }
 
@@ -2176,42 +2282,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             outline-offset: -1px;
         }
         
-        /* Score display */
-        .score-container {
-            position: relative;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 2px;
-            min-width: 80px;
-        }
-        
-        .score-number {
-            font-size: 28px;
-            font-weight: 700;
-            color: var(--vscode-charts-orange);
-            min-width: 60px;
-            text-align: center;
-            font-family: 'Segoe UI', monospace;
-            line-height: 1;
-        }
-        
-        .score-label {
-            font-size: 9px;
-            font-weight: 500;
-            color: var(--vscode-descriptionForeground);
-            text-align: center;
-            margin-top: -2px;
-            letter-spacing: 0.5px;
-        }
-        
-        .score-details {
-            font-size: 9px;
-            opacity: 0.6;
-            text-align: center;
-            line-height: 1.2;
-        }
-        
         /* Loading spinner */
         .loading-spinner {
             position: absolute;
@@ -2368,7 +2438,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         
         /* Generate AI Instructions button - attention-grabbing */
         .generate-instructions-btn {
-            background: var(--vscode-charts-orange);
+            background: #ff9500;
             border: none;
             border-radius: 4px;
             color: #000;
@@ -2381,7 +2451,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             font-size: 10px;
             font-weight: 600;
             animation: pulse-attention 1.5s ease-in-out infinite;
-            box-shadow: 0 0 8px var(--vscode-charts-orange);
+            box-shadow: 0 0 8px #ff9500;
         }
         
         .generate-instructions-btn:hover {
@@ -2399,11 +2469,11 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         @keyframes pulse-attention {
             0%, 100% {
                 transform: scale(1);
-                box-shadow: 0 0 8px var(--vscode-charts-orange);
+                box-shadow: 0 0 8px #ff9500;
             }
             50% {
                 transform: scale(1.08);
-                box-shadow: 0 0 16px var(--vscode-charts-orange), 0 0 24px rgba(255, 140, 0, 0.4);
+                box-shadow: 0 0 16px #ff9500, 0 0 24px rgba(255, 149, 0, 0.4);
             }
         }
         
@@ -3852,20 +3922,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 </svg>
             </div>
         </div>
-        <div class="controls-container">
-            <div class="action-buttons">
-                <!-- Auto-Fix button hidden - feature temporarily disabled
-                <button id="auto-fix-safe-button" class="action-button" title="Safe Auto-Fix">
-                    <svg class="action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                        <polyline points="9 11 12 14 22 4"></polyline>
-                        <path d="m21 12c0 4.97-4.03 9-9 9s-9-4.03-9-9 4.03-9 9-9c1.51 0 2.93.37 4.18 1.03"></path>
-                    </svg>
-                    <span class="action-text">Auto-Fix</span>
-                </button>
-                -->
-                <!-- Agent button moved to view-toggle area -->
-            </div>
-        </div>
     </div>
     
     <!-- KB Stale Indicator -->
@@ -3894,14 +3950,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             <div class="simple-edit-instructions" id="simple-edit-instructions" role="button" tabindex="0" title="Edit .aspect/instructions.md">edit instructions</div>
         </div>
         <div class="simple-view-buttons">
-            <!-- TEMPORARILY DISABLED: Plan with Structure button
-            <button id="simple-propose-btn" class="action-button icon-only" title="Plan with Structure">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M12 20h9"></path>
-                    <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
-                </svg>
-            </button>
-            -->
             <button id="simple-auto-regen-kb-btn" class="action-button icon-only" title="KB auto-regeneration: —">
                 <svg class="action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                     <circle cx="12" cy="12" r="9"/>
@@ -3945,47 +3993,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     <span class="view-toggle-count" id="view-toggle-count">(0)</span>
                 </button>
                 <div class="graph-settings-container">
-                    <!-- Graph type selector removed - code kept for future use
-                    <select id="graph-type-select" class="graph-type-select" style="display: none;">
-                        <option value="2d">2D Focused</option>
-                        <option value="3d">3D Overview</option>
-                    </select>
-                    -->
-                    <!-- TEMPORARILY DISABLED: Align button (ALIGNMENTS.json feature)
-                    <button id="align-button" class="action-button icon-only" title="Align - Report AI issue" style="display: none;">
-                        <svg class="action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>
-                        </svg>
-                    </button>
-                    -->
-                    <!-- TEMPORARILY DISABLED: Explain button (replaced by Propose)
-                    <button id="explain-button" class="action-button icon-only" title="Explain Current File">
-                        <svg class="action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                            <polyline points="14 2 14 8 20 8"></polyline>
-                            <line x1="16" y1="13" x2="8" y2="13"></line>
-                            <line x1="16" y1="17" x2="8" y2="17"></line>
-                            <polyline points="10 9 9 9 8 9"></polyline>
-                        </svg>
-                    </button>
-                    -->
-                    <!-- TEMPORARILY DISABLED: Plan with Structure button
-                    <div class="prompt-action-slot" id="prompt-action-slot" title="Plan with Structure">
-                        <button id="propose-button" class="action-button icon-only" title="Plan with Structure">
-                            <svg class="action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M12 20h9"></path>
-                                <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
-                            </svg>
-                        </button>
-                        <div class="validation-spinner" id="validation-spinner" title="Processing...">
-                            <svg viewBox="0 0 16 16" width="14" height="14">
-                                <circle cx="8" cy="8" r="6" stroke="var(--vscode-charts-orange)" stroke-width="2" fill="none" stroke-dasharray="18.85" stroke-dashoffset="9.42" stroke-linecap="round">
-                                    <animateTransform attributeName="transform" type="rotate" from="0 8 8" to="360 8 8" dur="0.8s" repeatCount="indefinite"/>
-                                </circle>
-                            </svg>
-                        </div>
-                    </div>
-                    -->
                     <button id="complex-auto-regen-kb-btn" class="action-button icon-only" title="KB auto-regeneration: —">
                         <svg class="action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                             <circle cx="12" cy="12" r="9"/>
@@ -4047,9 +4054,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                         <g id="graph-nodes"></g>
                         <g id="graph-labels"></g>
                     </svg>
-                    <!-- 3D canvas removed but code kept for future use
-                    <canvas class="dependency-graph-3d hidden" id="dependency-graph-3d" width="800" height="400"></canvas>
-                    -->
                 </div>
             </div>
             
@@ -4164,6 +4168,11 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         setInstructionsBarCollapsed(instructionsBarCollapsed);
         
         function toggleViewMode() {
+            // Block switching to graph/full view if setup is required
+            if (viewMode === 'simple' && pendingInstructionFilesStatus === false) {
+                // Setup required - don't allow switching to graph view
+                return;
+            }
             viewMode = viewMode === 'simple' ? 'full' : 'simple';
             if (viewMode === 'simple') {
                 document.body.classList.add('simple-mode');
@@ -4231,11 +4240,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             if (simpleReindexBtn) simpleReindexBtn.style.display = '';
             if (complexReindexBtn) complexReindexBtn.style.display = '';
         });
-        
-        // Note: simple-propose-btn is temporarily disabled (commented out in HTML)
-        // document.getElementById('simple-propose-btn').addEventListener('click', () => {
-        //     vscode.postMessage({ type: 'PROPOSE_FIXES', payload: { findings: currentFindings } });
-        // });
         
         document.getElementById('simple-expand-btn').addEventListener('click', toggleViewMode);
         document.getElementById('collapse-view-btn').addEventListener('click', toggleViewMode);
@@ -4854,78 +4858,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         document.getElementById('complex-auto-regen-kb-btn')?.addEventListener('click', handleCycleAutoRegenKb);
         document.getElementById('complex-reindex-btn')?.addEventListener('click', handleReindex);
         
-        // Action button handlers
-        // Auto-Fix button handler disabled - feature temporarily disabled
-        /*
-        document.getElementById('auto-fix-safe-button').addEventListener('click', async () => {
-            const btn = document.getElementById('auto-fix-safe-button');
-            btn.disabled = true;
-            
-            try {
-                vscode.postMessage({
-                    type: 'AUTO_FIX_SAFE',
-                    payload: {}
-                });
-                // Button will be re-enabled by AUTO_FIX_SAFE_COMPLETE message
-            } catch (error) {
-                console.error('Auto-fix failed:', error);
-                btn.disabled = false;
-            }
-        });
-        */
-        
-        /* TEMPORARILY DISABLED: Explain button (replaced by Propose)
-        document.getElementById('explain-button').addEventListener('click', async () => {
-            const btn = document.getElementById('explain-button');
-            btn.disabled = true;
-            
-            try {
-                vscode.postMessage({ type: 'EXPLAIN_FILE' });
-                setTimeout(() => { btn.disabled = false; }, 1000);
-            } catch (error) {
-                console.error('Explain failed:', error);
-                btn.disabled = false;
-            }
-        });
-        */
-
-        /* TEMPORARILY DISABLED: Plan with Structure button
-        document.getElementById('propose-button').addEventListener('click', async () => {
-            const btn = document.getElementById('propose-button');
-            btn.disabled = true;
-            
-            try {
-                vscode.postMessage({
-                    type: 'PROPOSE_FIXES',
-                    payload: { findings: currentFindings }
-                });
-                setTimeout(() => { btn.disabled = false; }, 1000);
-            } catch (error) {
-                console.error('Propose failed:', error);
-                btn.disabled = false;
-            }
-        });
-        */
-
-        /* TEMPORARILY DISABLED: Align button (ALIGNMENTS.json feature)
-        document.getElementById('align-button').addEventListener('click', async () => {
-            const btn = document.getElementById('align-button');
-            btn.disabled = true;
-            
-            try {
-                // Show input box to describe the issue
-                vscode.postMessage({
-                    type: 'ALIGN_ISSUE',
-                    payload: {}
-                });
-                setTimeout(() => { btn.disabled = false; }, 1000);
-            } catch (error) {
-                console.error('Align failed:', error);
-                btn.disabled = false;
-            }
-        });
-        */
-        
         // View toggle functionality
         let currentView = 'graph'; // Default to dependency graph (graph-only mode)
         
@@ -5209,181 +5141,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 target: nodeMap.get(link.target),
                 strength: Math.max(0.1, Math.min(1, link.strength || 0.5))
             }));
-
-            // Force simulation parameters
-            let alpha = 1.0;
-            const alphaDecay = 0.02;
-            const velocityDecay = 0.6;
-            
-            // Run physics simulation
-            function tick() {
-                // Apply forces
-                applyForces(nodes, links, width, height);
-                
-                // Update positions with improved boundary handling
-                nodes.forEach(node => {
-                    // ABSOLUTELY pin the center file in focus mode - STRONGEST enforcement
-                    if (currentGraph.focusMode && currentGraph.centerFile && node.id === currentGraph.centerFile) {
-                        // Force position to higher center position
-                        node.x = centerX;
-                        node.y = height * 0.3; // Higher positioning
-                        node.vx = 0;
-                        node.vy = 0;
-                        return; // Skip all other processing for this node
-                    }
-                    
-                    node.vx *= velocityDecay;
-                    node.vy *= velocityDecay;
-                    node.x += node.vx;
-                    node.y += node.vy;
-                    
-                    // Better boundary constraints with padding
-                    const padding = node.radius + 25;
-                    node.x = Math.max(padding, Math.min(width - padding, node.x));
-                    node.y = Math.max(padding, Math.min(height - padding, node.y));
-                });
-                
-                // ADDITIONAL collision resolution pass to prevent any remaining overlaps
-                for (let i = 0; i < nodes.length; i++) {
-                    // Skip the pinned center node
-                    if (currentGraph.focusMode && currentGraph.centerFile && nodes[i].id === currentGraph.centerFile) {
-                        continue;
-                    }
-                    
-                    for (let j = i + 1; j < nodes.length; j++) {
-                        // Skip if the other node is pinned center
-                        if (currentGraph.focusMode && currentGraph.centerFile && nodes[j].id === currentGraph.centerFile) {
-                            continue;
-                        }
-                        
-                        const dx = nodes[j].x - nodes[i].x;
-                        const dy = nodes[j].y - nodes[i].y;
-                        const distance = Math.sqrt(dx * dx + dy * dy);
-                        const minSeparation = (nodes[i].radius + nodes[j].radius) * 2.2;
-                        
-                        if (distance < minSeparation && distance > 0) {
-                            // Push nodes apart to prevent overlap
-                            const pushDistance = (minSeparation - distance) / 2;
-                            const pushX = (dx / distance) * pushDistance;
-                            const pushY = (dy / distance) * pushDistance;
-                            
-                            nodes[i].x -= pushX;
-                            nodes[i].y -= pushY;
-                            nodes[j].x += pushX;
-                            nodes[j].y += pushY;
-                        }
-                    }
-                }
-                
-                // Render current state
-                render();
-                
-                alpha -= alphaDecay;
-                if (alpha > 0.01) {
-                    requestAnimationFrame(tick);
-                }
-            }
-
-            function applyForces(nodes, links, width, height) {
-                const k = Math.sqrt((width * height) / nodes.length) * 1.2; // Increased spacing factor
-                const centerForce = 0.03;
-                const boundaryPadding = 60;
-                
-                // STRONG collision detection and separation - prevent all overlaps
-                for (let i = 0; i < nodes.length; i++) {
-                    // Skip force application if this is the pinned center node
-                    if (currentGraph.focusMode && currentGraph.centerFile && nodes[i].id === currentGraph.centerFile) {
-                        continue;
-                    }
-                    
-                    for (let j = i + 1; j < nodes.length; j++) {
-                        // Skip if the other node is the pinned center node
-                        if (currentGraph.focusMode && currentGraph.centerFile && nodes[j].id === currentGraph.centerFile) {
-                            continue;
-                        }
-                        
-                        const dx = nodes[j].x - nodes[i].x;
-                        const dy = nodes[j].y - nodes[i].y;
-                        const distance = Math.sqrt(dx * dx + dy * dy);
-                        const minSeparation = (nodes[i].radius + nodes[j].radius) * 2.5; // Increased separation
-                        
-                        if (distance < minSeparation && distance > 0) {
-                            // STRONG separation force to prevent overlap
-                            const separationForce = (minSeparation - distance) * 0.5;
-                            const fx = (dx / distance) * separationForce;
-                            const fy = (dy / distance) * separationForce;
-                            
-                            // Apply separation forces
-                            nodes[i].vx -= fx;
-                            nodes[i].vy -= fy;
-                            nodes[j].vx += fx;
-                            nodes[j].vy += fy;
-                        }
-                        
-                        // General repulsion for better spacing
-                        if (distance > 0 && distance < k * 3) {
-                            const repulsionForce = k * k / (distance * distance + 100);
-                            const fx = (dx / distance) * repulsionForce;
-                            const fy = (dy / distance) * repulsionForce;
-                            
-                            nodes[i].vx -= fx * alpha;
-                            nodes[i].vy -= fy * alpha;
-                            nodes[j].vx += fx * alpha;
-                            nodes[j].vy += fy * alpha;
-                        }
-                    }
-                }
-                
-                // Link forces - but don't apply to pinned center node
-                links.forEach(link => {
-                    const dx = link.target.x - link.source.x;
-                    const dy = link.target.y - link.source.y;
-                    const distance = Math.sqrt(dx * dx + dy * dy);
-                    const targetDistance = k * (1.0 + link.strength * 0.3);
-                    
-                    if (distance > 0) {
-                        const force = (distance - targetDistance) * link.strength * 0.03;
-                        const fx = (dx / distance) * force;
-                        const fy = (dy / distance) * force;
-                        
-                        // Only apply link forces to non-pinned nodes
-                        if (!(currentGraph.focusMode && currentGraph.centerFile && link.source.id === currentGraph.centerFile)) {
-                            link.source.vx += fx * alpha;
-                            link.source.vy += fy * alpha;
-                        }
-                        if (!(currentGraph.focusMode && currentGraph.centerFile && link.target.id === currentGraph.centerFile)) {
-                            link.target.vx -= fx * alpha;
-                            link.target.vy -= fy * alpha;
-                        }
-                    }
-                });
-                
-                // Center attraction and boundary forces - skip pinned node
-                nodes.forEach(node => {
-                    // Skip the pinned center node completely
-                    if (currentGraph.focusMode && currentGraph.centerFile && node.id === currentGraph.centerFile) {
-                        return;
-                    }
-                    
-                    // Center attraction for non-center nodes
-                    node.vx += (centerX - node.x) * centerForce * alpha;
-                    node.vy += (centerY - node.y) * centerForce * alpha;
-                    
-                    // Strong boundary repulsion
-                    if (node.x < boundaryPadding) {
-                        node.vx += (boundaryPadding - node.x) * 0.2;
-                    }
-                    if (node.x > width - boundaryPadding) {
-                        node.vx -= (node.x - (width - boundaryPadding)) * 0.2;
-                    }
-                    if (node.y < boundaryPadding) {
-                        node.vy += (boundaryPadding - node.y) * 0.2;
-                    }
-                    if (node.y > height - boundaryPadding) {
-                        node.vy -= (node.y - (height - boundaryPadding)) * 0.2;
-                    }
-                });
-            }
 
             function renderEnhancedLinks(links, linksGroup) {
                 // Group links by node pairs to detect overlaps
@@ -5838,542 +5595,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 });
             }
 
-            // Setup graph controls
-            function setupGraphControls() {
-                // Labels and links checkboxes removed - graph elements always visible
-                const graphTypeSelect = document.getElementById('graph-type-select');
-                
-                // Graph type switching disabled - code kept for future use
-                if (false && graphTypeSelect) {
-                    const savedGraphType = localStorage.getItem('Aspect Code-graph-type') || '2d';
-                    
-                    // Only set the value and switch if not already initialized to prevent infinite loops
-                    if (!graphTypeSelect.hasAttribute('data-initialized')) {
-                        graphTypeSelect.value = savedGraphType;
-                        graphTypeSelect.setAttribute('data-initialized', 'true');
-                        
-                        // Only call switchGraphType if we actually need to change the display
-                        const svg = document.getElementById('dependency-graph');
-                        const canvas = document.getElementById('dependency-graph-3d');
-                        if (savedGraphType === '3d' && svg.style.display !== 'none') {
-                            switchGraphType(savedGraphType);
-                        } else if (savedGraphType !== '3d' && canvas.style.display !== 'none') {
-                            switchGraphType(savedGraphType);
-                        }
-                    }
-                    
-                    // Remove old event listener if exists to prevent duplicate listeners
-                    if (graphTypeSelect.onchange) {
-                        graphTypeSelect.onchange = null;
-                    }
-                    
-                    graphTypeSelect.addEventListener('change', () => {
-                        const selectedType = graphTypeSelect.value;
-                        localStorage.setItem('Aspect Code-graph-type', selectedType);
-                        switchGraphType(selectedType);
-                        
-                        // Use the appropriate cached graph data instead of currentGraph
-                        if (selectedType === '3d') {
-                            // 3D uses overview graph - render with cached data if available
-                            if (overviewGraph.nodes.length > 0) {
-                                render3DGraph(overviewGraph);
-                            } else {
-                                // Request fresh overview data if not cached
-                                vscode.postMessage({ type: 'REQUEST_OVERVIEW_GRAPH' });
-                            }
-                        } else {
-                            // 2D uses focused graph - render with cached data if available  
-                            if (focusedGraph.nodes.length > 0) {
-                                renderDependencyGraph(focusedGraph);
-                            } else {
-                                // Request fresh focused data if not cached
-                                vscode.postMessage({ type: 'REQUEST_FOCUSED_GRAPH' });
-                            }
-                        }
-                    });
-                }
-                
-                // Layout selection removed - circular layout is always used
-                // Labels and links checkboxes removed - always visible
-                // Show score checkbox removed - score always hidden
-            }
-
-            // Alternative layout algorithms
-            function applyLayoutAlgorithm(nodes, layout) {
-                const svg = document.getElementById('dependency-graph');
-                const containerRect = svg.getBoundingClientRect();
-                const width = containerRect.width || 800; // Use actual width, fallback only if 0
-                const height = containerRect.height || 300; // Use actual height, fallback only if 0
-                const margin = 5; // Absolute minimal margin
-                
-                switch (layout) {
-                    case 'circular':
-                        const centerXCircular = width / 2;
-                        // Position circle higher - 40% from top instead of centered
-                        const centerYCircular = height * 0.40;
-                        // Use most of the space but leave margin for labels
-                        const radiusCircular = Math.min(width, height) * 0.40; // Use 80% of diameter (40% radius)
-                        
-                        // Smart angle offset based on number of nodes for better aesthetics
-                        let angleOffset = -Math.PI / 2; // Default: start from top (12 o'clock)
-                        if (nodes.length === 1) {
-                            angleOffset = -Math.PI / 2; // 1 node: top (12 o'clock)
-                        } else if (nodes.length === 2) {
-                            angleOffset = 0; // 2 nodes: left and right (9 and 3 o'clock)
-                        } else if (nodes.length % 2 === 0) {
-                            // Even number: offset by half step for symmetry
-                            angleOffset = -Math.PI / 2 + (Math.PI / nodes.length);
-                        }
-                        
-                        // Arrange nodes in circle with even spacing
-                        nodes.forEach((node, i) => {
-                            const angle = (2 * Math.PI * i) / nodes.length + angleOffset;
-                            node.x = centerXCircular + radiusCircular * Math.cos(angle);
-                            node.y = centerYCircular + radiusCircular * Math.sin(angle);
-                        });
-                        break;
-                        
-                    default:
-                        // Only circular layout is supported
-                        console.warn('Only circular layout is supported, requested:', layout);
-                        break;
-                }
-            }
-
-            // Graph type switching functions
-            function switchGraphType(type) {
-                const svg = document.getElementById('dependency-graph');
-                const canvas = document.getElementById('dependency-graph-3d');
-                
-                // Store the preference
-                localStorage.setItem('Aspect Code-graph-type', type);
-                
-                if (type === '3d') {
-                    svg.style.display = 'none';
-                    canvas.style.display = 'block';
-                    
-                    // If we have overview data, render it immediately
-                    if (overviewGraph.nodes.length > 0) {
-                        render3DGraph(overviewGraph);
-                    } else {
-                        // Show loading state for 3D graph
-                        const ctx = canvas.getContext('2d');
-                        const rect = canvas.getBoundingClientRect();
-                        canvas.width = rect.width;
-                        canvas.height = rect.height;
-                        ctx.clearRect(0, 0, canvas.width, canvas.height);
-                        ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--vscode-editor-background');
-                        ctx.fillRect(0, 0, canvas.width, canvas.height);
-                        ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--vscode-descriptionForeground');
-                        ctx.font = '14px var(--vscode-font-family)';
-                        ctx.textAlign = 'center';
-                        ctx.fillText('Loading overview graph...', canvas.width / 2, canvas.height / 2);
-                    }
-                    
-                    // Request overview data for 3D graph
-                    vscode.postMessage({ type: 'REQUEST_OVERVIEW_GRAPH' });
-                } else {
-                    svg.style.display = 'block';
-                    canvas.style.display = 'none';
-                    
-                    // If we have focused data, render it immediately
-                    if (focusedGraph.nodes.length > 0) {
-                        renderDependencyGraph(focusedGraph);
-                    } else {
-                        // Show loading state for 2D graph
-                        svg.innerHTML = '';
-                        const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-                        text.setAttribute('x', '300');
-                        text.setAttribute('y', '150');
-                        text.setAttribute('text-anchor', 'middle');
-                        text.setAttribute('fill', getComputedStyle(document.body).getPropertyValue('--vscode-descriptionForeground'));
-                        text.setAttribute('font-family', 'var(--vscode-font-family)');
-                        text.setAttribute('font-size', '14px');
-                        text.textContent = 'Loading focused graph...';
-                        svg.appendChild(text);
-                        
-                        // Request focused data for 2D graph
-                        vscode.postMessage({ type: 'REQUEST_FOCUSED_GRAPH' });
-                    }
-                }
-            }
-
-            // Efficient 3D graph renderer - focused on speed, not beauty
-            function render3DGraph(graph) {
-                const canvas = document.getElementById('dependency-graph-3d');
-                const ctx = canvas.getContext('2d');
-                
-                // Auto-resize canvas
-                const rect = canvas.getBoundingClientRect();
-                canvas.width = rect.width;
-                canvas.height = rect.height;
-                
-                // Clear canvas
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--vscode-editor-background');
-                ctx.fillRect(0, 0, canvas.width, canvas.height);
-                
-                if (!graph || !graph.nodes || graph.nodes.length === 0) {
-                    // Draw empty state
-                    ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--vscode-descriptionForeground');
-                    ctx.font = '14px var(--vscode-font-family)';
-                    ctx.textAlign = 'center';
-                    ctx.fillText('No dependencies to display', canvas.width / 2, canvas.height / 2);
-                    return;
-                }
-
-                // 3D positioning - spread nodes in 3D space, project to 2D
-                const nodes3d = graph.nodes.map((node, i) => {
-                    // Distribute nodes in a 3D sphere for better visualization of entire codebase
-                    const phi = Math.acos(1 - 2 * (i / graph.nodes.length)); // Polar angle
-                    const theta = Math.PI * (3 - Math.sqrt(5)) * i; // Azimuthal angle (golden spiral)
-                    const r = 150; // Sphere radius
-                    
-                    return {
-                        ...node,
-                        x3d: r * Math.sin(phi) * Math.cos(theta),
-                        y3d: r * Math.sin(phi) * Math.sin(theta),
-                        z3d: r * Math.cos(phi)
-                    };
-                });
-
-                // Simple 3D to 2D projection (isometric-like)
-                const centerX = canvas.width / 2;
-                const centerY = canvas.height / 2;
-                const scale = Math.min(canvas.width, canvas.height) / 400;
-
-                nodes3d.forEach(node => {
-                    // Project 3D to 2D
-                    node.x2d = centerX + (node.x3d + node.z3d * 0.5) * scale;
-                    node.y2d = centerY + (node.y3d + node.z3d * 0.3) * scale;
-                    node.depth = node.z3d; // For depth sorting
-                });
-
-                // Sort by depth for proper rendering order
-                nodes3d.sort((a, b) => a.depth - b.depth);
-
-                // Render edges first (straight lines only)
-                ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue('--vscode-descriptionForeground');
-                ctx.lineWidth = 1;
-                ctx.globalAlpha = 0.4;
-
-                graph.links.forEach(link => {
-                    const source = nodes3d.find(n => n.id === link.source);
-                    const target = nodes3d.find(n => n.id === link.target);
-                    
-                    if (source && target) {
-                        ctx.beginPath();
-                        ctx.moveTo(source.x2d, source.y2d);
-                        ctx.lineTo(target.x2d, target.y2d);
-                        ctx.stroke();
-                    }
-                });
-
-                // Render nodes
-                ctx.globalAlpha = 1;
-                nodes3d.forEach(node => {
-                    const nodeSize = 3 + (node.depth / 150) * 2; // Vary size by depth
-                    
-                    // Node circle
-                    ctx.beginPath();
-                    ctx.arc(node.x2d, node.y2d, nodeSize, 0, 2 * Math.PI);
-                    
-                    // Color by type/importance
-                    if (node.type === 'hub') {
-                        ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--vscode-focusBorder');
-                    } else if (node.importance && node.importance > 2) {
-                        ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--vscode-errorForeground');
-                    } else {
-                        ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--vscode-symbolIcon-fileForeground');
-                    }
-                    
-                    ctx.fill();
-                    ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue('--vscode-foreground');
-                    ctx.lineWidth = 0.5;
-                    ctx.stroke();
-                });
-
-                // Add interaction for file opening
-                canvas.onclick = (e) => {
-                    const rect = canvas.getBoundingClientRect();
-                    const clickX = e.clientX - rect.left;
-                    const clickY = e.clientY - rect.top;
-                    
-                    // Find clicked node
-                    for (const node of nodes3d) {
-                        const distance = Math.sqrt((clickX - node.x2d) ** 2 + (clickY - node.y2d) ** 2);
-                        if (distance < 8 && node.file) { // 8px click tolerance
-                            vscode.postMessage({
-                                type: 'OPEN_FINDING',
-                                file: node.file,
-                                line: 1,
-                                column: 1
-                            });
-                            break;
-                        }
-                    }
-                };
-            }
-
-            // Setup controls and start simulation
-            setupGraphControls();
-            
-            // Apply selected layout
-            applyLayoutAlgorithm(nodes, 'circular');
             render();
-        }
-        
-        function renderFindings(findings, filterRule = '', state = null) {
-            const findingsList = document.getElementById('findings-list');
-            const findingsView = document.getElementById('findings-view');
-            
-            // Always show all findings (no filtering by rule)
-            let sortedFindings = findings || [];
-            
-            // Update view toggle button if we're showing findings
-            if (currentView === 'findings') {
-                updateViewToggleButton('Show graph', currentGraph?.nodes?.length || 0);
-            }
-            
-            // Clear list
-            findingsList.innerHTML = '';
-            
-            // Remove any existing summary bar
-            const existingSummary = findingsView.querySelector('.findings-summary');
-            if (existingSummary) {
-                existingSummary.remove();
-            }
-            
-            if (sortedFindings.length === 0) {
-                findingsList.innerHTML = '<div class="empty-findings">No findings to display</div>';
-                return;
-            }
-
-            // KB-enriching rules that are purely informational (not problems)
-            // These rules provide insights for knowledge base generation, not issues to fix
-            const KB_ENRICHING_RULES = new Set([
-                'arch.entry_point',
-                'arch.external_integration', 
-                'arch.data_model'
-            ]);
-            
-            // Helper to determine if a finding is informational (KB-enriching vs actual problem)
-            const isInformational = (f) => {
-                return f.rule && KB_ENRICHING_RULES.has(f.rule);
-            };
-
-            // Calculate breakdown: problems vs informational (KB-enriching insights)
-            const breakdown = {
-                total: sortedFindings.length,
-                problems: sortedFindings.filter(f => !isInformational(f)).length,
-                informational: sortedFindings.filter(f => isInformational(f)).length
-            };
-            
-            // Create summary bar and insert it at the top of findings view
-            const summaryBar = document.createElement('div');
-            summaryBar.className = 'findings-summary';\n            summaryBar.style.marginTop = '-4px';
-            findingsView.insertBefore(summaryBar, findingsView.firstChild);
-            
-            // Create breakdown section
-            const breakdownDiv = document.createElement('div');
-            breakdownDiv.className = 'findings-breakdown';
-            
-            // Show problems and informational counts
-            const breakdownItems = [
-                { number: breakdown.problems, tooltip: 'problems (P0/P1)', type: 'error', filterType: 'problems', show: breakdown.problems > 0 },
-                { number: breakdown.informational, tooltip: 'informational (P2/P3)', type: 'info', filterType: 'informational', show: breakdown.informational > 0 }
-            ].filter(item => item.show);
-            
-            breakdownItems.forEach(item => {
-                const itemDiv = document.createElement('div');
-                itemDiv.className = 'breakdown-item';
-                itemDiv.style.cursor = 'pointer';
-                
-                const dot = document.createElement('div');
-                dot.className = 'breakdown-dot ' + item.type;
-                dot.title = item.tooltip;
-                
-                // Apply grayed-out state if filter is disabled
-                if (!severityFilters[item.filterType]) {
-                    itemDiv.classList.add('filtered-out');
-                }
-                
-                // Add click handler to toggle filter
-                itemDiv.addEventListener('click', () => {
-                    severityFilters[item.filterType] = !severityFilters[item.filterType];
-                    // Re-render findings with current state
-                    if (currentState) {
-                        renderFindings(currentFindings, '', currentState);
-                    }
-                });
-                
-                const label = document.createElement('span');
-                label.textContent = item.number.toString();
-                
-                itemDiv.appendChild(dot);
-                itemDiv.appendChild(label);
-                breakdownDiv.appendChild(itemDiv);
-            });
-            
-            // Auto-fix potential section disabled - feature temporarily disabled
-            /*
-            // Create autofix potential section
-            const autofixDiv = document.createElement('div');
-            autofixDiv.className = 'autofix-potential';
-            if (autofixScore > 0) {
-                const displayScore = autofixScore.toFixed(1).replace('.0', '');
-                autofixDiv.textContent = '+' + displayScore;
-                autofixDiv.title = 'Potential score increase from auto-fixes';
-            } else {
-                autofixDiv.textContent = '+0';
-                autofixDiv.style.color = 'var(--vscode-descriptionForeground)';
-                autofixDiv.style.fontWeight = 'normal';
-            }
-            */
-            
-            summaryBar.appendChild(breakdownDiv);
-            // summaryBar.appendChild(autofixDiv); // Auto-fix feature temporarily disabled
-            
-            // Get current active file for relevance sorting
-            const currentFile = currentActiveFile || '';
-            
-            // Filter findings based on priority filters (problems vs informational)
-            const filteredFindings = sortedFindings.filter(finding => {
-                if (isInformational(finding)) {
-                    return severityFilters.informational;
-                } else {
-                    return severityFilters.problems;
-                }
-            });
-            
-            // Group findings by file + rule
-            const groupedFindings = new Map();
-            filteredFindings.forEach(finding => {
-                const key = finding.file + '::' + finding.rule;
-                if (!groupedFindings.has(key)) {
-                    groupedFindings.set(key, {
-                        finding: finding,
-                        count: 1,
-                        instances: [finding]
-                    });
-                } else {
-                    const group = groupedFindings.get(key);
-                    group.count++;
-                    group.instances.push(finding);
-                }
-            });
-            
-            // Convert to array for sorting
-            const groupedArray = Array.from(groupedFindings.values());
-            
-            // Smart sorting: 1. Current file first, 2. Severity, 3. Count
-            const severityOrder = { error: 0, critical: 0, warn: 1, warning: 1, info: 2 };
-            groupedArray.sort((a, b) => {
-                // First: Current file gets priority
-                const aFile = a.finding.file || '';
-                const bFile = b.finding.file || '';
-                const aIsCurrent = currentFile && (aFile === currentFile || currentFile.includes(aFile.split('/').pop() || ''));
-                const bIsCurrent = currentFile && (bFile === currentFile || currentFile.includes(bFile.split('/').pop() || ''));
-                if (aIsCurrent !== bIsCurrent) return bIsCurrent ? 1 : -1;
-                
-                // Second: Sort by severity
-                const aSev = severityOrder[a.finding.severity] ?? 2;
-                const bSev = severityOrder[b.finding.severity] ?? 2;
-                if (aSev !== bSev) return aSev - bSev;
-                
-                // Third: More occurrences first
-                return b.count - a.count;
-            });
-            
-            // Render grouped findings with improved formatting
-            groupedArray.forEach(group => {
-                const finding = group.finding;
-                const isCurrentFile = currentFile && (finding.file === currentFile || currentFile.includes((finding.file || '').split('/').pop() || ''));
-                const item = document.createElement('div');
-                item.className = isCurrentFile ? 'finding-item current-file' : 'finding-item';
-                item.onclick = () => {
-                    openFinding(group.instances[0]);
-                    // Scroll to top of findings list when clicking a finding
-                    const findingsContainer = document.querySelector('.findings-list');
-                    if (findingsContainer) {
-                        findingsContainer.scrollTop = 0;
-                    }
-                };
-                
-                // Auto-fix badge disabled - feature temporarily disabled
-                /*
-                // Auto-fix badge if applicable
-                let autofixBadge = null;
-                if (finding.fixable) {
-                    autofixBadge = document.createElement('span');
-                    autofixBadge.className = 'autofix-ready-badge';
-                    autofixBadge.textContent = 'Auto-fix ready';
-                }
-                */
-                const autofixBadge = null; // Auto-fix feature temporarily disabled
-                
-                // Main content container
-                const content = document.createElement('div');
-                content.className = 'finding-content';
-                
-                // Message text with count badge
-                const messageDiv = document.createElement('div');
-                messageDiv.className = 'finding-message';
-                messageDiv.textContent = finding.message || 'No message';
-                
-                // Add count badge if multiple instances
-                if (group.count > 1) {
-                    const countBadge = document.createElement('span');
-                    countBadge.className = 'finding-count';
-                    countBadge.textContent = group.count.toString();
-                    countBadge.title = group.count + ' instances in this file';
-                    messageDiv.appendChild(countBadge);
-                }
-                
-                // Auto-fix badge on its own line if applicable
-                let autofixLine = null;
-                if (autofixBadge) {
-                    autofixLine = document.createElement('div');
-                    autofixLine.className = 'autofix-ready-line';
-                    autofixLine.appendChild(autofixBadge);
-                }
-                
-                // File info with relative path
-                const fileDiv = document.createElement('div');
-                fileDiv.className = 'finding-file';
-                
-                // Calculate relative path if workspace root is available
-                let displayPath = finding.file || 'Unknown file';
-                try {
-                    if (currentState && currentState.workspaceRoot && finding.file) {
-                        if (finding.file.startsWith(currentState.workspaceRoot)) {
-                            displayPath = finding.file.substring(currentState.workspaceRoot.length).replace(/^[/\\\\]/, '');
-                        } else {
-                            // If not in workspace, just show filename
-                            displayPath = (finding.file || '').split(/[/\\\\]/).pop() || 'Unknown file';
-                        }
-                    } else {
-                        // Fallback to filename only if no workspace root available
-                        displayPath = (finding.file || '').split(/[/\\\\]/).pop() || 'Unknown file';
-                    }
-                } catch (error) {
-                    console.error('[Panel] Error calculating relative path:', error);
-                    displayPath = (finding.file || '').split(/[/\\\\]/).pop() || 'Unknown file';
-                }
-                
-                const line = finding.span?.start?.line || finding.line || 1;
-                fileDiv.textContent = displayPath + ':' + line;
-                
-                content.appendChild(messageDiv);
-                if (autofixLine) {
-                    content.appendChild(autofixLine);
-                }
-                content.appendChild(fileDiv);
-                
-                item.appendChild(content);
-                
-                findingsList.appendChild(item);
-            });
         }
         
         function openFinding(finding) {
@@ -6387,23 +5609,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     column: column
                 });
             }
-        }
-        
-        function calculateScore(findings) {
-            if (!findings || findings.length === 0) return '—';
-            
-            // Simple scoring: start at 100, deduct points for findings
-            let score = 100;
-            findings.forEach(f => {
-                switch (f.severity) {
-                    case 'error': score -= 5; break;
-                    case 'warn': score -= 2; break;
-                    case 'info': score -= 1; break;
-                    default: score -= 2; break;
-                }
-            });
-            
-            return Math.max(0, score);
         }
         
         // IMPORTANT: Set up message listener BEFORE sending any requests
@@ -6496,6 +5701,39 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     }
                     // Store the status for when graph becomes ready
                     pendingInstructionFilesStatus = msg.hasFiles;
+                    
+                    // Force simple view and disable graph buttons when setup is required
+                    const simpleExpandBtn = document.getElementById('simple-expand-btn');
+                    const viewToggleBtn = document.getElementById('view-toggle-btn');
+                    const simpleAutoRegenBtn = document.getElementById('simple-auto-regen-kb-btn');
+                    const complexAutoRegenBtn = document.getElementById('complex-auto-regen-kb-btn');
+                    if (msg.hasFiles === false) {
+                        // Setup required: force back to simple view and disable graph buttons
+                        if (viewMode !== 'simple') {
+                            viewMode = 'simple';
+                            document.body.classList.add('simple-mode');
+                            try {
+                                vscode.setState({
+                                    ...(persistedWebviewState || {}),
+                                    viewMode
+                                });
+                            } catch {
+                                // ignore
+                            }
+                        }
+                        // Grey out graph toggle buttons and KB auto-regen buttons
+                        if (simpleExpandBtn) simpleExpandBtn.disabled = true;
+                        if (viewToggleBtn) viewToggleBtn.disabled = true;
+                        if (simpleAutoRegenBtn) simpleAutoRegenBtn.disabled = true;
+                        if (complexAutoRegenBtn) complexAutoRegenBtn.disabled = true;
+                    } else {
+                        // Setup complete: enable graph buttons and KB auto-regen buttons
+                        if (simpleExpandBtn) simpleExpandBtn.disabled = false;
+                        if (viewToggleBtn) viewToggleBtn.disabled = false;
+                        if (simpleAutoRegenBtn) simpleAutoRegenBtn.disabled = false;
+                        if (complexAutoRegenBtn) complexAutoRegenBtn.disabled = false;
+                    }
+                    
                     // Update status text to reflect KB existence (after updating pendingInstructionFilesStatus)
                     if (graphReady) {
                         updateSimpleTopStatusIfIdle();
@@ -6527,6 +5765,11 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                         if (simpleReindexBtn) {
                             simpleReindexBtn.style.display = 'none';
                         }
+                        // Keep graph buttons disabled when setup is required
+                        const simpleExpandBtn = document.getElementById('simple-expand-btn');
+                        const viewToggleBtn = document.getElementById('view-toggle-btn');
+                        if (simpleExpandBtn) simpleExpandBtn.disabled = true;
+                        if (viewToggleBtn) viewToggleBtn.disabled = true;
                     }
                     break;
                 case 'graphLoading':
@@ -6542,13 +5785,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     showGraphLoading();
                     setLoadingText(msg.phase);
                     setSimpleOpenKbVisible(false);
-                    break;
-                case 'ALIGNMENTS_FILE_STATUS':
-                    // Show/hide the align button based on whether ALIGNMENTS.json exists
-                    const alignBtn = document.getElementById('align-button');
-                    if (alignBtn) {
-                        alignBtn.style.display = msg.hasFile ? 'inline-flex' : 'none';
-                    }
                     break;
             }
         });
@@ -6749,42 +5985,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 if (!state.busy && currentFindings.length > 0) {
                     // Processing seems done, clear the flag and continue to score display
                     manualProcessingActive = false;
-                }
-            }
-            
-            if (!manualProcessingActive) {
-                if (state.busy) {
-                    // Show processing indicator during actual backend processing
-                    document.getElementById('score').textContent = '—';
-                    document.getElementById('score-details').textContent = 'Processing...';
-                    document.getElementById('score').style.color = 'var(--vscode-descriptionForeground)';
-                } else if (state.score) {
-                    // Show actual score when we have a valid score object
-                    document.getElementById('score').textContent = state.score.overall.toFixed(1);
-                    
-                    // Update score details with actual scoring breakdown
-                    const details = document.getElementById('score-details');
-                    const totalFindings = state.score.breakdown.totalFindings || 0;
-                    const totalDeductions = state.score.breakdown.totalDeductions || 0;
-                    details.textContent = \`\${totalFindings} findings | \${totalDeductions.toFixed(1)} deductions\`;
-                    
-                    // Color code the score
-                    const scoreEl = document.getElementById('score');
-                    // Always use primary orange color for score
-                    scoreEl.style.color = 'var(--vscode-charts-orange)';
-                    hideProgress();
-                } else if (currentFindings.length === 0 && !state.busy) {
-                    // No findings and not processing - show placeholder
-                    document.getElementById('score').textContent = '—';
-                    document.getElementById('score-details').textContent = 'No findings';
-                    document.getElementById('score').style.color = 'var(--vscode-descriptionForeground)';
-                    hideProgress();
-                } else {
-                    // Fallback to old scoring function if needed
-                    const score = calculateScore(currentFindings);
-                    document.getElementById('score').textContent = score;
-                    document.getElementById('score-details').textContent = '';
-                    hideProgress();
                 }
             }
             

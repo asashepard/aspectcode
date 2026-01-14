@@ -10,6 +10,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { AutoRegenerateKbMode } from './aspectSettings';
+import { getDefaultExcludeGlob } from './DirectoryExclusion';
 
 // ============================================================================
 // Types
@@ -338,18 +339,8 @@ export class WorkspaceFingerprint implements vscode.Disposable {
     // Build glob pattern for source files
     const pattern = `**/*{${this.SOURCE_EXTENSIONS.join(',')}}`;
     
-    // Exclusions
-    const excludePatterns = [
-      '**/node_modules/**',
-      '**/venv/**',
-      '**/.venv/**',
-      '**/dist/**',
-      '**/build/**',
-      '**/.git/**',
-      '**/.*/**'
-    ];
-    
-    const excludeGlob = `{${excludePatterns.join(',')}}`;
+    // Use centralized exclusion pattern
+    const excludeGlob = getDefaultExcludeGlob();
     
     try {
       const uris = await vscode.workspace.findFiles(pattern, excludeGlob, 10000);

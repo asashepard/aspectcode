@@ -223,6 +223,7 @@ export function activateNewCommands(
   // Track if we've recently shown the notification to avoid spamming
   let lastNotificationTime = 0;
   const NOTIFICATION_DEBOUNCE_MS = 5000;
+  const SUPPRESS_DELETED_NOTIFICATION_KEY = 'aspectcode.suppressDeletedNotification';
 
   const updateInstructionFilesStatus = async (showNotificationOnMissing: boolean = false) => {
     const panelProvider = (state as any)._panelProvider;
@@ -247,6 +248,13 @@ export function activateNewCommands(
 
     // Show notification if setup is incomplete and we should notify
     if (showNotificationOnMissing && !setupComplete) {
+      // Check if user has suppressed this notification for this workspace
+      const isSuppressed = context.workspaceState.get<boolean>(SUPPRESS_DELETED_NOTIFICATION_KEY, false);
+      if (isSuppressed) {
+        channel.appendLine(`[Watcher] Deleted notification suppressed for this workspace`);
+        return;
+      }
+      
       const now = Date.now();
       if (now - lastNotificationTime > NOTIFICATION_DEBOUNCE_MS) {
         lastNotificationTime = now;
@@ -256,10 +264,14 @@ export function activateNewCommands(
           : 'Aspect Code: AI instruction files were deleted.';
         const action = await vscode.window.showWarningMessage(
           message + ' Regenerate to restore AI assistant context.',
-          'Regenerate'
+          'Regenerate',
+          "Don't Show Again"
         );
         if (action === 'Regenerate') {
           vscode.commands.executeCommand('aspectcode.configureAssistants');
+        } else if (action === "Don't Show Again") {
+          await context.workspaceState.update(SUPPRESS_DELETED_NOTIFICATION_KEY, true);
+          channel.appendLine(`[Watcher] User suppressed deleted notification for this workspace`);
         }
       }
     }
@@ -515,7 +527,13 @@ async function handleConfigureAssistants(
       // This ensures .aspect/ is created with KB files first, then settings are added.
       const tCfg = Date.now();
       await updateAspectSettings(workspaceRoot, {
-          assistants: assistantsOverride
+          assistants: assistantsOverride,
+          // Initialize default exclusion settings so users can see/edit them
+          excludeDirectories: {
+            auto: true,
+            alwaysExclude: [],
+            neverExclude: []
+          }
       });
       if (perfEnabled) {
         outputChannel.appendLine(`[Perf][Assistants][configure] .aspect settings update tookMs=${Date.now() - tCfg}`);

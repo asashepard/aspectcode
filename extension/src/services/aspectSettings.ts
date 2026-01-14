@@ -7,6 +7,7 @@
  */
 
 import * as vscode from 'vscode';
+import type { ExclusionSettings } from './DirectoryExclusion';
 
 export type InstructionsMode = 'safe' | 'permissive' | 'custom' | 'off';
 export type AutoRegenerateKbMode = 'off' | 'onSave' | 'idle';
@@ -71,6 +72,12 @@ export interface AspectSettings {
    * When false, all actions should be blocked and any running work cancelled.
    */
   extensionEnabled?: boolean;
+
+  /**
+   * Directory exclusion settings for indexing.
+   * Controls which directories are skipped during file discovery.
+   */
+  excludeDirectories?: ExclusionSettings;
 }
 
 const SETTINGS_FILENAME = '.settings.json';
@@ -205,6 +212,10 @@ export async function updateAspectSettings(
     assistants: {
       ...existing.assistants,
       ...update.assistants
+    },
+    excludeDirectories: {
+      ...existing.excludeDirectories,
+      ...update.excludeDirectories
     },
     autoRegenerateKb: update.autoRegenerateKb ?? existing.autoRegenerateKb,
     instructionsMode: update.instructionsMode ?? existing.instructionsMode,
@@ -461,4 +472,84 @@ export async function hasGitignorePreference(
 ): Promise<boolean> {
   const pref = await getGitignorePreference(workspaceRoot, target);
   return pref !== undefined;
+}
+
+// ============================================================================
+// Directory Exclusion Settings
+// ============================================================================
+
+/**
+ * Get directory exclusion settings.
+ * Returns undefined fields if not configured (use defaults).
+ */
+export async function getExclusionSettings(
+  workspaceRoot: vscode.Uri
+): Promise<ExclusionSettings | undefined> {
+  const settings = await readAspectSettings(workspaceRoot);
+  return settings.excludeDirectories;
+}
+
+/**
+ * Update directory exclusion settings (merges with existing).
+ */
+export async function updateExclusionSettings(
+  workspaceRoot: vscode.Uri,
+  exclusionSettings: Partial<ExclusionSettings>
+): Promise<void> {
+  const current = await readAspectSettings(workspaceRoot);
+  await updateAspectSettings(workspaceRoot, {
+    excludeDirectories: {
+      ...current.excludeDirectories,
+      ...exclusionSettings
+    }
+  });
+}
+
+/**
+ * Add a directory to the "always exclude" list.
+ */
+export async function addAlwaysExcludeDir(
+  workspaceRoot: vscode.Uri,
+  dir: string
+): Promise<void> {
+  const current = await getExclusionSettings(workspaceRoot);
+  const always = current?.always ?? [];
+  const normalized = dir.replace(/\\/g, '/');
+  if (!always.includes(normalized)) {
+    await updateExclusionSettings(workspaceRoot, {
+      always: [...always, normalized]
+    });
+  }
+}
+
+/**
+ * Add a directory to the "never exclude" list (override auto-detection).
+ */
+export async function addNeverExcludeDir(
+  workspaceRoot: vscode.Uri,
+  dir: string
+): Promise<void> {
+  const current = await getExclusionSettings(workspaceRoot);
+  const never = current?.never ?? [];
+  const normalized = dir.replace(/\\/g, '/');
+  if (!never.includes(normalized)) {
+    await updateExclusionSettings(workspaceRoot, {
+      never: [...never, normalized]
+    });
+  }
+}
+
+/**
+ * Remove a directory from exclusion lists.
+ */
+export async function removeExclusionOverride(
+  workspaceRoot: vscode.Uri,
+  dir: string
+): Promise<void> {
+  const current = await getExclusionSettings(workspaceRoot);
+  const normalized = dir.replace(/\\/g, '/');
+  await updateExclusionSettings(workspaceRoot, {
+    always: (current?.always ?? []).filter(d => d !== normalized),
+    never: (current?.never ?? []).filter(d => d !== normalized)
+  });
 }

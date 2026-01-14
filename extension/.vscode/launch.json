@@ -7,10 +7,11 @@
       "request": "launch",
       "runtimeExecutable": "${execPath}",
       "args": [
-        "--extensionDevelopmentPath=${workspaceFolder}"
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        "C:/code/contexttune"
       ],
       "outFiles": ["${workspaceFolder}/dist/**/*.js"],
-      "preLaunchTask": "Aspect Code: Build Extension"
+      "preLaunchTask": "npm: compile"
     }
   ]
 }

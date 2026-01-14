@@ -5,6 +5,7 @@ import { DependencyAnalyzer, DependencyLink } from '../panel/DependencyAnalyzer'
 import { loadGrammarsOnce, LoadedGrammars } from '../tsParser';
 import { ensureGitignoreForTarget } from '../services/gitignoreService';
 import { GitignoreTarget } from '../services/aspectSettings';
+import { getDefaultExcludeGlob } from '../services/DirectoryExclusion';
 import { 
   extractPythonSymbols, 
   extractTSJSSymbols, 
@@ -3716,8 +3717,8 @@ async function discoverWorkspaceFiles(workspaceRoot: vscode.Uri): Promise<string
 
   try {
     const pattern = new vscode.RelativePattern(workspaceRoot, '**/*');
-    // Exclude common environment, dependency, and build directories
-    const exclude = '{**/node_modules/**,**/.venv/**,**/venv/**,**/env/**,**/site-packages/**,**/__pycache__/**,**/.tox/**,**/.pytest_cache/**,**/.mypy_cache/**,**/dist/**,**/build/**,**/.next/**,**/.turbo/**,**/coverage/**,**/.cache/**,**/dist-packages/**,**/.git/**,**/.hg/**}';
+    // Use centralized exclusion pattern
+    const exclude = getDefaultExcludeGlob();
     const uris = await vscode.workspace.findFiles(pattern, exclude, 1000);
 
     for (const uri of uris) {

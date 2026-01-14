@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { AspectCodeState } from '../state';
 import { DependencyAnalyzer, DependencyLink } from '../panel/DependencyAnalyzer';
+import { getDefaultExcludeGlob } from './DirectoryExclusion';
 
 type ProgressFn = (message: string) => void;
 type KbStatus = { path: string; ok: boolean };
@@ -367,7 +368,8 @@ export class PromptGenerationService {
     if (!workspaceFolders || workspaceFolders.length === 0) return [];
 
     const include = '**/*.{ts,tsx,js,jsx,mjs,cjs,py}';
-    const exclude = '**/{node_modules,dist,out,build,.git,.aspect}/**';
+    // Use centralized exclusion pattern
+    const exclude = getDefaultExcludeGlob();
 
     const all: string[] = [];
     for (const folder of workspaceFolders) {
