@@ -2,7 +2,7 @@
   "name": "aspectcode",
   "displayName": "Aspect Code",
   "description": "AI-powered static analysis with Tree-sitter for AI assistant integration",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "aspectcode",
   "license": "SEE LICENSE IN LICENSE.md",
   "preview": true,
