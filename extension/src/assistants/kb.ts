@@ -166,7 +166,9 @@ function extractKBEnrichingFindings(
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
-    });
+    })
+    // Sort for deterministic order
+    .sort((a, b) => a.file.localeCompare(b.file) || a.message.localeCompare(b.message));
 }
 
 /**
@@ -350,7 +352,7 @@ export async function computeImpactSummaryForFile(
         abs: dep,
         dependent_count: depData.get(dep)?.inDegree ?? 0
       }))
-      .sort((a, b) => b.dependent_count - a.dependent_count);
+      .sort((a, b) => b.dependent_count - a.dependent_count || a.abs.localeCompare(b.abs));
 
     const dependentsCount = dependentsWithCounts.length;
     const hubRisk: ImpactSummary['hub_risk'] = dependentsCount >= 5 ? 'HIGH' : dependentsCount >= 3 ? 'MEDIUM' : 'LOW';
@@ -448,7 +450,7 @@ async function generateArchitectureFile(
         };
       })
       .filter(h => h.totalDegree > 2 || h.findings > 0)
-      .sort((a, b) => b.hotspotScore - a.hotspotScore)
+      .sort((a, b) => b.hotspotScore - a.hotspotScore || a.file.localeCompare(b.file))
       .slice(0, KB_SECTION_LIMITS.hubs);
 
     if (hubs.length > 0) {
@@ -489,7 +491,7 @@ async function generateArchitectureFile(
             .filter(l => l.target === hub.file && l.source !== hub.file)
             .filter(l => classifyFile(l.source, workspaceRoot.fsPath) === 'app'),
           l => l.source
-        );
+        ).sort((a, b) => a.source.localeCompare(b.source));
         
         // Get second-level importers (files that import the direct importers)
         const secondLevelImporters = new Set<string>();
@@ -498,7 +500,7 @@ async function generateArchitectureFile(
             l.target === importer.source && 
             l.source !== hub.file &&
             classifyFile(l.source, workspaceRoot.fsPath) === 'app'
-          );
+          ).sort((a, b) => a.source.localeCompare(b.source));
           for (const il of indirectLinks.slice(0, 3)) {
             secondLevelImporters.add(il.source);
           }
@@ -550,7 +552,7 @@ async function generateArchitectureFile(
       const httpHandlers = dedupe(
         ruleEntryPoints.filter(f => f.message.includes('HTTP')),
         f => f.file
-      );
+      ).sort((a, b) => a.file.localeCompare(b.file));
       
       // Merge rule-based HTTP handlers into runtime (deduped)
       const runtimePaths = new Set(runtimeEntries.map(e => e.path));
@@ -624,6 +626,7 @@ async function generateArchitectureFile(
     const dirStructure = analyzeDirStructure(appFiles, workspaceRoot.fsPath);
     const topDirs = Array.from(dirStructure.entries())
       .filter(([_, info]) => info.files.length >= 2)
+      .sort((a, b) => b[1].files.length - a[1].files.length || a[0].localeCompare(b[0]))
       .slice(0, 12);
 
     if (topDirs.length > 0) {
@@ -646,7 +649,7 @@ async function generateArchitectureFile(
       isStructuralAppFile(l.source, workspaceRoot.fsPath) &&
       isStructuralAppFile(l.target, workspaceRoot.fsPath) &&
       l.source !== l.target  // Filter out self-references (bug in dependency detection)
-    );
+    ).sort((a, b) => a.source.localeCompare(b.source) || a.target.localeCompare(b.target));
     
     // Also get cycle findings from the rule for additional context
     const cycleFindings = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.IMPORT_CYCLE);
@@ -938,7 +941,7 @@ async function generateMapFile(
     }
 
     const sortedFiles = Array.from(fileScores.entries())
-      .sort((a, b) => b[1] - a[1])
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
       .slice(0, 40)
       .map(([file]) => file);
 
@@ -1552,7 +1555,7 @@ async function generateContextFile(
     const centralityScores = calculateCentralityScores(appLinks);
     const topModules = Array.from(centralityScores.entries())
       .filter(([file]) => isStructuralAppFile(file, workspaceRoot.fsPath))
-      .sort((a, b) => b[1].score - a[1].score)
+      .sort((a, b) => b[1].score - a[1].score || a[0].localeCompare(b[0]))
       .slice(0, 8);
     
     if (topModules.length > 0) {
@@ -1582,7 +1585,7 @@ async function generateContextFile(
       // Limit to 3-10 chains, preferring longer chains
       const sortedChains = chains
         .map(c => ({ chain: c, depth: c.split(' → ').length }))
-        .sort((a, b) => b.depth - a.depth)
+        .sort((a, b) => b.depth - a.depth || a.chain.localeCompare(b.chain))
         .slice(0, 8)
         .map(c => c.chain);
       
@@ -1753,9 +1756,9 @@ function groupEndpointsByModule(
     groups[moduleName].push(handler);
   }
   
-  // Sort by endpoint count
+  // Sort by endpoint count with key tie-breaker for determinism
   return Object.fromEntries(
-    Object.entries(groups).sort((a, b) => b[1].length - a[1].length)
+    Object.entries(groups).sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))
   );
 }
 
@@ -1778,13 +1781,13 @@ async function buildEntryPointFlows(
     chain.push(`→ ${entry.path} (${entry.reason})`);
     
     // Follow outgoing links 2 levels deep
-    const level1Links = allLinks.filter(l => l.source === entryFile).slice(0, 3);
+    const level1Links = allLinks.filter(l => l.source === entryFile).sort((a, b) => a.target.localeCompare(b.target)).slice(0, 3);
     for (const l1 of level1Links) {
       const l1Name = makeRelativePath(l1.target, workspaceRoot.fsPath);
       const l1Symbols = l1.symbols.slice(0, 2).join(', ');
       chain.push(`  → ${l1Name}${l1Symbols ? ` (${l1Symbols})` : ''}`);
       
-      const level2Links = allLinks.filter(l => l.source === l1.target).slice(0, 2);
+      const level2Links = allLinks.filter(l => l.source === l1.target).sort((a, b) => a.target.localeCompare(b.target)).slice(0, 2);
       for (const l2 of level2Links) {
         const l2Name = makeRelativePath(l2.target, workspaceRoot.fsPath);
         chain.push(`    → ${l2Name}`);
@@ -2090,7 +2093,7 @@ function findModuleClusters(
     if (related.length >= 1) {
       // Filter out config files from clusters - they pollute feature groupings
       const rawFiles = [file, ...related.map(([f]) => f)].map(f => makeRelativePath(f, workspaceRoot));
-      const clusterFiles = dedupe(rawFiles.filter(f => !isConfigOrToolingFile(f))).slice(0, 8);
+      const clusterFiles = dedupe(rawFiles.filter(f => !isConfigOrToolingFile(f))).sort().slice(0, 8);
       
       // Skip if all files were configs
       if (clusterFiles.length < 2) {
@@ -2233,7 +2236,7 @@ function buildDirectoryClusters(
   
   return Array.from(dirGroups.entries())
     .filter(([_, files]) => files.length >= 3)
-    .sort((a, b) => b[1].length - a[1].length)
+    .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))
     .slice(0, 3)
     .map(([dir, files]) => ({
       name: path.basename(dir) || 'Root',
@@ -2291,7 +2294,7 @@ function analyzeFileNaming(files: string[], workspaceRoot: string): {
 
   const patterns = Object.entries(styleCounts)
     .filter(([_, data]) => data.count > 0)
-    .sort((a, b) => b[1].count - a[1].count)
+    .sort((a, b) => b[1].count - a[1].count || a[0].localeCompare(b[0]))
     .map(([style, data]) => ({
       style,
       example: data.examples[0] || '',
@@ -2314,9 +2317,9 @@ async function analyzeImportPatterns(files: string[]): Promise<Array<{
 }>> {
   const patterns: Array<{ language: string; example: string }> = [];
   
-  // Sample a few files per language
-  const pyFiles = files.filter(f => f.endsWith('.py')).slice(0, 3);
-  const tsFiles = files.filter(f => f.endsWith('.ts') || f.endsWith('.tsx')).slice(0, 3);
+  // Sample a few files per language (sorted for determinism)
+  const pyFiles = files.filter(f => f.endsWith('.py')).sort().slice(0, 3);
+  const tsFiles = files.filter(f => f.endsWith('.ts') || f.endsWith('.tsx')).sort().slice(0, 3);
   
   // Python import patterns
   for (const file of pyFiles) {
@@ -2357,7 +2360,7 @@ async function analyzeImportPatterns(files: string[]): Promise<Array<{
   }
   
   // Java import patterns
-  const javaFiles = files.filter(f => f.endsWith('.java')).slice(0, 3);
+  const javaFiles = files.filter(f => f.endsWith('.java')).sort().slice(0, 3);
   for (const file of javaFiles) {
     try {
       const uri = vscode.Uri.file(file);
@@ -2377,7 +2380,7 @@ async function analyzeImportPatterns(files: string[]): Promise<Array<{
   }
   
   // C# using patterns
-  const csFiles = files.filter(f => f.endsWith('.cs')).slice(0, 3);
+  const csFiles = files.filter(f => f.endsWith('.cs')).sort().slice(0, 3);
   for (const file of csFiles) {
     try {
       const uri = vscode.Uri.file(file);
@@ -2418,7 +2421,8 @@ async function analyzeFunctionNaming(files: string[]): Promise<{
     'validate_*': { count: 0, examples: [] },
   };
 
-  const sampleFiles = files.slice(0, 50);
+  // Sort before sampling for deterministic selection
+  const sampleFiles = [...files].sort().slice(0, 50);
   
   for (const file of sampleFiles) {
     try {
@@ -2454,7 +2458,7 @@ async function analyzeFunctionNaming(files: string[]): Promise<{
 
   const patterns = Object.entries(patternCounts)
     .filter(([_, data]) => data.count > 0)
-    .sort((a, b) => b[1].count - a[1].count)
+    .sort((a, b) => b[1].count - a[1].count || a[0].localeCompare(b[0]))
     .map(([pattern, data]) => ({
       pattern,
       example: data.examples[0] || pattern.replace('*', 'example'),
@@ -2509,7 +2513,8 @@ async function analyzeClassNaming(files: string[]): Promise<{
     '*View': { count: 0, examples: [] },
   };
 
-  const sampleFiles = files.slice(0, 50);
+  // Sort before sampling for deterministic selection
+  const sampleFiles = [...files].sort().slice(0, 50);
 
   for (const file of sampleFiles) {
     try {
@@ -2533,7 +2538,7 @@ async function analyzeClassNaming(files: string[]): Promise<{
 
   const patterns = Object.entries(suffixCounts)
     .filter(([_, data]) => data.count > 0)
-    .sort((a, b) => b[1].count - a[1].count)
+    .sort((a, b) => b[1].count - a[1].count || a[0].localeCompare(b[0]))
     .map(([pattern, data]) => ({
       pattern,
       example: data.examples[0] || pattern.replace('*', 'User'),
@@ -2691,7 +2696,8 @@ function analyzeTestNaming(files: string[], workspaceRoot: string): {
 
   const seenPatterns = new Set<string>();
 
-  for (const file of testFiles.slice(0, 10)) {
+  // Sort for deterministic selection
+  for (const file of testFiles.sort().slice(0, 10)) {
     const basename = path.basename(file);
     
     if (basename.startsWith('test_') && !seenPatterns.has('test_*.py')) {
@@ -3636,9 +3642,9 @@ function detectEntryPoints(files: string[], workspaceRoot: string): Array<{ path
     }
   }
 
-  // Sort by confidence (high first)
+  // Sort by confidence (high first), with path tie-breaker for determinism
   const confidenceOrder = { high: 0, medium: 1, low: 2 };
-  entryPoints.sort((a, b) => confidenceOrder[a.confidence] - confidenceOrder[b.confidence]);
+  entryPoints.sort((a, b) => confidenceOrder[a.confidence] - confidenceOrder[b.confidence] || a.path.localeCompare(b.path));
 
   return entryPoints;
 }
@@ -3667,7 +3673,8 @@ function analyzeTestOrganization(files: string[], workspaceRoot: string): {
     }
   }
 
-  return { testFiles, testDirs: Array.from(testDirs), testPatterns: Array.from(testPatterns) };
+  // Sort for deterministic output
+  return { testFiles: testFiles.sort(), testDirs: Array.from(testDirs).sort(), testPatterns: Array.from(testPatterns).sort() };
 }
 
 async function getDetailedDependencyData(
@@ -3731,7 +3738,8 @@ async function discoverWorkspaceFiles(workspaceRoot: vscode.Uri): Promise<string
     // Ignore errors
   }
 
-  return files;
+  // Sort for deterministic order (file system order varies by OS)
+  return files.sort();
 }
 
 /**

@@ -731,11 +731,11 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     // Normalize file path to avoid mismatches
     const normalizedFile = path.normalize(activeFile);
     
-    // Check cache first - use dependency cache timestamp since graphs depend on dependencies
+    // Check cache first - graph cache is valid as long as dependency cache exists
     const now = Date.now();
     const cacheKey = `focused_${normalizedFile}`;
     
-    if (this._graphCache.has(cacheKey) && (now - this._dependencyCacheTimestamp) < this._cacheTimeout) {
+    if (this._graphCache.has(cacheKey) && this._dependencyCache.has('all')) {
       const cachedGraph = this._graphCache.get(cacheKey)!;
 
             const cachedAllFiles = this._workspaceFilesCache;
@@ -806,16 +806,16 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     }
     
     // Even if file not in workspace, we still need to analyze dependencies to get global stats
-    // Get dependencies (cached) - use separate dependency cache timestamp
+    // Get dependencies (cached) - only reanalyze if cache is empty (invalidated by file watchers)
     let allDependencies = this._dependencyCache.get('all');
-    if (!allDependencies || (now - this._dependencyCacheTimestamp) > this._cacheTimeout) {
+    if (!allDependencies) {
             setPhase(`Analyzing dependencies (0/${allFiles.length} files)...`);
       allDependencies = await this._dependencyAnalyzer.analyzeDependencies(allFiles, (current, total, phase) => {
         // The phase string from DependencyAnalyzer already includes progress info
         setPhase(phase);
       });
       this._dependencyCache.set('all', allDependencies);
-      this._dependencyCacheTimestamp = Date.now(); // Update dependency-specific timestamp
+      this._dependencyCacheTimestamp = Date.now(); // Track when cache was populated
     }
 
     const stats = this.ensureGlobalGraphStats(allFiles, allDependencies as DependencyLink[]);

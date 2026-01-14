@@ -211,7 +211,12 @@ export class DependencyAnalyzer {
     // Clear index after use to free memory
     this.fileIndex = null;
     
-    return links;
+    // Sort links for deterministic output order
+    return links.sort((a, b) => 
+      a.source.localeCompare(b.source) || 
+      a.target.localeCompare(b.target) ||
+      a.type.localeCompare(b.type)
+    );
   }
 
   /**
