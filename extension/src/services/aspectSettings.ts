@@ -9,6 +9,9 @@
 import * as vscode from 'vscode';
 import type { ExclusionSettings } from './DirectoryExclusion';
 
+// Re-export ExclusionSettings for consumers
+export type { ExclusionSettings } from './DirectoryExclusion';
+
 export type InstructionsMode = 'safe' | 'permissive' | 'custom' | 'off';
 export type AutoRegenerateKbMode = 'off' | 'onSave' | 'idle';
 

@@ -291,7 +291,7 @@ export async function regenerateInstructionFilesOnly(
  * Generates or updates instruction files for configured AI assistants.
  * 
  * Note: KB files should already be generated before calling this function.
- * Call autoRegenerateKBFiles() first if KB needs regeneration.
+ * Call regenerateEverything() first if KB needs regeneration.
  * 
  * @param assistantsOverride Optional assistants selection override. If provided,
  *   uses these values instead of reading from .aspect/.settings.json. This enables

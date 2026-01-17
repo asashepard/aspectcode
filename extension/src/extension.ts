@@ -14,6 +14,7 @@ import { WorkspaceFingerprint } from './services/WorkspaceFingerprint';
 import { computeImpactSummaryForFile } from './assistants/kb';
 import { getAssistantsSettings, getAutoRegenerateKbSetting, migrateAspectSettingsFromVSCode, readAspectSettings, setAutoRegenerateKbSetting, getExtensionEnabledSetting, aspectDirExists } from './services/aspectSettings';
 import { getEnablementCancellationToken } from './services/enablementCancellation';
+import { initFileDiscoveryService, disposeFileDiscoveryService, type FileDiscoveryService } from './services/FileDiscoveryService';
 
 // --- Type Definitions for API Responses ---
 
@@ -47,6 +48,9 @@ let statusBarItem: vscode.StatusBarItem;
 
 // Workspace fingerprint for KB staleness detection
 let workspaceFingerprint: WorkspaceFingerprint | null = null;
+
+// FileDiscoveryService singleton
+let fileDiscoveryService: FileDiscoveryService | null = null;
 
 // Extension version from package.json
 const EXTENSION_VERSION = '0.0.1';
@@ -728,159 +732,6 @@ function sendProgressToPanel(state: AspectCodeState | undefined, phase: string, 
   }
 }
 
-// Repository indexing functions
-// NOTE: INDEX is disabled for remote servers (always the case now).
-// The /index endpoint requires repo files on the server filesystem which remote servers cannot access.
-async function indexRepository(force: boolean = false, state?: AspectCodeState) {
-  const root = await getWorkspaceRoot();
-  if (!root) {
-    return;
-  }
-
-  const apiUrl = getBaseUrl();
-  const isLocalServer = /(^|\/\/)(localhost|127\.0\.0\.1)(:|\/|$)/i.test(apiUrl);
-
-  // /index requires that the repo path exists on the server filesystem.
-  // Remote servers cannot access local paths, so INDEX is always skipped.
-  if (!isLocalServer) {
-    // Silently skip - no warning needed since this is expected behavior
-    outputChannel?.appendLine(`[indexRepository] Skipping INDEX for remote server (use EXAMINE instead)`);
-    return;
-  }
-
-  try {
-    outputChannel?.appendLine(`=== ${force ? 'Re-indexing' : 'Indexing'} repository: ${root} ===`);
-
-    // Update panel state - start indexing
-    if (state) {
-      state.update({ busy: true, error: undefined });
-    }
-
-    // Enhanced progress tracking with multiple phases
-    // NOTE: Using SourceControl location to hide the notification popup
-    const progressOptions = {
-      location: vscode.ProgressLocation.SourceControl, // Changed from Notification to hide popup
-      title: `${force ? 'Re-indexing' : 'Indexing'} repository...`,
-      cancellable: false
-    };
-
-    await vscode.window.withProgress(progressOptions, async (progress) => {
-      // Phase 1: File discovery (10%)
-      progress.report({ increment: 0, message: 'Discovering source files...' });
-      sendProgressToPanel(state, 'indexing', 5, 'Discovering source files...');
-      
-      await new Promise(resolve => setTimeout(resolve, 200)); // Small delay for UI
-      
-      // Phase 2: Preparing request (20%)
-      progress.report({ increment: 10, message: 'Preparing indexing request...' });
-      sendProgressToPanel(state, 'indexing', 15, 'Preparing indexing request...');
-
-      const payload = {
-        root: root,
-        force_reindex: force,
-        include_patterns: ['**/*.py', '**/*.ts', '**/*.tsx', '**/*.js', '**/*.jsx'],
-        exclude_patterns: ['.git/**', 'node_modules/**', '__pycache__/**', '*.pyc', '.venv/**', 'venv/**', 'env/**', 'site-packages/**', '.pytest_cache/**', '.mypy_cache/**', '.tox/**', 'build/**', 'dist/**', 'target/**', '.next/**', 'coverage/**', 'htmlcov/**', '*.egg-info/**', '.eggs/**']
-      };
-
-      // Phase 3: Sending to server (30%)
-      progress.report({ increment: 10, message: 'Sending to analysis server...' });
-      sendProgressToPanel(state, 'indexing', 25, 'Sending to analysis server...');
-
-      // Phase 4: Server processing (30% -> 90%) with timeout protection
-      progress.report({ increment: 5, message: 'Server processing files...' });
-      sendProgressToPanel(state, 'indexing', 35, 'Server processing files...');
-
-      const startTime = Date.now();
-      
-      // Create a timeout promise for large repositories
-      const timeoutMs = 180000; // 3 minutes timeout
-      const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('Indexing timeout - repository may be too large')), timeoutMs);
-      });
-      
-      const fetchStartTime = Date.now();
-      
-      const fetchPromise = (async () => {
-        const headers = await getHeaders();
-        const response = await fetch(apiUrl + '/index', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(payload)
-        });
-        return response;
-      })();
-
-      const res = await Promise.race([fetchPromise, timeoutPromise]) as Response;
-      outputChannel?.appendLine(`[indexRepository] Server responded in ${Date.now() - fetchStartTime}ms`);
-
-      if (!res.ok) {
-        handleHttpError(res.status, res.statusText);
-      }
-
-      // Phase 5: Processing response (90%)
-      progress.report({ increment: 55, message: 'Processing server response...' });
-      sendProgressToPanel(state, 'indexing', 90, 'Processing server response...');
-
-      const result: any = await res.json();
-      outputChannel?.appendLine(`Index result: ${JSON.stringify(result, null, 2)}`);
-
-      if (typeof result?.snapshot_id === 'string' && result.snapshot_id === 'error-indexing-failed') {
-        throw new Error('Server failed to index repository (snapshot_id=error-indexing-failed)');
-      }
-
-      // Phase 6: Finalizing (100%)
-      progress.report({ increment: 10, message: 'Finalizing indexing...' });
-      sendProgressToPanel(state, 'indexing', 100, 'Indexing complete');
-
-      // Update panel state - index complete
-      if (state) {
-        const { snapshot_id, file_count, processing_time_ms } = result;
-        const indexStats = {
-          snapshotId: snapshot_id,
-          fileCount: file_count,
-          bytes: result.total_bytes || 0,
-          tookMs: processing_time_ms
-        };
-
-        state.update({
-          snapshot: indexStats,
-          busy: false,
-          error: undefined,
-          ui: { ...(state.s.ui ?? {}), activeTab: (state.s.ui?.activeTab ?? "overview") }
-        });
-
-        state.update({
-          history: [
-            { ts: Date.now(), kind: (force ? 'reindex' : 'index') as 'index' | 'reindex', meta: { files: file_count, tookMs: processing_time_ms } },
-            ...state.s.history
-          ].slice(0, 50)
-        });
-      }
-
-      progress.report({ message: 'Index complete!' });
-
-      // Show summary
-      const { snapshot_id, file_count, processing_time_ms, dependency_count } = result;
-      const message = [
-        `Repository indexed successfully!`,
-        `• Files processed: ${file_count}`,
-        `• Dependencies found: ${dependency_count}`,
-        `• Processing time: ${processing_time_ms}ms`,
-        `• Snapshot ID: ${snapshot_id.substring(0, 8)}...`
-      ].join('\n');
-
-      // vscode.window.showInformationMessage(message);
-    });
-
-  } catch (e) {
-    outputChannel?.appendLine(`EXCEPTION in indexRepository: ${e}`);
-    if (state) {
-      state.update({ busy: false, error: `Indexing failed: ${(e as Error).message}` });
-    }
-    vscode.window.showErrorMessage(`Repository indexing failed: ${(e as Error).message}`);
-  }
-}
-
 async function examineFullRepository(
   state?: AspectCodeState,
   context?: vscode.ExtensionContext,
@@ -888,12 +739,23 @@ async function examineFullRepository(
 ) {
   outputChannel?.appendLine(`[examineFullRepository] Called with state: ${state ? 'YES' : 'NO'}`);
   
-  // Check if API key is available - if not, skip server validation gracefully
+  // Check if API key is available - if not, skip server validation but still regenerate KB
   const hasKey = await hasApiKeyConfigured();
   if (!hasKey || isApiKeyBlocked()) {
-    outputChannel?.appendLine('[examineFullRepository] No API key configured - skipping server validation');
-    // Just complete without error - KB and graph still work
+    outputChannel?.appendLine('[examineFullRepository] No API key configured - skipping server validation, regenerating KB only');
+    
+    // Still regenerate KB (works offline)
     if (state) {
+      try {
+        const { regenerateEverything } = await import('./assistants/kb');
+        const result = await regenerateEverything(state, outputChannel!, context);
+        if (workspaceFingerprint && result.regenerated) {
+          // Pass discovered files to avoid rediscovery
+          await workspaceFingerprint.markKbFresh(result.files);
+        }
+      } catch (kbError) {
+        outputChannel?.appendLine(`[KB] Regeneration failed: ${kbError}`);
+      }
       state.update({ busy: false });
     }
     return;
@@ -1198,12 +1060,12 @@ async function examineFullRepository(
       // Always regenerate .aspect KB files after successful examination
       if (state) {
         try {
-          const { autoRegenerateKBFiles } = await import('./assistants/kb');
-          await autoRegenerateKBFiles(state, outputChannel!, context);
+          const { regenerateEverything } = await import('./assistants/kb');
+          const kbResult = await regenerateEverything(state, outputChannel!, context);
           
-          // Mark KB as fresh after successful regeneration
-          if (workspaceFingerprint) {
-            await workspaceFingerprint.markKbFresh();
+          // Mark KB as fresh after successful regeneration, reusing discovered files
+          if (workspaceFingerprint && kbResult.regenerated) {
+            await workspaceFingerprint.markKbFresh(kbResult.files);
           }
         } catch (kbError) {
           outputChannel?.appendLine(`[KB] Auto-regeneration failed (non-critical): ${kbError}`);
@@ -1312,15 +1174,15 @@ async function showRepositoryStatus() {
     message += `• Cache misses: ${stats.cache_stats?.misses || 0}\n`;
 
     if (!currentSnapshot) {
-      const result = await vscode.window.showInformationMessage(message, { modal: true }, 'Index Repository');
-      if (result === 'Index Repository') {
-        await indexRepository(false);
+      const result = await vscode.window.showInformationMessage(message, { modal: true }, 'Regenerate KB');
+      if (result === 'Regenerate KB') {
+        await vscode.commands.executeCommand('aspectcode.generateKB');
       }
     } else {
-      const actions = ['Re-index', 'Examine Full Repo'];
+      const actions = ['Regenerate KB', 'Examine Full Repo'];
       const result = await vscode.window.showInformationMessage(message, { modal: true }, ...actions);
-      if (result === 'Re-index') {
-        await indexRepository(true);
+      if (result === 'Regenerate KB') {
+        await vscode.commands.executeCommand('aspectcode.generateKB');
       } else if (result === 'Examine Full Repo') {
         await examineFullRepository();
       }
@@ -1592,6 +1454,12 @@ export async function activate(context: vscode.ExtensionContext) {
   // Initialize workspace fingerprint for KB staleness detection
   const workspaceRoot = await getWorkspaceRoot();
   if (workspaceRoot) {
+    // Initialize FileDiscoveryService singleton FIRST (used by other services)
+    const workspaceRootUri = vscode.Uri.file(workspaceRoot);
+    fileDiscoveryService = initFileDiscoveryService(workspaceRootUri, outputChannel);
+    context.subscriptions.push({ dispose: () => disposeFileDiscoveryService() });
+    outputChannel.appendLine('[Startup] FileDiscoveryService initialized');
+    
     workspaceFingerprint = new WorkspaceFingerprint(workspaceRoot, EXTENSION_VERSION, outputChannel);
     context.subscriptions.push(workspaceFingerprint);
 
@@ -1632,18 +1500,19 @@ export async function activate(context: vscode.ExtensionContext) {
         outputChannel.appendLine('[KB] Auto-regenerating KB...');
 
         // KB generation works offline (uses local dependency analysis)
-        // Skip server examine if no API key - KB will be less enriched but still useful
-        const { autoRegenerateKBFiles } = await import('./assistants/kb');
-        await autoRegenerateKBFiles(state, outputChannel, context);
-        await workspaceFingerprint?.markKbFresh();
+        const { regenerateEverything } = await import('./assistants/kb');
+        const result = await regenerateEverything(state, outputChannel, context);
         
-        // Invalidate dependency graph cache so next render picks up new structure
-        panelProvider.invalidateDependencyCache();
-        
-        // Trigger a dependency graph refresh if panel is visible
-        panelProvider.refreshDependencyGraph();
+        if (result.regenerated) {
+          // Pass the discovered files to markKbFresh to avoid rediscovery
+          await workspaceFingerprint?.markKbFresh(result.files);
+          
+          // Trigger a dependency graph refresh if panel is visible
+          // FileDiscoveryService will use cached files from KB generation
+          panelProvider.refreshDependencyGraph();
 
-        outputChannel.appendLine(`[KB] Auto-regeneration complete in ${Date.now() - regenStart}ms`);
+          outputChannel.appendLine(`[KB] Auto-regeneration complete in ${Date.now() - regenStart}ms`);
+        }
       } catch (e) {
         outputChannel.appendLine(`[KB] Auto-regeneration failed: ${e}`);
       }
@@ -1815,33 +1684,47 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('aspectcode.generateKB', async () => {
       const rootUri = vscode.workspace.workspaceFolders?.[0]?.uri;
-      if (rootUri) {
-        const enabled = await getExtensionEnabledSetting(rootUri);
-        if (!enabled) {
-          vscode.window.showInformationMessage('Aspect Code is disabled.', 'Enable').then((sel) => {
-            if (sel === 'Enable') void vscode.commands.executeCommand('aspectcode.toggleExtensionEnabled');
-          });
-          return;
-        }
+      if (!rootUri) {
+        vscode.window.showWarningMessage('No workspace folder open.');
+        return;
+      }
+      
+      const enabled = await getExtensionEnabledSetting(rootUri);
+      if (!enabled) {
+        vscode.window.showInformationMessage('Aspect Code is disabled.', 'Enable').then((sel) => {
+          if (sel === 'Enable') void vscode.commands.executeCommand('aspectcode.toggleExtensionEnabled');
+        });
+        return;
       }
       // Note: KB generation works offline - no API key required
 
       try {
         const regenStart = Date.now();
-        outputChannel?.appendLine('=== GENERATE KB: Regenerating KB files ===');
+        outputChannel?.appendLine('=== REGENERATE KB: Using regenerateEverything() ===');
 
-        const { autoRegenerateKBFiles } = await import('./assistants/kb');
-        await autoRegenerateKBFiles(state, outputChannel, context);
-        await workspaceFingerprint?.markKbFresh();
+        // Use the consolidated regenerateEverything function
+        const { regenerateEverything } = await import('./assistants/kb');
+        const result = await regenerateEverything(state, outputChannel!, context);
+        
+        if (result.regenerated) {
+          // Mark KB as fresh after successful regeneration, reusing discovered files
+          await workspaceFingerprint?.markKbFresh(result.files);
+          
+          // Notify panel that KB is no longer stale
+          panelProvider.setKbStale(false);
 
-        // Best-effort: refresh dependency caches if the panel is open.
-        panelProvider.invalidateDependencyCache();
-        panelProvider.refreshDependencyGraph();
+          // Refresh dependency graph - FileDiscoveryService will use cached files
+          panelProvider.refreshDependencyGraph();
 
-        outputChannel?.appendLine(`=== GENERATE KB: Complete (${Date.now() - regenStart}ms) ===`);
+          outputChannel?.appendLine(`=== REGENERATE KB: Complete (${Date.now() - regenStart}ms) ===`);
+          vscode.window.showInformationMessage('Knowledge base regenerated successfully.');
+        } else {
+          outputChannel?.appendLine('=== REGENERATE KB: Skipped (.aspect/ not yet created) ===');
+          vscode.window.showInformationMessage('Knowledge base not yet initialized. Use the + button to create it.');
+        }
       } catch (e) {
-        outputChannel?.appendLine(`GENERATE KB ERROR: ${e}`);
-        vscode.window.showErrorMessage(`KB generation failed: ${e}`);
+        outputChannel?.appendLine(`REGENERATE KB ERROR: ${e}`);
+        vscode.window.showErrorMessage(`KB regeneration failed: ${e}`);
       }
     })
   );
@@ -1984,34 +1867,32 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // 6. FORCE REINDEX - Clear cache and reindex entire workspace
+  // 6. FORCE REINDEX - Run full examination (same as startup) and regenerate KB
+  // This is a manual button - always runs regardless of staleness
   context.subscriptions.push(
     vscode.commands.registerCommand('aspectcode.forceReindex', async () => {
       try {
-        // Note: Force reindex works offline - rebuilds local dependency graph
-        outputChannel?.appendLine('=== FORCE REINDEX: Clearing state and reindexing ===');
+        outputChannel?.appendLine('=== FORCE REINDEX: Running full examination ===');
         
-        // Clear state and run full index + examine
-        state.update({
-          busy: false,
-          findings: [],
-          lastValidate: undefined,
-          capabilities: undefined,
-          error: undefined
-        });
+        // Invalidate FileDiscoveryService cache to force fresh file discovery
+        const { getFileDiscoveryService } = await import('./services/FileDiscoveryService');
+        const fileDiscovery = getFileDiscoveryService();
+        fileDiscovery?.invalidate();
         
-        // Run full index (force = true bypasses cache)
-        await indexRepository(true, state);
-        
-        // Run full validation
+        // Run full examination - this shows the "Validating..." toast,
+        // discovers files, validates, and regenerates KB at the end
+        // examineFullRepository already calls markKbFresh with discovered files
         await examineFullRepository(state, context);
         
-        outputChannel?.appendLine('=== FORCE REINDEX: Complete ===');
-        vscode.window.showInformationMessage('Workspace reindexed successfully');
+        // Refresh UI after examination completes
+        // No need to call markKbFresh again - examineFullRepository does it
+        panelProvider.setKbStale(false);
+        panelProvider.refreshDependencyGraph();
         
+        outputChannel?.appendLine('=== FORCE REINDEX: Complete ===');
       } catch (error) {
         outputChannel?.appendLine(`FORCE REINDEX ERROR: ${error}`);
-        vscode.window.showErrorMessage(`Reindex failed: ${error}`);
+        vscode.window.showErrorMessage(`Examination failed: ${error}`);
       }
     })
   );

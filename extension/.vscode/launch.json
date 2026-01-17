@@ -10,8 +10,7 @@
         "--extensionDevelopmentPath=${workspaceFolder}",
         "C:/code/contexttune"
       ],
-      "outFiles": ["${workspaceFolder}/dist/**/*.js"],
-      "preLaunchTask": "npm: compile"
+      "outFiles": ["${workspaceFolder}/dist/**/*.js"]
     }
   ]
 }

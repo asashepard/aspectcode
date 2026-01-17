@@ -4,13 +4,16 @@
  * Computes a cheap fingerprint from workspace files (paths + mtime + size).
  * Stores fingerprint in .aspect/.fingerprint.json alongside KB files.
  * Provides simple isKbStale() / markKbFresh() API.
+ * 
+ * Now uses FileDiscoveryService for file discovery to avoid redundant scans.
  */
 
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { AutoRegenerateKbMode } from './aspectSettings';
-import { getDefaultExcludeGlob } from './DirectoryExclusion';
+import { getFileDiscoveryService } from './FileDiscoveryService';
+import { discoverSourceFiles } from './DirectoryExclusion';
 
 // ============================================================================
 // Types
@@ -39,10 +42,6 @@ interface FileMetadata {
 
 export class WorkspaceFingerprint implements vscode.Disposable {
   private readonly FINGERPRINT_FILE = '.fingerprint.json';
-  private readonly SOURCE_EXTENSIONS = [
-    '.py', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
-    '.java', '.cs', '.go', '.cpp', '.c', '.h', '.rs'
-  ];
   
   // Idle detection
   private idleTimer: NodeJS.Timeout | null = null;
@@ -127,6 +126,14 @@ export class WorkspaceFingerprint implements vscode.Disposable {
         return false;
       }
 
+      // Check version mismatch - extension update forces KB regeneration
+      if (stored.version !== this.extensionVersion) {
+        this.outputChannel.appendLine(
+          `[WorkspaceFingerprint] Version mismatch: ${stored.version} -> ${this.extensionVersion}`
+        );
+        return true;
+      }
+
       const current = await this.computeFingerprint();
       
       // Check if fingerprint changed
@@ -169,10 +176,13 @@ export class WorkspaceFingerprint implements vscode.Disposable {
 
   /**
    * Mark KB as fresh (call after successful KB regeneration).
+   * 
+   * @param preDiscoveredFiles Optional - if KB generation already discovered files,
+   *                           pass them here to avoid rediscovering.
    */
-  async markKbFresh(): Promise<void> {
+  async markKbFresh(preDiscoveredFiles?: string[]): Promise<void> {
     try {
-      const fingerprint = await this.computeFingerprint();
+      const fingerprint = await this.computeFingerprint(preDiscoveredFiles);
       
       const data: FingerprintData = {
         fingerprint: fingerprint.fingerprint,
@@ -286,9 +296,12 @@ export class WorkspaceFingerprint implements vscode.Disposable {
 
   /**
    * Get current fingerprint without comparing to stored.
+   * 
+   * @param preDiscoveredFiles Optional - if files were already discovered, pass them
+   *                           to avoid redundant file discovery.
    */
-  async computeFingerprint(): Promise<{ fingerprint: string; fileCount: number }> {
-    const files = await this.discoverSourceFiles();
+  async computeFingerprint(preDiscoveredFiles?: string[]): Promise<{ fingerprint: string; fileCount: number }> {
+    const files = preDiscoveredFiles ?? await this.discoverWorkspaceSourceFiles();
     const metadata = await this.getFilesMetadata(files);
     
     // Sort for deterministic hash
@@ -312,15 +325,17 @@ export class WorkspaceFingerprint implements vscode.Disposable {
         return;
       }
 
-      const isStale = await this.isKbStale();
-      
-      if (isStale && this.kbRegenerateCallback) {
+      // In idle mode, regenerate if we were notified of changes (staleNotified)
+      // Don't check fingerprint - the point is to regenerate after user stops editing
+      if (this.staleNotified && this.kbRegenerateCallback) {
         this.regenerationInProgress = true;
         const startTime = Date.now();
-        this.outputChannel.appendLine(`[WorkspaceFingerprint] Idle timeout + KB stale, auto-regenerating...`);
+        this.outputChannel.appendLine(`[WorkspaceFingerprint] Idle timeout reached, auto-regenerating KB...`);
         await this.kbRegenerateCallback();
         const duration = Date.now() - startTime;
         this.outputChannel.appendLine(`[WorkspaceFingerprint] KB regenerated in ${duration}ms`);
+      } else {
+        this.outputChannel.appendLine('[WorkspaceFingerprint] Idle timeout but no changes detected, skipping');
       }
     } catch (e) {
       this.outputChannel.appendLine(`[WorkspaceFingerprint] Idle regeneration failed: ${e}`);
@@ -333,25 +348,29 @@ export class WorkspaceFingerprint implements vscode.Disposable {
   // Internal: File Discovery
   // ==========================================================================
 
-  private async discoverSourceFiles(): Promise<string[]> {
-    const files: string[] = [];
-    
-    // Build glob pattern for source files
-    const pattern = `**/*{${this.SOURCE_EXTENSIONS.join(',')}}`;
-    
-    // Use centralized exclusion pattern
-    const excludeGlob = getDefaultExcludeGlob();
-    
-    try {
-      const uris = await vscode.workspace.findFiles(pattern, excludeGlob, 10000);
-      for (const uri of uris) {
-        files.push(uri.fsPath);
+  private async discoverWorkspaceSourceFiles(): Promise<string[]> {
+    // Use FileDiscoveryService if available (preferred - uses cache)
+    const service = getFileDiscoveryService();
+    if (service) {
+      try {
+        return await service.getFiles();
+      } catch (e) {
+        this.outputChannel.appendLine(`[WorkspaceFingerprint] FileDiscoveryService error: ${e}`);
       }
-    } catch (e) {
-      this.outputChannel.appendLine(`[WorkspaceFingerprint] File discovery error: ${e}`);
     }
     
-    return files;
+    // Fallback to direct discovery
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders || workspaceFolders.length === 0) {
+      return [];
+    }
+    
+    try {
+      return await discoverSourceFiles(workspaceFolders[0].uri, this.outputChannel);
+    } catch (e) {
+      this.outputChannel.appendLine(`[WorkspaceFingerprint] File discovery error: ${e}`);
+      return [];
+    }
   }
 
   private async getFilesMetadata(files: string[]): Promise<FileMetadata[]> {

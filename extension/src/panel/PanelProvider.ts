@@ -5,8 +5,9 @@ import { AspectCodeState } from '../state';
 import { fetchCapabilities, getApiKeyAuthStatus, hasValidApiKey, onDidChangeApiKeyAuthStatus, resetApiKeyAuthStatus, type ApiKeyAuthStatus } from '../http';
 import { DependencyAnalyzer, DependencyLink } from './DependencyAnalyzer';
 import { detectAssistants } from '../assistants/detection';
-import { getAutoRegenerateKbSetting, getInstructionsModeSetting, setAutoRegenerateKbSetting, getExtensionEnabledSetting, getExclusionSettings } from '../services/aspectSettings';
-import { DirectoryExclusionService, getDefaultExcludeGlob } from '../services/DirectoryExclusion';
+import { getAutoRegenerateKbSetting, getInstructionsModeSetting, setAutoRegenerateKbSetting, getExtensionEnabledSetting } from '../services/aspectSettings';
+import { discoverSourceFiles } from '../services/DirectoryExclusion';
+import { getFileDiscoveryService } from '../services/FileDiscoveryService';
 
 type Finding = { 
   id?: string;
@@ -89,7 +90,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
   private _cacheCleanupInterval: NodeJS.Timeout | null = null; // Periodic cache cleanup
   private _kbStale: boolean = false; // Track KB staleness for UI indicator
   private _fileDiscoveryInFlight: Promise<string[]> | null = null; // Prevent concurrent file discovery
-  private _exclusionService: DirectoryExclusionService | null = null; // Centralized directory exclusion
 
     private _globalGraphStats: DependencyGraphStats | null = null;
     private _globalGraphStatsAt = 0;
@@ -1236,119 +1236,23 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
   }
   
   private async _doDiscoverAllWorkspaceFiles(onProgress?: (phase: string) => void): Promise<string[]> {
+    // Use FileDiscoveryService if available (preferred - uses cache)
+    const service = getFileDiscoveryService();
+    if (service) {
+      try {
+        return await service.getFiles();
+      } catch (e) {
+        this._outputChannel?.appendLine(`[PanelProvider] FileDiscoveryService error: ${e}`);
+      }
+    }
+    
+    // Fallback to direct discovery
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
       return [];
     }
 
-        const allFiles = new Set<string>();
-    
-    // Common source code file patterns
-    const patterns = [
-      '**/*.py',
-      '**/*.ts', '**/*.tsx',
-      '**/*.js', '**/*.jsx', '**/*.mjs', '**/*.cjs',
-      '**/*.java',
-      '**/*.cpp', '**/*.c', '**/*.hpp', '**/*.h',
-      '**/*.cs',
-      '**/*.go',
-      '**/*.rs',
-      '**/*.rb',
-      '**/*.php'
-    ];
-
-        // Use centralized directory exclusion service for consistent exclusions
-        let explicitExclude: string;
-        try {
-          const workspaceRoot = workspaceFolders[0].uri.fsPath;
-          
-          // Initialize exclusion service if needed
-          if (!this._exclusionService) {
-            this._exclusionService = new DirectoryExclusionService(workspaceRoot, this._outputChannel);
-          }
-          
-          // Get exclusion settings from .aspect/.settings.json
-          const exclusionSettings = await getExclusionSettings(workspaceFolders[0].uri);
-          const exclusions = await this._exclusionService.computeExclusions(exclusionSettings);
-          explicitExclude = exclusions.excludeGlob || getDefaultExcludeGlob();
-          
-          this._outputChannel?.appendLine(`[PanelProvider] Using exclusion glob: ${explicitExclude.substring(0, 100)}...`);
-        } catch (e) {
-          // Fallback to default exclusions
-          explicitExclude = getDefaultExcludeGlob();
-          this._outputChannel?.appendLine(`[PanelProvider] Using default exclusion glob (error: ${e})`);
-        }
-        
-        // Also build a combined exclude from files.exclude and search.exclude settings
-        // to respect user's gitignore-like configuration.
-        const config = vscode.workspace.getConfiguration();
-        const filesExclude = config.get<Record<string, boolean>>('files.exclude', {});
-        const searchExclude = config.get<Record<string, boolean>>('search.exclude', {});
-        
-        // Collect enabled exclude patterns from settings
-        const settingsExcludes: string[] = [];
-        for (const [pattern, enabled] of Object.entries(filesExclude)) {
-            if (enabled) settingsExcludes.push(pattern);
-        }
-        for (const [pattern, enabled] of Object.entries(searchExclude)) {
-            if (enabled && !settingsExcludes.includes(pattern)) settingsExcludes.push(pattern);
-        }
-        
-        // High limit to catch all files in most repos, but prevent runaway in massive monorepos.
-        // 5000 per pattern = plenty for any reasonable project.
-        const maxResultsPerPattern = 5000;
-        
-        // Run all patterns in parallel for speed, track cumulative file count for progress
-        let totalFilesFound = 0;
-        let completedPatterns = 0;
-        const totalPatterns = patterns.length;
-        
-        const updateProgress = () => {
-            const pct = Math.round((completedPatterns / totalPatterns) * 100);
-            onProgress?.(`Discovering files (${pct}%)...`);
-        };
-        
-        updateProgress();
-        
-        const patternPromises = patterns.map(async (pattern) => {
-            try {
-                const files = await vscode.workspace.findFiles(pattern, explicitExclude, maxResultsPerPattern);
-                completedPatterns++;
-                totalFilesFound += files.length;
-                updateProgress();
-                return files;
-            } catch (error) {
-                console.warn('Error finding files with pattern:', pattern, error);
-                completedPatterns++;
-                updateProgress();
-                return [] as readonly vscode.Uri[];
-            }
-        });
-        
-        const results = await Promise.all(patternPromises);
-
-        // Build a set of directory/file names to exclude from settings.
-        // Only use patterns that look like directory names (not wildcards like "*" or ".*")
-        const excludeNames = settingsExcludes
-            .map(p => {
-                // Extract just the directory/file name, stripping glob syntax
-                const normalized = p.replace(/\*\*\//g, '').replace(/\/\*\*/g, '').replace(/^\*+/, '').replace(/\*+$/, '');
-                return normalized.toLowerCase();
-            })
-            .filter(p => p.length > 2 && !p.includes('*')); // Must be meaningful name, no remaining wildcards
-
-        for (const fileList of results) {
-            for (const file of fileList) {
-                const filePath = file.fsPath.toLowerCase();
-                // Filter out files matching settings excludes (only if meaningful patterns exist)
-                const excluded = excludeNames.length > 0 && excludeNames.some(name => filePath.includes(name));
-                if (!excluded) {
-                    allFiles.add(file.fsPath);
-                }
-            }
-        }
-
-        return Array.from(allFiles);
+    return discoverSourceFiles(workspaceFolders[0].uri, this._outputChannel, onProgress);
   }
   
   private isKeyArchitecturalFile(filePath: string): boolean {
@@ -1637,15 +1541,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
 
         case 'FORCE_REINDEX':
           // Force reindex works offline - rebuilds local dependency graph
-          // Show native VS Code confirmation dialog
-          const confirmed = await vscode.window.showWarningMessage(
-                        'Rebuild analysis caches and re-index the workspace? This rebuilds the dependency/indexing data and may take a moment.',
-            { modal: true },
-            'Reindex'
-          );
-          if (confirmed === 'Reindex') {
-            await vscode.commands.executeCommand('aspectcode.forceReindex');
-          }
+          // No confirmation needed - just run immediately
+          await vscode.commands.executeCommand('aspectcode.forceReindex');
           break;
 
         case 'COMMAND':
@@ -2098,45 +1995,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             overflow: hidden;
             padding-bottom: 34px; /* Leave space for bottom mode toggle (34px) + status bar (24px) */
             box-sizing: border-box;
-        }
-        
-        /* KB Stale Indicator */
-        .kb-stale-indicator {
-            display: none;
-            align-items: center;
-            gap: 8px;
-            padding: 6px 12px;
-            background: var(--vscode-inputValidation-warningBackground);
-            border-bottom: 1px solid var(--vscode-inputValidation-warningBorder);
-            font-size: 11px;
-            color: var(--vscode-inputValidation-warningForeground, var(--vscode-foreground));
-        }
-        
-        .kb-stale-indicator svg {
-            width: 14px;
-            height: 14px;
-            flex-shrink: 0;
-            stroke: currentColor;
-            fill: none;
-        }
-        
-        .kb-stale-text {
-            flex: 1;
-        }
-        
-        .kb-stale-btn {
-            background: var(--vscode-button-secondaryBackground);
-            color: var(--vscode-button-secondaryForeground);
-            border: none;
-            border-radius: 3px;
-            padding: 4px 8px;
-            font-size: 11px;
-            cursor: pointer;
-            white-space: nowrap;
-        }
-        
-        .kb-stale-btn:hover {
-            background: var(--vscode-button-secondaryHoverBackground);
         }
         
         /* Compact header bar */
@@ -3922,17 +3780,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 </svg>
             </div>
         </div>
-    </div>
-    
-    <!-- KB Stale Indicator -->
-    <div class="kb-stale-indicator" id="kb-stale-indicator">
-        <svg viewBox="0 0 24 24" stroke-width="2">
-            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
-            <line x1="12" y1="9" x2="12" y2="13"></line>
-            <line x1="12" y1="17" x2="12.01" y2="17"></line>
-        </svg>
-        <span class="kb-stale-text">Knowledge base may be stale</span>
-        <button id="btn-regenerate-kb" class="kb-stale-btn">Regenerate KB</button>
     </div>
     
     <!-- No-Graph View (default) -->

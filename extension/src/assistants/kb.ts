@@ -5,7 +5,8 @@ import { DependencyAnalyzer, DependencyLink } from '../panel/DependencyAnalyzer'
 import { loadGrammarsOnce, LoadedGrammars } from '../tsParser';
 import { ensureGitignoreForTarget } from '../services/gitignoreService';
 import { GitignoreTarget } from '../services/aspectSettings';
-import { getDefaultExcludeGlob } from '../services/DirectoryExclusion';
+import { discoverSourceFiles } from '../services/DirectoryExclusion';
+import { getFileDiscoveryService } from '../services/FileDiscoveryService';
 import { 
   extractPythonSymbols, 
   extractTSJSSymbols, 
@@ -172,44 +173,57 @@ function extractKBEnrichingFindings(
 }
 
 /**
- * Automatically regenerate KB files when findings change.
- * Called after incremental validation or full validation.
+ * SINGLE entry point for all KB regeneration in the extension.
+ * Called by: onSave auto-regen, reload button, generateKB command.
  * 
- * IMPORTANT: This function only regenerates EXISTING KB files.
- * It will NOT create .aspect/ if it doesn't already exist.
- * To create the initial KB, use generateKnowledgeBase() directly
- * (triggered by the '+' button or configureAssistants command).
+ * This function:
+ * 1. Checks if .aspect/ exists (skips if not - use '+' button to initialize)
+ * 2. Regenerates KB files (architecture.md, map.md, context.md)
+ * 3. Does NOT regenerate instruction files (those require '+' button quickpick)
+ * 
+ * @returns Object with regenerated flag and discovered files (for markKbFresh)
  */
-export async function autoRegenerateKBFiles(
+export interface RegenerateResult {
+  regenerated: boolean;
+  files: string[];
+}
+
+export async function regenerateEverything(
   state: AspectCodeState,
   outputChannel: vscode.OutputChannel,
   context?: vscode.ExtensionContext
-): Promise<void> {
+): Promise<RegenerateResult> {
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders || workspaceFolders.length === 0) {
-    return;
+    outputChannel.appendLine('[KB] regenerateEverything: No workspace folder');
+    return { regenerated: false, files: [] };
   }
 
   const workspaceRoot = workspaceFolders[0].uri;
   
-  // Check if .aspect/ already exists - don't auto-create on first save
+  // Check if .aspect/ already exists - don't auto-create
   // Users must explicitly generate via '+' button or configureAssistants command
   try {
     const aspectDir = vscode.Uri.joinPath(workspaceRoot, '.aspect');
     await vscode.workspace.fs.stat(aspectDir);
   } catch {
-    // .aspect/ doesn't exist - skip auto-regeneration
-    outputChannel.appendLine('[KB] Auto-regeneration skipped (.aspect/ not yet created - use + button to initialize)');
-    return;
+    // .aspect/ doesn't exist - skip regeneration
+    outputChannel.appendLine('[KB] regenerateEverything: Skipped (.aspect/ not yet created - use + button to initialize)');
+    return { regenerated: false, files: [] };
   }
   
   try {
-    // Regenerate KB files
-    await generateKnowledgeBase(workspaceRoot, state, outputChannel, context);
+    const regenStart = Date.now();
+    outputChannel.appendLine('[KB] regenerateEverything: Starting KB regeneration...');
     
-    outputChannel.appendLine('[KB] Auto-regenerated after examination update');
+    // Regenerate KB files - returns the discovered files
+    const files = await generateKnowledgeBase(workspaceRoot, state, outputChannel, context);
+    
+    outputChannel.appendLine(`[KB] regenerateEverything: Complete in ${Date.now() - regenStart}ms`);
+    return { regenerated: true, files };
   } catch (error) {
-    outputChannel.appendLine(`[KB] Auto-regeneration failed (non-critical): ${error}`);
+    outputChannel.appendLine(`[KB] regenerateEverything: Failed - ${error}`);
+    throw error;
   }
 }
 
@@ -220,13 +234,15 @@ export async function autoRegenerateKBFiles(
  * - architecture.md: The Guardrail - layout, hubs, entry points
  * - map.md: The Context - symbols, data models, conventions
  * - context.md: The Flow - clusters, flows, integrations
+ * 
+ * @returns The list of discovered files (for reuse by markKbFresh)
  */
 export async function generateKnowledgeBase(
   workspaceRoot: vscode.Uri,
   state: AspectCodeState,
   outputChannel: vscode.OutputChannel,
   context?: vscode.ExtensionContext
-): Promise<void> {
+): Promise<string[]> {
   outputChannel.appendLine('[KB] generateKnowledgeBase called');
   
   const aspectCodeDir = vscode.Uri.joinPath(workspaceRoot, '.aspect');
@@ -255,9 +271,9 @@ export async function generateKnowledgeBase(
     }
   }
 
-  // Pre-fetch shared data
+  // Pre-fetch shared data using FileDiscoveryService (or fallback)
   const tDiscover = Date.now();
-  const files = await discoverWorkspaceFiles(workspaceRoot);
+  const files = await discoverWorkspaceFiles(workspaceRoot, outputChannel);
   outputChannel.appendLine(`[KB][Perf] discoverWorkspaceFiles: ${files.length} files in ${Date.now() - tDiscover}ms`);
   
   // Pre-load all file contents once to avoid repeated reads (major perf optimization)
@@ -292,6 +308,9 @@ export async function generateKnowledgeBase(
   void ensureGitignoreForTarget(workspaceRoot, aspectTarget, outputChannel).catch(e => {
     outputChannel.appendLine(`[KB] Gitignore prompt failed (non-critical): ${e}`);
   });
+
+  // Return the discovered files so they can be reused (e.g., by markKbFresh)
+  return files;
 }
 
 export type ImpactSummary = {
@@ -3697,7 +3716,10 @@ async function getDetailedDependencyData(
     if (fileContentCache && fileContentCache.size > 0) {
       analyzer.setFileContentsCache(fileContentCache);
     }
+    outputChannel.appendLine(`[KB] Starting dependency analysis for ${files.length} files...`);
+    const depStart = Date.now();
     links = await analyzer.analyzeDependencies(files);
+    outputChannel.appendLine(`[KB] Dependency analysis complete: ${links.length} links in ${Date.now() - depStart}ms`);
 
     for (const file of files) {
       stats.set(file, { inDegree: 0, outDegree: 0 });
@@ -3718,28 +3740,22 @@ async function getDetailedDependencyData(
   return { stats, links };
 }
 
-async function discoverWorkspaceFiles(workspaceRoot: vscode.Uri): Promise<string[]> {
-  const files: string[] = [];
-  const extensions = ['.py', '.ts', '.tsx', '.js', '.jsx', '.java', '.cs', '.cpp', '.c', '.go', '.rs'];
-
-  try {
-    const pattern = new vscode.RelativePattern(workspaceRoot, '**/*');
-    // Use centralized exclusion pattern
-    const exclude = getDefaultExcludeGlob();
-    const uris = await vscode.workspace.findFiles(pattern, exclude, 1000);
-
-    for (const uri of uris) {
-      const ext = path.extname(uri.fsPath).toLowerCase();
-      if (extensions.includes(ext)) {
-        files.push(uri.fsPath);
-      }
-    }
-  } catch {
-    // Ignore errors
+/**
+ * Discover workspace files using the centralized FileDiscoveryService.
+ * Falls back to direct discovery if the service isn't initialized.
+ */
+async function discoverWorkspaceFiles(
+  workspaceRoot: vscode.Uri,
+  outputChannel?: vscode.OutputChannel
+): Promise<string[]> {
+  // Try FileDiscoveryService first (preferred - uses cache)
+  const service = getFileDiscoveryService();
+  if (service) {
+    return service.getFiles();
   }
-
-  // Sort for deterministic order (file system order varies by OS)
-  return files.sort();
+  
+  // Fallback to direct discovery
+  return discoverSourceFiles(workspaceRoot, outputChannel);
 }
 
 /**
