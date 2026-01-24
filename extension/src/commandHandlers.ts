@@ -1,8 +1,7 @@
 /**
- * New Command Integration
+ * Command Handlers
  * 
- * This module integrates the new engine-based commands with the existing extension.
- * It can be imported and activated alongside the existing functionality.
+ * This module registers and handles all extension commands.
  */
 
 import * as vscode from 'vscode';
@@ -18,7 +17,7 @@ import { cancelAndResetAllInFlightWork } from './services/enablementCancellation
  * Activate the new engine-based commands.
  * Call this from the main extension activate function.
  */
-export function activateNewCommands(
+export function activateCommands(
   context: vscode.ExtensionContext,
   state: AspectCodeState,
   outputChannel?: vscode.OutputChannel
@@ -182,76 +181,73 @@ export function activateNewCommands(
     }, 500);
   };
 
-  // Watch for .aspect/ folder changes (including files within it)
-  const aspectWatcher = vscode.workspace.createFileSystemWatcher('**/.aspect/**');
+  // ============================================================
+  // Consolidated File Watchers
+  // ============================================================
+  // Watch for .aspect/ folder and all contents (KB files, settings, instructions)
+  const aspectWatcher = vscode.workspace.createFileSystemWatcher('**/.aspect{,/**}');
   aspectWatcher.onDidCreate((uri) => {
-    channel.appendLine(`[Watcher] .aspect file created: ${uri.fsPath}`);
+    channel.appendLine(`[Watcher] .aspect created: ${uri.fsPath}`);
     debouncedInstructionUpdate(false);
   });
+  aspectWatcher.onDidChange(async (uri) => {
+    // Handle custom instructions deletion check
+    if (uri.fsPath.endsWith('instructions.md')) {
+      try {
+        await vscode.workspace.fs.stat(uri);
+      } catch {
+        // File was deleted
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
+        if (!workspaceRoot) return;
+        const mode = await getInstructionsModeSetting(workspaceRoot, channel);
+        if (mode === 'custom') {
+          await setInstructionsModeSetting(workspaceRoot, 'off');
+          channel.appendLine('[Instructions] Custom instructions missing; auto-switched instructions.mode=off');
+          const assistants = await getAssistantsSettings(workspaceRoot, channel);
+          if (assistants.copilot || assistants.cursor || assistants.claude || assistants.other) {
+            await regenerateInstructionFilesOnly(workspaceRoot, channel);
+          }
+        }
+      }
+    }
+  });
   aspectWatcher.onDidDelete((uri) => {
-    channel.appendLine(`[Watcher] .aspect file deleted: ${uri.fsPath}`);
+    channel.appendLine(`[Watcher] .aspect deleted: ${uri.fsPath}`);
+    // Handle custom instructions auto-switch to off
+    if (uri.fsPath.endsWith('instructions.md')) {
+      const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
+      if (workspaceRoot) {
+        getInstructionsModeSetting(workspaceRoot, channel).then(async (mode) => {
+          if (mode === 'custom') {
+            await setInstructionsModeSetting(workspaceRoot, 'off');
+            channel.appendLine('[Instructions] Custom instructions missing; auto-switched instructions.mode=off');
+            const assistants = await getAssistantsSettings(workspaceRoot, channel);
+            if (assistants.copilot || assistants.cursor || assistants.claude || assistants.other) {
+              await regenerateInstructionFilesOnly(workspaceRoot, channel);
+            }
+          }
+        }).catch((e) => channel.appendLine(`[Watcher] Failed to auto-switch: ${e}`));
+      }
+    }
     debouncedInstructionUpdate(true);
   });
   context.subscriptions.push(aspectWatcher);
 
-  // Also watch for the .aspect folder itself being deleted
-  const aspectFolderWatcher = vscode.workspace.createFileSystemWatcher('**/.aspect');
-  aspectFolderWatcher.onDidCreate((uri) => {
-    channel.appendLine(`[Watcher] .aspect folder created: ${uri.fsPath}`);
-    debouncedInstructionUpdate(false);
-  });
-  aspectFolderWatcher.onDidDelete((uri) => {
-    channel.appendLine(`[Watcher] .aspect folder deleted: ${uri.fsPath}`);
-    debouncedInstructionUpdate(true);
-  });
-  context.subscriptions.push(aspectFolderWatcher);
+  // Watch for all AI assistant instruction files (root and config folders)
+  const instructionFilesWatcher = vscode.workspace.createFileSystemWatcher(
+    '**/{AGENTS,CLAUDE}.md'
+  );
+  instructionFilesWatcher.onDidCreate(() => debouncedInstructionUpdate(false));
+  instructionFilesWatcher.onDidDelete(() => debouncedInstructionUpdate(true));
+  context.subscriptions.push(instructionFilesWatcher);
 
-  // Watch for `.aspect/instructions.md` deletion.
-  // If it disappears while `custom` mode is active, auto-switch to `off`.
-  const customInstructionsWatcher = vscode.workspace.createFileSystemWatcher('**/.aspect/instructions.md');
-  customInstructionsWatcher.onDidDelete(async (uri) => {
-    try {
-      channel.appendLine(`[Watcher] .aspect/instructions.md deleted: ${uri.fsPath}`);
-      const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
-      if (!workspaceRoot) return;
-
-      const mode = await getInstructionsModeSetting(workspaceRoot, channel);
-      if (mode !== 'custom') return;
-
-      await setInstructionsModeSetting(workspaceRoot, 'off');
-      channel.appendLine('[Instructions] Custom instructions missing; auto-switched instructions.mode=off');
-
-      const assistants = await getAssistantsSettings(workspaceRoot, channel);
-      const hasEnabledAssistants = assistants.copilot || assistants.cursor || assistants.claude || assistants.other;
-      if (hasEnabledAssistants) {
-        await regenerateInstructionFilesOnly(workspaceRoot, channel);
-      }
-    } catch (e) {
-      channel.appendLine(`[Watcher] Failed to auto-switch from custom to off: ${e}`);
-    }
-  });
-  context.subscriptions.push(customInstructionsWatcher);
-
-  // Watch for instruction files: AGENTS.md, CLAUDE.md
-  const rootInstructionWatcher = vscode.workspace.createFileSystemWatcher('**/{AGENTS,CLAUDE}.md');
-  rootInstructionWatcher.onDidCreate(() => debouncedInstructionUpdate(false));
-  rootInstructionWatcher.onDidDelete(() => debouncedInstructionUpdate(true));
-  context.subscriptions.push(rootInstructionWatcher);
-
-  // Watch for Copilot instructions
-  const copilotWatcher = vscode.workspace.createFileSystemWatcher('**/.github/copilot-instructions.md');
-  copilotWatcher.onDidCreate(() => debouncedInstructionUpdate(false));
-  copilotWatcher.onDidDelete(() => debouncedInstructionUpdate(true));
-  context.subscriptions.push(copilotWatcher);
-
-  // Watch for Cursor files
-  const cursorWatcher = vscode.workspace.createFileSystemWatcher('**/{.cursor,.cursorrules}');
-  cursorWatcher.onDidCreate(() => debouncedInstructionUpdate(false));
-  cursorWatcher.onDidDelete(() => debouncedInstructionUpdate(true));
-  const cursorFolderWatcher = vscode.workspace.createFileSystemWatcher('**/.cursor/**');
-  cursorFolderWatcher.onDidCreate(() => debouncedInstructionUpdate(false));
-  cursorFolderWatcher.onDidDelete(() => debouncedInstructionUpdate(true));
-  context.subscriptions.push(cursorWatcher, cursorFolderWatcher);
+  // Watch for Copilot and Cursor config locations
+  const assistantConfigWatcher = vscode.workspace.createFileSystemWatcher(
+    '**/{.github/copilot-instructions.md,.cursor/**,.cursorrules}'
+  );
+  assistantConfigWatcher.onDidCreate(() => debouncedInstructionUpdate(false));
+  assistantConfigWatcher.onDidDelete(() => debouncedInstructionUpdate(true));
+  context.subscriptions.push(assistantConfigWatcher);
 
   // Startup check intentionally disabled: panel UI handles setup prompts.
 }

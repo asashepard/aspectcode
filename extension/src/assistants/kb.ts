@@ -142,22 +142,6 @@ interface KBEnrichingFinding {
   message: string;
 }
 
-/**
- * Extract KB-enriching findings by rule type.
- * These findings provide architectural intelligence rather than issue reports.
- * 
- * @deprecated Use local detection functions instead (detectDataModelsLocally, etc.)
- * This function is kept for backward compatibility but returns empty (findings removed).
- */
-function extractKBEnrichingFindings(
-  state: AspectCodeState,
-  ruleId: string
-): KBEnrichingFinding[] {
-  // Findings have been removed from the extension - this function returns empty
-  // KB enrichment now happens through local detection functions instead
-  return [];
-}
-
 // ============================================================================
 // LOCAL ENRICHMENT DETECTION (OSS-accessible, replaces server-based detection)
 // ============================================================================
@@ -559,14 +543,8 @@ function getKBEnrichments(
       return [];
   }
   
-  // If we got local results, use them
-  if (localResults.length > 0) {
-    return localResults;
-  }
-  
-  // Fallback to server findings if available (backward compatibility)
-  const ruleId = KB_ENRICHING_RULES[ruleType];
-  return extractKBEnrichingFindings(state, ruleId);
+  // Return local detection results (may be empty if no matches)
+  return localResults;
 }
 
 /**
@@ -1031,10 +1009,7 @@ async function generateArchitectureFile(
       l.source !== l.target  // Filter out self-references (bug in dependency detection)
     ).sort((a, b) => a.source.localeCompare(b.source) || a.target.localeCompare(b.target));
     
-    // Also get cycle findings from the rule for additional context
-    const cycleFindings = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.IMPORT_CYCLE);
-    
-    if (appCircularLinks.length > 0 || cycleFindings.length > 0) {
+    if (appCircularLinks.length > 0) {
       content += '## ⚠️ Circular Dependencies\n\n';
       content += '_Bidirectional imports that create tight coupling._\n\n';
       
@@ -1076,46 +1051,6 @@ async function generateArchitectureFile(
       }
       if (globalStateFindings.length > 8) {
         content += `- _...and ${globalStateFindings.length - 8} more_\n`;
-      }
-      content += '\n';
-    }
-
-    // ============================================================
-    // CRITICAL DEPENDENCIES (from architecture.critical_dependency rule)
-    // ============================================================
-    const criticalDepFindings = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.CRITICAL_DEPENDENCY)
-      .filter(f => classifyFile(f.file, workspaceRoot.fsPath) === 'app');
-    
-    if (criticalDepFindings.length > 0) {
-      content += '## Critical Dependencies\n\n';
-      content += '_Symbols with many dependents. Changes here have wide blast radius._\n\n';
-      
-      for (const finding of criticalDepFindings.slice(0, 6)) {
-        const relPath = makeRelativePath(finding.file, workspaceRoot.fsPath);
-        content += `- \`${relPath}\`: ${finding.message}\n`;
-      }
-      if (criticalDepFindings.length > 6) {
-        content += `- _...and ${criticalDepFindings.length - 6} more_\n`;
-      }
-      content += '\n';
-    }
-
-    // ============================================================
-    // CHANGE IMPACT ANALYSIS (from analysis.change_impact rule)
-    // ============================================================
-    const changeImpactFindings = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.CHANGE_IMPACT)
-      .filter(f => classifyFile(f.file, workspaceRoot.fsPath) === 'app');
-    
-    if (changeImpactFindings.length > 0) {
-      content += '## Change Impact\n\n';
-      content += '_High-impact symbols. Review carefully before modifying._\n\n';
-      
-      for (const finding of changeImpactFindings.slice(0, 6)) {
-        const relPath = makeRelativePath(finding.file, workspaceRoot.fsPath);
-        content += `- \`${relPath}\`: ${finding.message}\n`;
-      }
-      if (changeImpactFindings.length > 6) {
-        content += `- _...and ${changeImpactFindings.length - 6} more_\n`;
       }
       content += '\n';
     }

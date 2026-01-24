@@ -264,19 +264,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     });
   }
 
-    /**
-     * Best-effort accessors for prompt generation.
-     * These allow other parts of the extension to reuse the panel's dependency analysis
-     * instead of re-analyzing the entire workspace.
-     */
-    public getCachedWorkspaceFilesForPrompt(): string[] | null {
-        return this._workspaceFilesCache;
-    }
-
-    public getCachedDependencyLinksForPrompt(): DependencyLink[] | null {
-        return this._dependencyCache.get('all') ?? null;
-    }
-
   // Keep using your existing state. If you don't have a compact snapshot, track one here:
   private _bridgeState: {
     busy: boolean;

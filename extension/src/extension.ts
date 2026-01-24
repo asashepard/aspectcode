@@ -6,7 +6,7 @@ import { loadGrammarsOnce, getLoadedGrammarsSummary } from './tsParser';
 import { extractPythonImports, extractTSJSImports } from './importExtractors';
 import { AspectCodeState } from './state';
 import Parser from 'web-tree-sitter';
-import { activateNewCommands } from './newCommandsIntegration';
+import { activateCommands } from './commandHandlers';
 import { WorkspaceFingerprint } from './services/WorkspaceFingerprint';
 import { computeImpactSummaryForFile } from './assistants/kb';
 import { AspectCodePanelProvider } from './panel/PanelProvider';
@@ -976,9 +976,6 @@ export async function activate(context: vscode.ExtensionContext) {
       vscode.window.showInformationMessage('Impact analysis copied to clipboard.');
     })
   );
-  
-  // Note: Server-dependent commands (showPanel, copyDebugInfo, forceReindex) removed.
-  // Note: Aspect Code.openFinding command is now registered in newCommandsIntegration.ts
 
   // ===== EXTENSION SETUP =====
   outputChannel.appendLine('Aspect Code extension activated');
@@ -1093,8 +1090,8 @@ export async function activate(context: vscode.ExtensionContext) {
   };
   context.subscriptions.push(vscode.languages.registerCodeActionsProvider({ scheme: 'file', language: 'python' }, codeActionProvider));
 
-  // Activate new JSON Protocol v1 commands
-  activateNewCommands(context, state, outputChannel);
+  // Activate command handlers
+  activateCommands(context, state, outputChannel);
 }
 
 export function deactivate() {
