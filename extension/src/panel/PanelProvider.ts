@@ -2,38 +2,16 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { AspectCodeState } from '../state';
-import { fetchCapabilities, getApiKeyAuthStatus, hasValidApiKey, onDidChangeApiKeyAuthStatus, resetApiKeyAuthStatus, type ApiKeyAuthStatus } from '../http';
-import { DependencyAnalyzer, DependencyLink } from './DependencyAnalyzer';
+import { DependencyAnalyzer, DependencyLink } from '../services/DependencyAnalyzer';
 import { detectAssistants } from '../assistants/detection';
 import { getAutoRegenerateKbSetting, getInstructionsModeSetting, setAutoRegenerateKbSetting, getExtensionEnabledSetting } from '../services/aspectSettings';
 import { discoverSourceFiles } from '../services/DirectoryExclusion';
 import { getFileDiscoveryService } from '../services/FileDiscoveryService';
 
-type Finding = { 
-  id?: string;
-  file: string; 
-  rule: string; 
-  message: string; 
-  fixable: boolean;
-  severity?: 'critical' | 'high' | 'medium' | 'low' | 'info';
-  priority?: 'P0' | 'P1' | 'P2' | 'P3';
-  locations?: any[];
-};
-
-type DevFinding = Finding & {
-  id: string;
-  severity: 'critical' | 'high' | 'medium' | 'low' | 'info';
-  locations: any[];
-};
-
 type StateSnapshot = {
   busy: boolean;
-  findings: Finding[];
-  byRule: Record<string, number>;
   history: Array<{ ts: string; filesChanged: number; diffBytes: number }>;
   lastDiffMeta?: { files: number; hunks: number };
-    hasApiKey?: boolean;
-        apiKeyAuthStatus?: ApiKeyAuthStatus;
   totalFiles?: number;
   processingPhase?: string;
   progress?: number;
@@ -94,8 +72,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     private _globalGraphStats: DependencyGraphStats | null = null;
     private _globalGraphStatsAt = 0;
 
-    private _apiKeyValidationInFlight = false;
-
   constructor(
     private readonly _context: vscode.ExtensionContext,
     private readonly _state: AspectCodeState,
@@ -105,42 +81,14 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     this._dependencyAnalyzer = new DependencyAnalyzer();
     
     // When AspectCodeState changes, push a compact snapshot to the webview
-    // NOTE: Score calculation removed for performance
     this._state.onDidChange((s) => {
-      const byRule: Record<string, number> = {};
-      (s.findings ?? []).forEach((f: any) => {
-        const rule = f.code ?? f.ruleId ?? f.rule ?? 'unknown';
-        byRule[rule] = (byRule[rule] || 0) + 1;
-      });
-
       const totalFiles = this.estimateTotalFiles();
-
-      // Map findings without score calculation for fast updates
-      const findings = (s.findings ?? []).map((f: any) => ({
-        id: f.id ?? f.violation_id ?? `finding-${Math.random()}`,
-        file: this.parseFileFromFinding(f),
-        rule: f.rule ?? f.code ?? f.ruleId ?? 'unknown',
-        message: f.explain ?? f.message ?? f.title ?? '',
-        fixable: !!f.fixable,
-        severity: this.mapSeverity((f.severity as any) ?? 'warn'),
-        priority: f.priority ?? 'P1',
-        locations: f.span ? [f.span] : (f.locations || []),
-      }));
 
       this._bridgeState = {
         busy: !!s.busy,
-        findings: findings.map(f => ({
-          ...f,
-          span: this.parseSpanFromFinding(s.findings?.find((sf: any) => 
-            (sf.id ?? sf.violation_id) === f.id))
-        })),
-        byRule,
         history: this._bridgeState.history,
         lastDiffMeta: this._bridgeState.lastDiffMeta,
-        fixableRulesCount: this._state.getCapabilities()?.fixable_rules?.length ?? 0,
         lastAction: this._bridgeState.lastAction,
-                hasApiKey: this._bridgeState.hasApiKey,
-            apiKeyAuthStatus: this._bridgeState.apiKeyAuthStatus,
         totalFiles: totalFiles,
         processingPhase: this._bridgeState.processingPhase,
         progress: this._bridgeState.progress,
@@ -152,19 +100,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
       };
       
       this.pushState();
-      
-      // Detect incremental updates and show toast notification
-      const hasFilesChanged = s.lastValidate && (s.lastValidate as any).filesChanged;
-      
-      if (hasFilesChanged && (s.lastValidate as any).filesChanged >= 0) {
-        // This was an incremental validation - show subtle notification
-        this._outputChannel?.appendLine(`[IncrementalUpdate] Sending INCREMENTAL_UPDATE message: ${(s.lastValidate as any).filesChanged} files, ${s.lastValidate?.tookMs}ms`);
-        this.post({
-          type: 'INCREMENTAL_UPDATE',
-          filesChanged: (s.lastValidate as any).filesChanged,
-          duration: s.lastValidate?.tookMs || 0
-        });
-      }
       
       // Send dependency graph after state update (async)
       // BUT: Skip during busy states to avoid duplicate analysis during reindex
@@ -178,50 +113,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         })();
       }
     });
-
-        // Initialize and live-update API key auth status.
-        this._bridgeState.apiKeyAuthStatus = getApiKeyAuthStatus();
-
-        this._context.subscriptions.push(
-            onDidChangeApiKeyAuthStatus((status: ApiKeyAuthStatus) => {
-                this._bridgeState.apiKeyAuthStatus = status;
-                this.pushState();
-
-                if (status === 'ok') {
-                    // Now that gated features are available, refresh the dependency graph.
-                    // Also resume any auto-processing that was blocked at PANEL_READY.
-                    this.invalidateDependencyCache();
-                    this.refreshDependencyGraph();
-
-                    if (!this._autoProcessingStarted && !this._cacheLoadedSuccessfully && this._hasAspectKBAtPanelReady) {
-                        this._autoProcessingStarted = true;
-                        this._outputChannel?.appendLine('[PanelProvider] API key validated; resuming automatic processing');
-                        this.post({ type: 'START_AUTOMATIC_PROCESSING' });
-                    }
-                }
-            })
-        );
-
-        // Keep API key presence + auth status in sync when changed outside the panel.
-        this._context.subscriptions.push(
-            this._context.secrets.onDidChange((e) => {
-                if (e.key !== 'aspectcode.apiKey') return;
-                resetApiKeyAuthStatus();
-                this._bridgeState.apiKeyAuthStatus = getApiKeyAuthStatus();
-                void this.refreshApiKeyStatus();
-                this.pushState();
-            })
-        );
-
-        this._context.subscriptions.push(
-            vscode.workspace.onDidChangeConfiguration((e) => {
-                if (!e.affectsConfiguration('aspectcode.apiKey')) return;
-                resetApiKeyAuthStatus();
-                this._bridgeState.apiKeyAuthStatus = getApiKeyAuthStatus();
-                void this.refreshApiKeyStatus();
-                this.pushState();
-            })
-        );
 
         // Watch project-local settings file for changes.
         // This keeps the panel state in sync when settings are changed via commands
@@ -389,14 +280,9 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
   // Keep using your existing state. If you don't have a compact snapshot, track one here:
   private _bridgeState: {
     busy: boolean;
-    findings: DevFinding[];
-    byRule: Record<string, number>;
     history: Array<{ ts: string; filesChanged: number; diffBytes: number }>;
     lastDiffMeta?: { files: number; hunks: number };
-    fixableRulesCount?: number;
     lastAction?: string;
-        hasApiKey?: boolean;
-        apiKeyAuthStatus?: ApiKeyAuthStatus;
     totalFiles?: number;
     processingPhase?: string;
     progress?: number;
@@ -405,7 +291,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         instructionsMode?: 'safe' | 'permissive' | 'custom' | 'off';
         hasCustomInstructions?: boolean;
         extensionEnabled?: boolean;
-  } = { busy: false, findings: [], byRule: {}, history: [] };
+  } = { busy: false, history: [] };
 
   // (optional) helper to show the view from activate()
   reveal() { this._view?.show?.(true); }
@@ -419,19 +305,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     this.pushState();
   }
 
-    private async computeHasApiKey(): Promise<boolean> {
-        try {
-            const configApiKey = vscode.workspace.getConfiguration('aspectcode').get<string>('apiKey');
-            if (configApiKey && configApiKey.trim().length > 0) {
-                return true;
-            }
-            const secretKey = await this._context.secrets.get('aspectcode.apiKey');
-            return !!(secretKey && secretKey.trim().length > 0);
-        } catch {
-            return false;
-        }
-    }
-
     private async computeHasCustomInstructions(workspaceRoot: vscode.Uri): Promise<boolean> {
         try {
             const uri = vscode.Uri.joinPath(workspaceRoot, '.aspect', 'instructions.md');
@@ -439,29 +312,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             return true;
         } catch {
             return false;
-        }
-    }
-
-    private async refreshApiKeyStatus(): Promise<void> {
-        const hasApiKey = await this.computeHasApiKey();
-        if (this._bridgeState.hasApiKey !== hasApiKey) {
-            this._bridgeState.hasApiKey = hasApiKey;
-            this.pushState();
-        }
-
-        // If we have a key but auth status is unknown/invalid, attempt a lightweight validation.
-        // This ensures UI enables promptly after entering a key.
-        if (hasApiKey && !hasValidApiKey() && !this._apiKeyValidationInFlight) {
-            this._apiKeyValidationInFlight = true;
-            try {
-                await fetchCapabilities();
-            } catch {
-                // fetchCapabilities is best-effort and already logs.
-            } finally {
-                this._apiKeyValidationInFlight = false;
-                this._bridgeState.apiKeyAuthStatus = getApiKeyAuthStatus();
-                this.pushState();
-            }
         }
     }
 
@@ -494,24 +344,9 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             }
         }
 
-  private mapSeverity(severity: string): 'critical' | 'high' | 'medium' | 'low' | 'info' {
-    const severityMap: { [key: string]: 'critical' | 'high' | 'medium' | 'low' | 'info' } = {
-      'error': 'critical',
-      'warn': 'medium', 
-      'warning': 'medium',
-      'info': 'info',
-      'high': 'high',
-      'medium': 'medium',
-      'low': 'low',
-      'critical': 'critical'
-    };
-    return severityMap[severity?.toLowerCase()] || 'medium';
-  }
-
   private estimateTotalFiles(): number {
-    // Simple heuristic - count unique files from findings
-    const uniqueFiles = new Set(this._bridgeState.findings.map(f => f.file));
-    return Math.max(uniqueFiles.size, 1);
+    // Simple heuristic - count files from workspace cache
+    return Math.max(this._workspaceFilesCache?.length ?? 0, 1);
   }
 
   /**
@@ -673,7 +508,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             return;
         }
 
-        // Dependency graph is now always available offline (no API key required)
+        // Dependency graph is available offline
 
         // Track if this is the first graph load (enables UI + suppresses startup warning)
         const isFirstGraphLoad = !this._initialGraphSent;
@@ -870,17 +705,19 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     
     const filesToAnalyze = Array.from(involvedFiles);
     
-    // Create nodes
+    // Create nodes with importance based on dependency counts (no longer using findings)
     const nodes = filesToAnalyze.map(file => {
-      const fileFindings = this._bridgeState.findings.filter(f => f.file === file);
-      const violationCount = fileFindings.length;
-      const highSeverityCount = fileFindings.filter(f => f.severity === 'critical' || f.severity === 'high').length;
-      const errorCount = fileFindings.filter(f => f.severity === 'critical').length;
+      const importCount = relevantDependencies.filter(d => d.source === file && d.type === 'import').length;
+      const exportCount = relevantDependencies.filter(d => d.target === file && d.type === 'import').length;
+      const callCount = relevantDependencies.filter(d => d.source === file && d.type === 'call').length;
+      const isCircular = relevantDependencies.some(d => (d.source === file || d.target === file) && d.type === 'circular');
+      const totalDeps = importCount + exportCount + callCount;
       
-      // Active file is always a hub, others based on findings
+      // Active file is always a hub, others based on dependency count
       const isActive = path.normalize(file) === normalizedFile;
       let nodeType: 'hub' | 'file' = isActive ? 'hub' : 'file';
-      if (!isActive && (violationCount > 5 || highSeverityCount > 2)) {
+      // Mark files with many connections as hubs
+      if (!isActive && (totalDeps > 5 || isCircular)) {
         nodeType = 'hub';
       }
       
@@ -888,20 +725,20 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         id: file,
         label: file.split(/[/\\]/).pop() || file,
         type: nodeType,
-        importance: violationCount,
+        importance: totalDeps,
         file,
-        violations: violationCount,
-        highSeverity: highSeverityCount,
-        errors: errorCount,
-        importanceScore: violationCount + (highSeverityCount * 2) + (errorCount * 3),
-        ruleCategories: this.categorizeFindings(fileFindings),
+        violations: 0,
+        highSeverity: 0,
+        errors: 0,
+        importanceScore: totalDeps + (isCircular ? 5 : 0),
+        ruleCategories: {},
         isActiveFile: isActive,
         // Add dependency metadata
         dependencyInfo: {
-          imports: relevantDependencies.filter(d => d.source === file && d.type === 'import').length,
-          exports: relevantDependencies.filter(d => d.target === file && d.type === 'import').length,
-          calls: relevantDependencies.filter(d => d.source === file && d.type === 'call').length,
-          isCircular: relevantDependencies.some(d => (d.source === file || d.target === file) && d.type === 'circular')
+          imports: importCount,
+          exports: exportCount,
+          calls: callCount,
+          isCircular
         }
       };
     });
@@ -1021,11 +858,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
       return;
     }
     
-    // Pick the best file to focus on (prioritize files with findings)
-    const filesWithFindings = this._bridgeState.findings.map(f => f.file);
-    const fileToFocus = filesWithFindings.length > 0 
-      ? filesWithFindings[0]  // First file with findings
-      : allFiles[0];           // Or just the first file
+    // Pick the first file to focus on
+    const fileToFocus = allFiles[0];
     
     await this.sendFocusedDependencyGraph(fileToFocus);
   }
@@ -1033,24 +867,14 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
   private async sendRandomDependencyGraph() {
     // Get ALL files in workspace
     const allFiles = await this.discoverAllWorkspaceFiles();
-    const findingsFiles = new Set(this._bridgeState.findings.map(f => f.file));
     
-    // Select files more inclusively
+    // Select a random subset of files for the graph
     let selectedFiles: string[] = [];
     
-    // Include files with findings (up to 15)
-    const filesWithFindings = Array.from(findingsFiles).slice(0, 15);
-    selectedFiles.push(...filesWithFindings);
-    
-    // Fill remaining slots with any other files (to ensure we show files even without findings)
-    const remainingSlots = 25 - selectedFiles.length;
-    if (remainingSlots > 0) {
-      const otherFiles = allFiles
-        .filter(f => !selectedFiles.includes(f))
-        .sort(() => Math.random() - 0.5)
-        .slice(0, remainingSlots);
-      selectedFiles.push(...otherFiles);
-    }
+    // Include a random sample of files (up to 25)
+    const sampleSize = Math.min(25, allFiles.length);
+    const shuffled = allFiles.sort(() => Math.random() - 0.5);
+    selectedFiles = shuffled.slice(0, sampleSize);
     
     if (selectedFiles.length === 0) {
             this.post({ type: 'DEPENDENCY_GRAPH', graph: { nodes: [], links: [] }, stats: { totalFiles: 0, totalDeps: 0, totalCycles: 0 } });
@@ -1069,19 +893,16 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     });
     
     // Create nodes for ALL selected files (even those without dependencies)
+    // Node importance is now based on dependency counts (no longer using findings)
     const nodes = selectedFiles.map(file => {
-      const fileFindings = this._bridgeState.findings.filter(f => f.file === file);
-      const violationCount = fileFindings.length;
-      const highSeverityCount = fileFindings.filter(f => f.severity === 'critical' || f.severity === 'high').length;
-      const errorCount = fileFindings.filter(f => f.severity === 'critical').length;
-      
       // Calculate dependency metrics for this file
       const incomingDeps = allDependencies.filter(d => d.target === file);
       const outgoingDeps = allDependencies.filter(d => d.source === file);
       const totalDeps = incomingDeps.length + outgoingDeps.length;
+      const isCircular = [...incomingDeps, ...outgoingDeps].some(d => d.type === 'circular');
       
       let nodeType: 'hub' | 'file' = 'file';
-      if (violationCount > 8 || highSeverityCount > 3 || this.isKeyArchitecturalFile(file) || totalDeps > 4) {
+      if (this.isKeyArchitecturalFile(file) || totalDeps > 4 || isCircular) {
         nodeType = 'hub';
       }
       
@@ -1089,19 +910,19 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         id: file,
         label: file.split(/[/\\]/).pop() || file,
         type: nodeType,
-        importance: violationCount,
+        importance: totalDeps,
         file,
-        violations: violationCount,
-        highSeverity: highSeverityCount,
-        errors: errorCount,
-        importanceScore: violationCount + (highSeverityCount * 2) + (errorCount * 3) + (totalDeps * 0.5),
-        ruleCategories: this.categorizeFindings(fileFindings),
+        violations: 0,
+        highSeverity: 0,
+        errors: 0,
+        importanceScore: totalDeps + (isCircular ? 5 : 0),
+        ruleCategories: {},
         isActiveFile: false,
         dependencyInfo: {
           imports: outgoingDeps.filter(d => d.type === 'import').length,
           exports: incomingDeps.filter(d => d.type === 'import').length,
           calls: outgoingDeps.filter(d => d.type === 'call').length,
-          isCircular: [...incomingDeps, ...outgoingDeps].some(d => d.type === 'circular')
+          isCircular
         }
       };
     });
@@ -1136,41 +957,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     });
   }
   
-  private categorizeFindings(findings: Finding[]): Record<string, number> {
-    const categories: Record<string, number> = {};
-    findings.forEach(finding => {
-      const category = finding.rule.split('.')[0] || 'other';
-      categories[category] = (categories[category] || 0) + 1;
-    });
-    return categories;
-  }
-  
-  private extractReferencedFile(finding: Finding, files: string[]): string | null {
-    // Enhanced pattern matching for different import styles
-    const patterns = [
-      /import.+?['"]([^'"]+)['"]/i,
-      /from\s+['"]([^'"]+)['"]/i,
-      /requires?\s*\(\s*['"]([^'"]+)['"]\s*\)/i,
-      /includes?\s*['"]([^'"]+)['"]/i
-    ];
-    
-    for (const pattern of patterns) {
-      const match = finding.message.match(pattern);
-      if (match) {
-        const moduleName = match[1];
-        const targetFile = files.find(f => 
-          f.includes(moduleName) || 
-          f.endsWith(moduleName + '.py') || 
-          f.endsWith(moduleName + '.ts') ||
-          f.endsWith(moduleName + '.js') ||
-          f.split(/[/\\]/).pop()?.startsWith(moduleName)
-        );
-        if (targetFile) return targetFile;
-      }
-    }
-    return null;
-  }
-  
   private addOrUpdateLink(links: any[], source: string, target: string, strength: number, type: string) {
     const existing = links.find(l => 
       (l.source === source && l.target === target) || 
@@ -1182,19 +968,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     } else {
       links.push({ source, target, strength: Math.max(0.1, Math.min(1.0, strength)), type });
     }
-  }
-  
-  private calculateFileSimilarity(file1: string, file2: string): number {
-    const findings1 = this._bridgeState.findings.filter(f => f.file === file1);
-    const findings2 = this._bridgeState.findings.filter(f => f.file === file2);
-    
-    const rules1 = new Set(findings1.map(f => f.rule));
-    const rules2 = new Set(findings2.map(f => f.rule));
-    
-    const intersection = new Set([...rules1].filter(x => rules2.has(x)));
-    const union = new Set([...rules1, ...rules2]);
-    
-    return union.size > 0 ? intersection.size / union.size : 0;
   }
   
   private calculateDirectorySimilarity(file1: string, file2: string): number {
@@ -1311,9 +1084,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     this._view = view;
     view.webview.options = { enableScripts: true };
     view.webview.html = this.getHtml();
-
-        // Best-effort refresh of API key status for the bottom banner.
-        void this.refreshApiKeyStatus();
     
     // Reset auto-processing flag when webview is resolved/recreated
     this._autoProcessingStarted = false;
@@ -1324,9 +1094,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     view.webview.onDidReceiveMessage(async (msg: any) => {
       switch (msg?.type) {
         case 'PANEL_READY':
-                    // Ensure API key status is known before first STATE_UPDATE.
-                    this._bridgeState.hasApiKey = await this.computeHasApiKey();
-                                        this._bridgeState.apiKeyAuthStatus = getApiKeyAuthStatus();
           // Check if .aspect/ KB and instruction files exist (single detectAssistants call)
           const workspaceRootForKB = vscode.workspace.workspaceFolders?.[0]?.uri;
           let hasAspectKB = false;
@@ -1350,10 +1117,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           // 1. Cache was loaded successfully, OR
           // 2. .aspect/ KB exists (prior configuration) but cache is stale
           // Otherwise, user must click '+' to initialize
-                                        if (!this._autoProcessingStarted && !this._cacheLoadedSuccessfully && hasAspectKB
-                                                && this._bridgeState.hasApiKey !== false
-                                                && this._bridgeState.apiKeyAuthStatus !== 'invalid'
-                                                && this._bridgeState.apiKeyAuthStatus !== 'revoked') {
+                                                                                if (!this._autoProcessingStarted && !this._cacheLoadedSuccessfully && hasAspectKB) {
             this._autoProcessingStarted = true;
             // KB exists but cache is stale - regenerate automatically
             this._outputChannel?.appendLine('[PanelProvider] .aspect/ KB exists, regenerating cache...');
@@ -1430,32 +1194,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           this.post({ type: 'SNAPSHOT_RESULT', snapshot: this.captureSnapshot() });
           break;
 
-        case 'OPEN_FINDING': {
-          const file = String(msg.file || '');
-          const line = Number.isFinite(msg.line) ? Number(msg.line) : 1;
-          const column = Number.isFinite(msg.column) ? Number(msg.column) : 1;
-
-          // Create proper URI using VS Code's URI utilities
-          const uri = vscode.Uri.file(file);
-          
-          // Create a Finding object that matches the command signature
-          const finding = {
-            file_path: file,
-            uri: uri.toString(),
-            range: {
-              startLine: line,
-              startCol: column,
-              endLine: line,
-              endCol: column
-            },
-            rule_id: 'panel-click'
-          };
-
-          // Delegate to the command
-          await vscode.commands.executeCommand('aspectcode.openFinding', finding);
-          break;
-        }
-
         case 'NODE_CLICK_FOCUS': {
           const file = String(msg.file || '');
           if (file) {
@@ -1510,7 +1248,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'REGENERATE_KB':
-          // Regenerate knowledge base files (works offline - no API key required)
+          // Regenerate knowledge base files (works offline)
           try {
             await vscode.commands.executeCommand('aspectcode.generateKB');
           } catch (e) {
@@ -1519,7 +1257,7 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           break;
 
                 case 'CYCLE_AUTO_REGENERATE_KB': {
-                    // Cycling auto-regenerate setting works offline - no API key required
+                    // Cycling auto-regenerate setting works offline
                     const current = this.getAutoRegenerateKbMode();
                     const next: 'off' | 'onSave' | 'idle' = current === 'off'
                         ? 'onSave'
@@ -1554,9 +1292,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                         }
                         try {
                             await vscode.commands.executeCommand(msg.command);
-                            if (msg.command === 'aspectcode.enterApiKey' || msg.command === 'aspectcode.clearApiKey') {
-                                await this.refreshApiKeyStatus();
-                            }
 
                             // Keep project-local settings in sync after commands that mutate .aspect/.settings.json
                             // (e.g. instructions mode toggles, assistant configuration).
@@ -1669,18 +1404,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  // === Called by dev commands (from activate) ===
-  public simulateFindings() {
-    this._bridgeState.findings = [
-      { id: 'demo-1', file: 'samples/foo.py', rule: 'imports/no-cycles', message: 'Demo finding', fixable: true, severity: 'high', locations: [] },
-      { id: 'demo-2', file: 'samples/bar.py', rule: 'style/docstring-missing', message: 'Add docstring', fixable: false, severity: 'medium', locations: [] },
-    ];
-    this._bridgeState.byRule = { 'imports/no-cycles': 1, 'style/docstring-missing': 1 };
-    this.pushState();
-  }
-
   public resetBridgeState() {
-        this._bridgeState = { busy: false, findings: [], byRule: {}, history: [], lastDiffMeta: undefined, kbStale: this._bridgeState.kbStale };
+        this._bridgeState = { busy: false, history: [], lastDiffMeta: undefined, kbStale: this._bridgeState.kbStale };
     this.pushState();
   }
 
@@ -1742,17 +1467,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
   }
 
   public __setBridgeStateFromSnapshot(snap: any) {
-    this._bridgeState.findings = new Array(snap.renderedFindings || 0)
-      .fill(0)
-      .map((_, i) => ({
-        id: `restored-${i}`,
-        file: `(restored-${i})`,
-        rule: 'restored',
-        message: 'restored',
-        fixable: false,
-        severity: 'medium' as const,
-        locations: []
-      }));
     this._bridgeState.history = snap.history || [];
     this._bridgeState.lastDiffMeta = snap.lastDiffMeta;
     this.pushState();
@@ -1760,7 +1474,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
 
   public captureSnapshot() {
     return {
-      renderedFindings: this._bridgeState.findings.length,
       filters: {}, // fill with your real filter UI state if you have it
       history: this._bridgeState.history,
       lastDiffMeta: this._bridgeState.lastDiffMeta
@@ -3872,15 +3585,11 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         <div class="panel-status-right">
             <span id="panel-status-kb-warning" class="panel-status-warning" style="display: none;"></span>
         </div>
-        <div id="panel-status-api-key-missing" class="panel-status-api-key-missing" role="button" tabindex="0" title="Click to enter your Aspect Code API key">
-            Missing API key • Click to enter
-        </div>
     </div>
 
     <script>
         const vscode = acquireVsCodeApi();
         
-        let currentFindings = [];
         let currentGraph = { nodes: [], links: [] }; // Legacy - will be replaced
         let focusedGraph = { nodes: [], links: [] }; // 2D focused graph data
         let overviewGraph = { nodes: [], links: [] }; // 3D overview graph data
@@ -3888,9 +3597,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
         let globalStatsForStatus = null;
         let activeTab = 'graph'; // Default to dependency graph tab (kept for compatibility)
         let manualProcessingActive = false; // Track manual processing to prevent score flashing
-        let currentActiveFile = ''; // Track currently active file for findings sorting
+        let currentActiveFile = ''; // Track currently active file for graph focus
         let currentState = null; // Track latest state for re-rendering
-        let severityFilters = { problems: true, informational: true }; // Track which priority types are shown (P0/P1 = problems, P2/P3 = informational)
         let graphReady = false; // Track if initial dependency graph has loaded
         let pendingInstructionFilesStatus = null; // Store instruction files status until graph is ready
         
@@ -4202,15 +3910,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     'Aspect Code • Up to date',
                     'KB might be stale',
                     'Up to date',
-                    // Auth statuses (must be replaceable after key entry)
-                    'Aspect Code • API key required',
-                    'Aspect Code • API key invalid',
-                    'Aspect Code • API key revoked',
-                    'Aspect Code • Checking API key…',
-                    'API key required',
-                    'API key invalid',
-                    'API key revoked',
-                    'Checking API key…'
                 ]);
                 // Allow updating our own status line (prevents getting stuck).
                 if (existing.length > 0 && isVisible && !(ownedStatuses.has(existing) || existing.startsWith('Aspect Code •'))) return;
@@ -4220,18 +3919,11 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     return;
                 }
 
-                // Only show API key message when action is blocked.
-                const authStatus = currentState?.apiKeyAuthStatus;
-                const hasApiKey = currentState?.hasApiKey;
-
                 if (currentState && currentState.extensionEnabled === false) {
                     setLoadingText('Aspect Code • Disabled');
                     setSimpleOpenKbVisible(false);
                     return;
                 }
-                // Note: We don't show special status for missing/invalid/revoked API key.
-                // The UI should look the same regardless - KB and graph work offline.
-
                 // Check if KB exists (pendingInstructionFilesStatus is false when no KB)
                 const kbExists = pendingInstructionFilesStatus !== false;
                 
@@ -4258,11 +3950,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 const graphSpinnerActive = !!(validationSpinner && validationSpinner.classList && validationSpinner.classList.contains('active'));
                 const simpleSpinnerActive = !!(simpleSpinner && simpleSpinner.classList && simpleSpinner.classList.contains('active'));
                 const isBusy = !!(currentState && currentState.busy) || graphSpinnerActive || simpleSpinnerActive;
-
-                // Note: We no longer disable buttons based on API key status.
-                // All KB/graph features work offline. Server-only commands will show
-                // an error message when triggered without an API key.
-                const apiBlocked = false; // Disabled - buttons work without API key
 
                 const extensionDisabled = !!(currentState && currentState.extensionEnabled === false);
 
@@ -4365,68 +4052,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     }
                 }
 
-                // Disable key-dependent controls when API key is not valid.
-                // Avoid fighting other code: only re-enable buttons we disabled.
-                const authIds = [
-                    'simple-generate-btn',
-                    'generate-instructions-btn',
-                    'regenerate-assistant-files',
-                    'simple-auto-regen-kb-btn',
-                    'complex-auto-regen-kb-btn',
-                    'btn-regenerate-kb',
-                    'simple-edit-instructions',
-                    'instructions-mode-safe',
-                    'instructions-mode-permissive',
-                    'instructions-mode-custom',
-                    'instructions-mode-off',
-                    'instructions-regenerate',
-                    'simple-reindex-btn',
-                    'complex-reindex-btn',
-                ];
-
-                for (const id of authIds) {
-                    const el = document.getElementById(id);
-                    if (!el) continue;
-                    if (!('disabled' in el)) continue;
-
-                    const hadAuthFlag = !!(el.dataset && el.dataset.disabledByAuth === '1');
-
-                    if (apiBlocked) {
-                        // @ts-ignore - webview DOM typing
-                        if (!el.disabled) {
-                            // @ts-ignore - webview DOM typing
-                            el.disabled = true;
-                            if (el.dataset) el.dataset.disabledByAuth = '1';
-                        }
-                    } else {
-                        if (hadAuthFlag) {
-                            const disabledByBusy = !!(el.dataset && el.dataset.disabledByBusy === '1');
-                            if (!disabledByBusy) {
-                                // @ts-ignore - webview DOM typing
-                                el.disabled = false;
-                            }
-                            if (el.dataset) delete el.dataset.disabledByAuth;
-                        }
-                    }
-                }
-
-                // Special case: prompt-action-slot is a div, not a button - use CSS opacity/pointer-events.
-                const promptSlot = document.getElementById('prompt-action-slot');
-                if (promptSlot) {
-                    const hadAuthFlag = !!(promptSlot.dataset && promptSlot.dataset.disabledByAuth === '1');
-                    if (apiBlocked) {
-                        promptSlot.style.opacity = '0.5';
-                        promptSlot.style.pointerEvents = 'none';
-                        if (promptSlot.dataset) promptSlot.dataset.disabledByAuth = '1';
-                    } else {
-                        if (hadAuthFlag) {
-                            promptSlot.style.opacity = '';
-                            promptSlot.style.pointerEvents = '';
-                            if (promptSlot.dataset) delete promptSlot.dataset.disabledByAuth;
-                        }
-                    }
-                }
-
                 updateEnableToggleUi();
             } catch (e) {
                 console.error('[Panel] syncBusyUi failed:', e);
@@ -4510,37 +4135,10 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             const statusBarEl = document.getElementById('panel-status-bar');
             const leftEl = statusBarEl ? statusBarEl.querySelector('.panel-status-left') : null;
             const rightEl = statusBarEl ? statusBarEl.querySelector('.panel-status-right') : null;
-            const apiKeyMissingEl = document.getElementById('panel-status-api-key-missing');
             const filesEl = document.getElementById('panel-status-files');
             const depsEl = document.getElementById('panel-status-deps');
             const cyclesEl = document.getElementById('panel-status-cycles');
             const kbWarnEl = document.getElementById('panel-status-kb-warning');
-
-            // Note: We no longer show a banner for missing API key - the UI looks the same.
-            // Only show banner for invalid/revoked key when user actually HAS a key configured.
-            // If hasApiKey is false, don't show the banner even if authStatus is 'invalid'
-            // (that just means they never had a key, not that their key was rejected).
-            const authStatus = currentState?.apiKeyAuthStatus;
-            const hasApiKey = currentState?.hasApiKey;
-            const showInvalid = hasApiKey && (authStatus === 'invalid' || authStatus === 'revoked');
-
-            if (showInvalid) {
-                if (leftEl) leftEl.style.display = 'none';
-                if (rightEl) rightEl.style.display = 'none';
-                if (apiKeyMissingEl) {
-                    const message = authStatus === 'revoked'
-                        ? '⚠ API key revoked • Click to re-enter'
-                        : '⚠ API key invalid • Click to re-enter';
-                    apiKeyMissingEl.textContent = message;
-                    apiKeyMissingEl.title = 'Your API key was rejected by the server. Click to re-enter your API key.';
-                    apiKeyMissingEl.style.display = 'flex';
-                }
-                return;
-            } else {
-                if (leftEl) leftEl.style.display = '';
-                if (rightEl) rightEl.style.display = '';
-                if (apiKeyMissingEl) apiKeyMissingEl.style.display = 'none';
-            }
 
             const graph = latestGraphForStatus;
 
@@ -4590,23 +4188,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 }
             }
         }
-
-        function handleEnterApiKey() {
-            try {
-                vscode.postMessage({ type: 'COMMAND', command: 'aspectcode.enterApiKey' });
-            } catch (e) {
-                console.error('[Panel] Failed to trigger enterApiKey:', e);
-            }
-        }
-        document.getElementById('panel-status-api-key-missing')?.addEventListener('click', handleEnterApiKey);
-        document.getElementById('panel-status-api-key-missing')?.addEventListener('keydown', (e) => {
-            if (!e) return;
-            const key = e.key;
-            if (key === 'Enter' || key === ' ') {
-                e.preventDefault();
-                handleEnterApiKey();
-            }
-        });
 
         function handleCycleAutoRegenKb() {
             vscode.postMessage({ type: 'CYCLE_AUTO_REGENERATE_KB' });
@@ -4683,7 +4264,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             
             if (currentView === 'graph') {
                 document.getElementById('graph-view').classList.add('active');
-                updateViewToggleButton('Show findings', currentFindings.length);
                 
                 // Settings menu is now always visible
                 // document.querySelector('.graph-settings-container').style.display = '';
@@ -4734,11 +4314,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 console.warn('SVG elements not found, retrying...');
                 setTimeout(() => renderDependencyGraph(graph), 100);
                 return;
-            }
-            
-            // Update view toggle button if we're showing graph
-            if (currentView === 'graph') {
-                updateViewToggleButton('Show findings', currentFindings.length);
             }
             
             // Clear existing content and set up structure
@@ -5419,11 +4994,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     // The spinner already indicates when validation is in progress
                     break;
                 case 'ACTIVE_FILE_CHANGED':
-                    // Update current file and re-render findings if on findings tab
+                    // Update current file for graph focus
                     currentActiveFile = msg.file;
-                    if (currentView === 'findings' && currentFindings.length > 0) {
-                        renderFindings(currentFindings, '', currentState);
-                    }
                     break;
                 case 'INSTRUCTION_FILES_STATUS':
                     // Show/hide the generate instructions button based on whether files exist
@@ -5701,22 +5273,9 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             updateStatusBar();
             updateSimpleTopStatusIfIdle();
             syncBusyUi();
-            const previousFindingsCount = currentFindings.length;
-            currentFindings = (state.findings || []).slice();
-            
-            // If findings count changed significantly, clear cached graph data
-            // But preserve user's current view unless there's a major change
-            const findingsDelta = Math.abs(currentFindings.length - previousFindingsCount);
-            const shouldClearCache = findingsDelta > 5 || (previousFindingsCount === 0 && currentFindings.length > 0);
-            
-            if (shouldClearCache) {
-                focusedGraph = { nodes: [], links: [] };
-                overviewGraph = { nodes: [], links: [] };
-            }
             
             // Clear manual processing flag when we detect processing is complete
-            // (we have findings and backend is not busy)
-            if (manualProcessingActive && !state.busy && currentFindings.length > 0) {
+            if (manualProcessingActive && !state.busy) {
                 manualProcessingActive = false;
                 // Also ensure action buttons are enabled
                 const explainBtn = document.getElementById('explain-button');
@@ -5728,18 +5287,15 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             if (manualProcessingActive) {
                 // During manual processing, keep score as dash - don't update score
                 // But do allow button state updates in case we missed the completion
-                if (!state.busy && currentFindings.length > 0) {
+                if (!state.busy) {
                     // Processing seems done, clear the flag and continue to score display
                     manualProcessingActive = false;
                 }
             }
             
-            // Render findings without any filter (since we removed the rule dropdown)
-            renderFindings(currentFindings, '', state);
-            
-            // Request graph data update when state changes with new findings
+            // Request graph data update when state changes
             // Only request if we don't already have graph data to avoid overriding user's current view
-            if (!state.busy && currentFindings.length > 0) {
+            if (!state.busy) {
                 const graphTypeSelect = document.getElementById('graph-type-select');
                 const currentGraphType = graphTypeSelect ? graphTypeSelect.value : '2d';
                 

@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { AspectCodeState } from '../state';
-import { DependencyAnalyzer, DependencyLink } from '../panel/DependencyAnalyzer';
+import { DependencyAnalyzer, DependencyLink } from '../services/DependencyAnalyzer';
 import { loadGrammarsOnce, LoadedGrammars } from '../tsParser';
 import { ensureGitignoreForTarget } from '../services/gitignoreService';
 import { GitignoreTarget } from '../services/aspectSettings';
@@ -145,26 +145,428 @@ interface KBEnrichingFinding {
 /**
  * Extract KB-enriching findings by rule type.
  * These findings provide architectural intelligence rather than issue reports.
+ * 
+ * @deprecated Use local detection functions instead (detectDataModelsLocally, etc.)
+ * This function is kept for backward compatibility but returns empty (findings removed).
  */
 function extractKBEnrichingFindings(
   state: AspectCodeState,
   ruleId: string
 ): KBEnrichingFinding[] {
+  // Findings have been removed from the extension - this function returns empty
+  // KB enrichment now happens through local detection functions instead
+  return [];
+}
+
+// ============================================================================
+// LOCAL ENRICHMENT DETECTION (OSS-accessible, replaces server-based detection)
+// ============================================================================
+
+/**
+ * Detect data models locally using file content analysis.
+ * Replaces server-based arch.data_model detection for fully local operation.
+ */
+function detectDataModelsLocally(
+  files: string[], 
+  workspaceRoot: string,
+  fileContentCache: Map<string, string>
+): KBEnrichingFinding[] {
+  const results: KBEnrichingFinding[] = [];
+  
+  for (const file of files) {
+    const ext = path.extname(file).toLowerCase();
+    const content = fileContentCache.get(file);
+    if (!content) continue;
+    
+    if (ext === '.py') {
+      // Pydantic models
+      if (content.includes('from pydantic') || content.includes('BaseModel')) {
+        const matches = content.match(/class\s+(\w+)\s*\([^)]*BaseModel[^)]*\)/g);
+        if (matches) {
+          for (const match of matches) {
+            const name = match.match(/class\s+(\w+)/)?.[1];
+            if (name) results.push({ file, message: `Pydantic: ${name}` });
+          }
+        }
+      }
+      // Dataclasses
+      if (content.includes('@dataclass')) {
+        const lines = content.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i].includes('@dataclass')) {
+            // Look for class definition on next lines
+            for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
+              const classMatch = lines[j].match(/class\s+(\w+)/);
+              if (classMatch) {
+                results.push({ file, message: `Data Class: ${classMatch[1]}` });
+                break;
+              }
+            }
+          }
+        }
+      }
+      // SQLAlchemy / SQLModel
+      if (content.includes('SQLModel') || content.includes('DeclarativeBase') || 
+          content.match(/class\s+\w+\s*\([^)]*Base[^)]*\)/)) {
+        const matches = content.match(/class\s+(\w+)\s*\([^)]*(?:SQLModel|Base)[^)]*\)/g);
+        if (matches) {
+          for (const match of matches) {
+            const name = match.match(/class\s+(\w+)/)?.[1];
+            if (name && !results.some(r => r.file === file && r.message.includes(name))) {
+              results.push({ file, message: `ORM: ${name}` });
+            }
+          }
+        }
+      }
+      // Django models
+      if (content.includes('models.Model')) {
+        const matches = content.match(/class\s+(\w+)\s*\([^)]*models\.Model[^)]*\)/g);
+        if (matches) {
+          for (const match of matches) {
+            const name = match.match(/class\s+(\w+)/)?.[1];
+            if (name) results.push({ file, message: `Django Model: ${name}` });
+          }
+        }
+      }
+    }
+    
+    if (['.ts', '.tsx'].includes(ext)) {
+      // TypeScript interfaces
+      const interfaceMatches = content.match(/(?:export\s+)?interface\s+(\w+)/g);
+      if (interfaceMatches) {
+        for (const match of interfaceMatches) {
+          const name = match.match(/interface\s+(\w+)/)?.[1];
+          if (name && !name.startsWith('_') && name.length > 1) {
+            results.push({ file, message: `Interface: ${name}` });
+          }
+        }
+      }
+      // Type aliases (but not simple unions or primitives)
+      const typeMatches = content.match(/(?:export\s+)?type\s+(\w+)\s*=\s*\{/g);
+      if (typeMatches) {
+        for (const match of typeMatches) {
+          const name = match.match(/type\s+(\w+)/)?.[1];
+          if (name && !name.startsWith('_') && name.length > 1) {
+            results.push({ file, message: `Type Alias: ${name}` });
+          }
+        }
+      }
+      // Classes with decorators (e.g., TypeORM entities)
+      if (content.includes('@Entity') || content.includes('@Table')) {
+        const entityMatches = content.match(/class\s+(\w+)/g);
+        if (entityMatches) {
+          for (const match of entityMatches) {
+            const name = match.match(/class\s+(\w+)/)?.[1];
+            if (name) results.push({ file, message: `Entity: ${name}` });
+          }
+        }
+      }
+    }
+    
+    if (ext === '.java') {
+      // Java records
+      if (content.includes('record ')) {
+        const matches = content.match(/(?:public\s+)?record\s+(\w+)/g);
+        if (matches) {
+          for (const match of matches) {
+            const name = match.match(/record\s+(\w+)/)?.[1];
+            if (name) results.push({ file, message: `Record: ${name}` });
+          }
+        }
+      }
+      // JPA Entities
+      if (content.includes('@Entity')) {
+        const lines = content.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i].includes('@Entity')) {
+            for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+              const classMatch = lines[j].match(/class\s+(\w+)/);
+              if (classMatch) {
+                results.push({ file, message: `Entity: ${classMatch[1]}` });
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    if (ext === '.cs') {
+      // C# records
+      if (content.includes('record ')) {
+        const matches = content.match(/(?:public\s+)?record\s+(\w+)/g);
+        if (matches) {
+          for (const match of matches) {
+            const name = match.match(/record\s+(\w+)/)?.[1];
+            if (name) results.push({ file, message: `Record: ${name}` });
+          }
+        }
+      }
+      // Entity Framework
+      if (content.includes('[Table(') || content.includes('DbSet<')) {
+        const lines = content.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i].includes('[Table(')) {
+            for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
+              const classMatch = lines[j].match(/class\s+(\w+)/);
+              if (classMatch) {
+                results.push({ file, message: `Entity: ${classMatch[1]}` });
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    // Prisma schema
+    if (ext === '.prisma') {
+      const modelMatches = content.match(/model\s+(\w+)\s*\{/g);
+      if (modelMatches) {
+        for (const match of modelMatches) {
+          const name = match.match(/model\s+(\w+)/)?.[1];
+          if (name) results.push({ file, message: `Prisma Model: ${name}` });
+        }
+      }
+    }
+  }
+  
+  // Deduplicate and sort
   const seen = new Set<string>();
-  return state.s.findings
-    .filter(f => f.code === ruleId)
-    .map(f => ({
-      file: f.file,
-      message: f.message,
-    }))
-    .filter(f => {
-      const key = `${f.file}|${f.message}`;
+  return results
+    .filter(r => {
+      const key = `${r.file}|${r.message}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     })
-    // Sort for deterministic order
     .sort((a, b) => a.file.localeCompare(b.file) || a.message.localeCompare(b.message));
+}
+
+/**
+ * Detect external integrations locally using file content analysis.
+ * Replaces server-based arch.external_integration detection.
+ */
+function detectExternalIntegrationsLocally(
+  files: string[], 
+  workspaceRoot: string,
+  fileContentCache: Map<string, string>
+): KBEnrichingFinding[] {
+  const results: KBEnrichingFinding[] = [];
+  
+  for (const file of files) {
+    const content = fileContentCache.get(file);
+    if (!content) continue;
+    
+    // Database connections
+    if (content.match(/createConnection|getConnection|createPool|pg\.Pool|mysql\.create|MongoClient|mongoose\.connect|prisma\.\$connect/i)) {
+      results.push({ file, message: 'Database connection' });
+    }
+    if (content.match(/SQLAlchemy|create_engine|sessionmaker|AsyncSession/)) {
+      results.push({ file, message: 'Database: SQLAlchemy' });
+    }
+    if (content.match(/psycopg2|asyncpg|aiomysql|pymongo/)) {
+      results.push({ file, message: 'Database driver' });
+    }
+    
+    // HTTP clients
+    if (content.match(/fetch\s*\(['"]/)) {
+      results.push({ file, message: 'HTTP client: fetch' });
+    }
+    if (content.match(/axios\.(get|post|put|delete|patch|request)/)) {
+      results.push({ file, message: 'HTTP client: axios' });
+    }
+    if (content.match(/httpClient|HttpClient|http\.request/i)) {
+      results.push({ file, message: 'HTTP client' });
+    }
+    if (content.match(/requests\.(get|post|put|delete|patch)/)) {
+      results.push({ file, message: 'HTTP client: requests' });
+    }
+    if (content.match(/aiohttp\.ClientSession|httpx\./)) {
+      results.push({ file, message: 'HTTP client: async' });
+    }
+    
+    // Message queues
+    if (content.match(/amqplib|amqp\.|RabbitMQ/i)) {
+      results.push({ file, message: 'Message queue: RabbitMQ' });
+    }
+    if (content.match(/kafkajs|kafka\.|KafkaConsumer|KafkaProducer/i)) {
+      results.push({ file, message: 'Message queue: Kafka' });
+    }
+    if (content.match(/redis\.(publish|subscribe|createClient)|ioredis/i)) {
+      results.push({ file, message: 'Redis pub/sub' });
+    }
+    if (content.match(/bullmq|bull\.|Queue\(/i)) {
+      results.push({ file, message: 'Job queue: Bull' });
+    }
+    if (content.match(/celery|Celery/)) {
+      results.push({ file, message: 'Task queue: Celery' });
+    }
+    
+    // Cloud SDKs
+    if (content.match(/boto3|@aws-sdk/i)) {
+      results.push({ file, message: 'Cloud SDK: AWS' });
+    }
+    if (content.match(/firebase|@firebase/i)) {
+      results.push({ file, message: 'Cloud SDK: Firebase' });
+    }
+    if (content.match(/google\.cloud|@google-cloud/i)) {
+      results.push({ file, message: 'Cloud SDK: GCP' });
+    }
+    if (content.match(/@azure\//i)) {
+      results.push({ file, message: 'Cloud SDK: Azure' });
+    }
+    
+    // WebSocket
+    if (content.match(/new\s+WebSocket\s*\(/)) {
+      results.push({ file, message: 'WebSocket client' });
+    }
+    if (content.match(/socket\.io|io\s*\(/i)) {
+      results.push({ file, message: 'WebSocket: Socket.IO' });
+    }
+    
+    // GraphQL
+    if (content.match(/ApolloClient|gql`|graphql\(/i)) {
+      results.push({ file, message: 'GraphQL client' });
+    }
+    
+    // gRPC
+    if (content.match(/grpc\.|@grpc\/|grpcio/)) {
+      results.push({ file, message: 'gRPC' });
+    }
+  }
+  
+  // Deduplicate and sort
+  const seen = new Set<string>();
+  return results
+    .filter(r => {
+      const key = `${r.file}|${r.message}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => a.file.localeCompare(b.file) || a.message.localeCompare(b.message));
+}
+
+/**
+ * Detect global state usage locally using file content analysis.
+ * Replaces server-based arch.global_state_usage detection.
+ */
+function detectGlobalStateLocally(
+  files: string[], 
+  workspaceRoot: string,
+  fileContentCache: Map<string, string>
+): KBEnrichingFinding[] {
+  const results: KBEnrichingFinding[] = [];
+  
+  for (const file of files) {
+    const ext = path.extname(file).toLowerCase();
+    const content = fileContentCache.get(file);
+    if (!content) continue;
+    
+    // Singleton patterns
+    if (content.match(/getInstance\s*\(\s*\)/)) {
+      results.push({ file, message: 'Singleton pattern' });
+    }
+    if (content.match(/@singleton|@Singleton/)) {
+      results.push({ file, message: 'Singleton decorator' });
+    }
+    
+    // Global mutable state (module-level let/var with complex types)
+    if (['.ts', '.tsx', '.js', '.jsx'].includes(ext)) {
+      // Look for module-level mutable state
+      const lines = content.split('\n');
+      for (const line of lines) {
+        // Skip if inside a function/class (simple heuristic: no leading whitespace)
+        if (line.match(/^(let|var)\s+\w+\s*[=:]\s*(new\s+(Map|Set|Array)|{|\[)/)) {
+          results.push({ file, message: 'Global mutable state' });
+          break; // One per file is enough
+        }
+      }
+    }
+    
+    if (ext === '.py') {
+      // Python module-level mutable state
+      const lines = content.split('\n');
+      for (const line of lines) {
+        // Module-level dict/list/set initialization (not in function/class)
+        if (line.match(/^[A-Z_][A-Z0-9_]*\s*[=:]\s*(\{|\[|set\(|dict\()/)) {
+          results.push({ file, message: 'Module-level mutable state' });
+          break;
+        }
+      }
+    }
+    
+    // Service locators / DI containers
+    if (content.match(/ServiceLocator|container\.resolve|injector\.get|Container\.get/i)) {
+      results.push({ file, message: 'Service locator pattern' });
+    }
+    
+    // React Context (global state in React apps)
+    if (content.match(/createContext\s*\(/)) {
+      results.push({ file, message: 'React Context (shared state)' });
+    }
+    
+    // Redux/Zustand/other state managers
+    if (content.match(/createStore|configureStore|createSlice/)) {
+      results.push({ file, message: 'Redux store' });
+    }
+    if (content.match(/zustand|create\s*\(\s*\(set\)/)) {
+      results.push({ file, message: 'Zustand store' });
+    }
+  }
+  
+  // Deduplicate and sort
+  const seen = new Set<string>();
+  return results
+    .filter(r => {
+      const key = `${r.file}|${r.message}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => a.file.localeCompare(b.file) || a.message.localeCompare(b.message));
+}
+
+/**
+ * Get KB enrichments using local detection with fallback to server findings.
+ * This is the preferred way to get enrichments - it tries local detection first,
+ * then falls back to server-provided findings if available.
+ */
+function getKBEnrichments(
+  ruleType: 'DATA_MODEL' | 'EXTERNAL_INTEGRATION' | 'GLOBAL_STATE' | 'ENTRY_POINT',
+  state: AspectCodeState,
+  files: string[],
+  workspaceRoot: string,
+  fileContentCache: Map<string, string>
+): KBEnrichingFinding[] {
+  // Try local detection first (always works, no server needed)
+  let localResults: KBEnrichingFinding[] = [];
+  
+  switch (ruleType) {
+    case 'DATA_MODEL':
+      localResults = detectDataModelsLocally(files, workspaceRoot, fileContentCache);
+      break;
+    case 'EXTERNAL_INTEGRATION':
+      localResults = detectExternalIntegrationsLocally(files, workspaceRoot, fileContentCache);
+      break;
+    case 'GLOBAL_STATE':
+      localResults = detectGlobalStateLocally(files, workspaceRoot, fileContentCache);
+      break;
+    case 'ENTRY_POINT':
+      // Entry points already have local detection via detectEntryPointsWithContent
+      // Just return empty and let the caller use that function
+      return [];
+  }
+  
+  // If we got local results, use them
+  if (localResults.length > 0) {
+    return localResults;
+  }
+  
+  // Fallback to server findings if available (backward compatibility)
+  const ruleId = KB_ENRICHING_RULES[ruleType];
+  return extractKBEnrichingFindings(state, ruleId);
 }
 
 /**
@@ -428,20 +830,14 @@ async function generateArchitectureFile(
     // Filter to app files for architectural views
     const appFiles = files.filter(f => classifyFile(f, workspaceRoot.fsPath) === 'app');
     const testFiles = files.filter(f => classifyFile(f, workspaceRoot.fsPath) === 'test');
-    const findings = state.s.findings;
 
-    // Build finding counts per file for hotspot ranking
-    // Note: findings are used as a lightweight "friction" signal; severity is not used.
+    // Finding counts removed - hotspot ranking now based solely on dependency degree
     const findingCounts = new Map<string, number>();
-    for (const finding of findings) {
-      if (classifyFile(finding.file, workspaceRoot.fsPath) !== 'app') continue;
-      findingCounts.set(finding.file, (findingCounts.get(finding.file) || 0) + 1);
-    }
 
     // ============================================================
     // HIGH-RISK ARCHITECTURAL HUBS
     // ============================================================
-    // Ranking: (inDegree + outDegree) * 2 + findingCount
+    // Ranking: (inDegree + outDegree) * 2
     const hubs = Array.from(depData.entries())
       .filter(([file]) => isStructuralAppFile(file, workspaceRoot.fsPath))
       .map(([file, info]) => {
@@ -539,15 +935,12 @@ async function generateArchitectureFile(
     }
 
     // ============================================================
-    // ENTRY POINTS (Language-aware content analysis)
+    // ENTRY POINTS (Local content-based analysis)
     // ============================================================
-    const ruleEntryPoints = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.ENTRY_POINT)
-      .filter(f => classifyFile(f.file, workspaceRoot.fsPath) === 'app');
-    
-    // Use content-based detection for accurate categorization
+    // Use local content-based detection for accurate categorization (no server needed)
     const contentBasedEntryPoints = detectEntryPointsWithContent(appFiles, workspaceRoot.fsPath, fileContentCache);
     
-    if (ruleEntryPoints.length > 0 || contentBasedEntryPoints.length > 0) {
+    if (contentBasedEntryPoints.length > 0) {
       content += '## Entry Points\n\n';
       content += '_Where code execution begins. Categorized by type with detection confidence._\n\n';
       
@@ -555,27 +948,6 @@ async function generateArchitectureFile(
       const runtimeEntries = contentBasedEntryPoints.filter(e => e.category === 'runtime');
       const toolingEntries = contentBasedEntryPoints.filter(e => e.category === 'tooling');
       const barrelEntries = contentBasedEntryPoints.filter(e => e.category === 'barrel');
-      
-      // Also add rule-based HTTP handlers if not already covered
-      const httpHandlers = dedupe(
-        ruleEntryPoints.filter(f => f.message.includes('HTTP')),
-        f => f.file
-      ).sort((a, b) => a.file.localeCompare(b.file));
-      
-      // Merge rule-based HTTP handlers into runtime (deduped)
-      const runtimePaths = new Set(runtimeEntries.map(e => e.path));
-      for (const handler of httpHandlers) {
-        const relPath = makeRelativePath(handler.file, workspaceRoot.fsPath);
-        if (!runtimePaths.has(relPath)) {
-          runtimeEntries.push({
-            path: relPath,
-            reason: handler.message.replace('HTTP entry point: ', ''),
-            confidence: 'high',
-            category: 'runtime',
-            routeCount: 1
-          });
-        }
-      }
       
       // ---- RUNTIME ENTRY POINTS ----
       if (runtimeEntries.length > 0) {
@@ -689,9 +1061,9 @@ async function generateArchitectureFile(
     }
 
     // ============================================================
-    // GLOBAL STATE (from arch.global_state_usage rule)
+    // GLOBAL STATE - Local detection
     // ============================================================
-    const globalStateFindings = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.GLOBAL_STATE)
+    const globalStateFindings = getKBEnrichments('GLOBAL_STATE', state, appFiles, workspaceRoot.fsPath, fileContentCache)
       .filter(f => classifyFile(f.file, workspaceRoot.fsPath) === 'app');
     
     if (globalStateFindings.length > 0) {
@@ -801,13 +1173,12 @@ async function generateMapFile(
   let content = '# Map\n\n';
   content += '_Symbol index with signatures and conventions. Use to find types, functions, and coding patterns._\n\n';
 
-  const findings = state.s.findings;
   const appFiles = files.filter(f => classifyFile(f, workspaceRoot.fsPath) === 'app');
   
   // ============================================================
-  // DATA MODELS (with signatures/fields)
+  // DATA MODELS (with signatures/fields) - Local detection
   // ============================================================
-  const dataModels = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.DATA_MODEL);
+  const dataModels = getKBEnrichments('DATA_MODEL', state, appFiles, workspaceRoot.fsPath, fileContentCache);
   
   if (dataModels.length > 0) {
     content += '## Data Models\n\n';
@@ -902,10 +1273,8 @@ async function generateMapFile(
   // ============================================================
   // SYMBOL INDEX (with enhanced signatures)
   // ============================================================
+  // Build relevant files from dependency links
   const relevantFiles = new Set<string>();
-  for (const finding of findings) {
-    relevantFiles.add(finding.file);
-  }
   for (const link of allLinks) {
     relevantFiles.add(link.source);
     relevantFiles.add(link.target);
@@ -922,8 +1291,10 @@ async function generateMapFile(
         archFiles.add(model.file);
       }
     }
-    const entryPointFindings = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.ENTRY_POINT);
-    const integrationFindings = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.EXTERNAL_INTEGRATION);
+    // Use local detection for file importance scoring
+    const entryPointFindings = detectEntryPointsWithContent(appFiles, workspaceRoot.fsPath, fileContentCache)
+      .map(e => ({ file: path.join(workspaceRoot.fsPath, e.path), message: e.reason }));
+    const integrationFindings = getKBEnrichments('EXTERNAL_INTEGRATION', state, appFiles, workspaceRoot.fsPath, fileContentCache);
     for (const f of entryPointFindings) {
       if (classifyFile(f.file, workspaceRoot.fsPath) === 'app') archFiles.add(f.file);
     }
@@ -931,7 +1302,7 @@ async function generateMapFile(
       if (classifyFile(f.file, workspaceRoot.fsPath) === 'app') archFiles.add(f.file);
     }
 
-    // Score files by importance
+    // Score files by importance (now based on dependencies only, not findings)
     const fileScores = new Map<string, number>();
     for (const file of relevantFiles) {
       const kind = classifyFile(file, workspaceRoot.fsPath);
@@ -939,12 +1310,10 @@ async function generateMapFile(
 
       const base = kind === 'test' ? -10 : 0;
       const archBoost = archFiles.has(file) ? 25 : 0;
-      const kbEnrichingRuleIds = new Set(Object.values(KB_ENRICHING_RULES));
-      const findingCount = findings.filter(f => f.file === file && !kbEnrichingRuleIds.has(f.code)).length;
       const outLinks = allLinks.filter(l => l.source === file).length;
       const inLinks = allLinks.filter(l => l.target === file).length;
 
-      const score = base + archBoost + (findingCount * 2) + (inLinks * 2) + outLinks;
+      const score = base + archBoost + (inLinks * 2) + outLinks;
       fileScores.set(file, score);
     }
 
@@ -1609,9 +1978,9 @@ async function generateContextFile(
     }
 
     // ============================================================
-    // EXTERNAL INTEGRATIONS
+    // EXTERNAL INTEGRATIONS - Local detection
     // ============================================================
-    const externalIntegrations = extractKBEnrichingFindings(state, KB_ENRICHING_RULES.EXTERNAL_INTEGRATION)
+    const externalIntegrations = getKBEnrichments('EXTERNAL_INTEGRATION', state, appFiles, workspaceRoot.fsPath, fileContentCache)
       .filter(f => classifyFile(f.file, workspaceRoot.fsPath) === 'app');
     
     if (externalIntegrations.length > 0) {

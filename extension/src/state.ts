@@ -3,32 +3,10 @@ import * as vscode from "vscode";
 // --- INFERRED TYPES ---
 // (Based on your extension.ts file)
 
-type Finding = {
-  id: string;
-  code: string;
-  severity: "info" | "warn" | "error";
-  file: string;
-  message: string;
-  fixable: boolean;
-  selected: boolean;
-  span?: {
-    start: { line: number; column: number };
-    end: { line: number; column: number };
-  };
-  _raw: any;
-};
-
 type SnapshotStats = {
   snapshotId: string;
   fileCount: number;
   bytes: number;
-  tookMs: number;
-};
-
-type ValidateStats = {
-  total: number;
-  fixable: number;
-  byCode: Record<string, number>;
   tookMs: number;
 };
 
@@ -44,16 +22,6 @@ type PanelUIState = {
   autoValidationEnabled?: boolean; // Track if auto-validation is enabled
 };
 
-type FixCapability = { 
-  rule: string; 
-  patchlet: string; 
-};
-
-type Capabilities = { 
-  language: 'python'; 
-  fixable_rules: FixCapability[]; 
-};
-
 // --- PANEL STATE DEFINITION ---
 
 /**
@@ -64,8 +32,6 @@ export type PanelState = {
   // (Reset on every load)
   busy: boolean;
   error?: string;
-  findings: Finding[];
-  lastValidate?: ValidateStats;
   dependencyGraphCache?: Map<string, any>; // Cache for dependency graph data
 
   // --- Persistent State ---
@@ -73,7 +39,6 @@ export type PanelState = {
   snapshot?: SnapshotStats;
   history: HistoryItem[];
   ui: PanelUIState;
-  capabilities?: Capabilities;
 };
 
 /**
@@ -83,8 +48,6 @@ const DEFAULT_STATE: PanelState = {
   // Ephemeral fields are reset
   busy: false,
   error: undefined,
-  findings: [],
-  lastValidate: undefined,
   dependencyGraphCache: new Map<string, any>(),
 
   // Persistent fields have defaults
@@ -95,18 +58,15 @@ const DEFAULT_STATE: PanelState = {
     lastValidationFiles: [],
     autoValidationEnabled: true
   },
-  capabilities: undefined,
 };
 
 /**
  * Keys from PanelState that we want to save to globalState.
  * EVERYTHING ELSE will be reset on load.
  */
-const PERSISTENT_KEYS: (keyof PanelState)[] = ["snapshot", "history", "ui", "capabilities"];
+const PERSISTENT_KEYS: (keyof PanelState)[] = ["snapshot", "history", "ui"];
 
 // --- STATE MANAGER CLASS ---
-
-export { FixCapability, Capabilities };
 
 export class AspectCodeState {
   private _state: PanelState;
@@ -147,8 +107,6 @@ export class AspectCodeState {
     // 3. (Optional) Force-clear ephemeral fields just in case
     this._state.busy = false;
     this._state.error = undefined;
-    this._state.findings = [];
-    this._state.lastValidate = undefined;
 
 
     // 4. Notify listeners of the clean state
@@ -171,30 +129,6 @@ export class AspectCodeState {
   }
 
   /**
-   * Returns the capabilities data if available.
-   */
-  getCapabilities(): Capabilities | undefined {
-    return this._state.capabilities;
-  }
-
-  /**
-   * Returns a set of rule codes that have fix capabilities.
-   */
-  getSafeRuleSet(): Set<string> {
-    const capabilities = this._state.capabilities;
-    if (!capabilities) return new Set();
-    
-    return new Set(capabilities.fixable_rules.map(r => r.rule));
-  }
-
-  /**
-   * Updates capabilities and saves to persistent state.
-   */
-  setCapabilities(capabilities: Capabilities) {
-    this.update({ capabilities });
-  }
-
-  /**
    * (Internal) Creates an object with *only* the persistent keys
    * and saves it to globalState.
    */
@@ -207,7 +141,7 @@ export class AspectCodeState {
       }
     }
 
-    // This now only saves { snapshot, history, ui, capabilities }
+    // This now only saves { snapshot, history, ui }
     this.ctx.globalState.update(this.storageKey, stateToPersist);
   }
 }

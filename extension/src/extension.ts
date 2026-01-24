@@ -1,40 +1,24 @@
 import * as vscode from 'vscode';
 import { exec } from 'child_process';
-import fetch from 'node-fetch';
 import { parsePatch, applyPatch } from 'diff';
 import * as path from 'path';
 import { loadGrammarsOnce, getLoadedGrammarsSummary } from './tsParser';
 import { extractPythonImports, extractTSJSImports } from './importExtractors';
-import { AspectCodePanelProvider } from './panel/PanelProvider';
 import { AspectCodeState } from './state';
-import { post, fetchCapabilities, handleHttpError, hasApiKeyConfigured, isApiKeyBlocked, initHttp, getHeaders, getBaseUrl, resetApiKeyAuthStatus } from './http';
 import Parser from 'web-tree-sitter';
 import { activateNewCommands } from './newCommandsIntegration';
 import { WorkspaceFingerprint } from './services/WorkspaceFingerprint';
 import { computeImpactSummaryForFile } from './assistants/kb';
+import { AspectCodePanelProvider } from './panel/PanelProvider';
 import { getAssistantsSettings, getAutoRegenerateKbSetting, migrateAspectSettingsFromVSCode, readAspectSettings, setAutoRegenerateKbSetting, getExtensionEnabledSetting, aspectDirExists } from './services/aspectSettings';
 import { getEnablementCancellationToken } from './services/enablementCancellation';
 import { initFileDiscoveryService, disposeFileDiscoveryService, type FileDiscoveryService } from './services/FileDiscoveryService';
 
-// --- Type Definitions for API Responses ---
+// --- Type Definitions ---
 
 /** Extended vscode.Diagnostic with violation tracking */
 interface AspectCodeDiagnostic extends vscode.Diagnostic {
   violationId?: string;
-}
-
-/** Snapshot info from the server */
-interface SnapshotInfo {
-  snapshot_id: string;
-  repo_root: string;
-  created_at: string;
-  file_count: number;
-}
-
-/** Storage stats from the server */
-interface StorageStats {
-  total_bytes?: number;
-  snapshot_count?: number;
 }
 
 let examineOnSave = false;
@@ -453,153 +437,7 @@ async function computeTouchedFilesFromGit(cwd: string): Promise<vscode.Uri[]> {
   });
 }
 
-async function examineWorkspaceDiff(context?: vscode.ExtensionContext) {
-  outputChannel?.appendLine('=== examineWorkspaceDiff called ===');
-
-  const root = await getWorkspaceRoot();
-  if (!root) {
-    outputChannel?.appendLine('ERROR: No workspace root found');
-    return;
-  }
-  outputChannel?.appendLine(`Workspace root: ${root}`);
-
-  const apiUrl = getBaseUrl();
-  outputChannel?.appendLine(`API URL: ${apiUrl}`);
-
-  const diff = await runGitDiff(root);
-  outputChannel?.appendLine(`Git diff length: ${diff.length} chars`);
-
-  const files = await computeTouchedFilesFromGit(root);
-  outputChannel?.appendLine(`Touched files: ${files.length} found - ${files.map(f => f.fsPath).join(', ')}`);
-  lastTouchedFiles = files.map(u => u.fsPath);  // keep for fallback
-
-  const ir = await buildIRForFiles(files, root, context);
-  outputChannel?.appendLine(`IR built: ${ir.symbols.length} symbols, ${ir.edges.length} edges`);
-  ir.lang = "python";
-
-  // Run Pyright on touched files
-  const pyrightData = await runPyright(root, files);
-  const type_facts = pyrightData ? {
-    lang: "python",
-    checker: "pyright",
-    data: pyrightData
-  } : { data: {} };
-
-  const payload = {
-    repo_root: root,
-    diff,
-    ir,
-    type_facts,
-    modes: ['structure', 'types'],
-    assumptions: {
-      pythonpath: [root] // simple hint; extend later if you want
-    }
-  };
-
-  // Debug log for detector configuration if enabled in workspace
-  try {
-    const workspaceConfig = vscode.workspace.getConfiguration();
-    const detectorEnabled = workspaceConfig.get('aspectcode.detectors.enabled');
-    if (detectorEnabled && Array.isArray(detectorEnabled) && detectorEnabled.length > 0) {
-      outputChannel?.appendLine(`Detectors configuration detected: enabled=${JSON.stringify(detectorEnabled)}`);
-    }
-  } catch (e) {
-    // Ignore config errors
-  }
-
-  try {
-    outputChannel?.appendLine(`Making request to: ${apiUrl}/validate`);
-    const headers = await getHeaders();
-    const res = await fetch(apiUrl + '/validate', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload)
-    });
-
-    outputChannel?.appendLine(`Response status: ${res.status}`);
-
-    if (!res.ok) {
-      handleHttpError(res.status, res.statusText);
-    }
-
-    const json: any = await res.json();
-    outputChannel?.appendLine(`Examination result: ${json.verdict} with ${(json.violations || []).length} violations`);
-    renderDiagnostics(json);
-
-    // Show status with parse stats
-    const { treeSitterFiles, skippedFiles, totalTime } = lastParseStats;
-    const statusParts = [];
-    if (treeSitterFiles > 0) statusParts.push(`parsed ${treeSitterFiles} TS`);
-    if (skippedFiles > 0) statusParts.push(`skipped ${skippedFiles}`);
-    const parseInfo = statusParts.length > 0 ? ` (${statusParts.join(' / ')})` : '';
-
-    if (json.verdict === 'risky') {
-      vscode.window.setStatusBarMessage(`Aspect Code: risky diff${parseInfo} (see Problems)`, 3000);
-    } else {
-      vscode.window.setStatusBarMessage(`Aspect Code: safe ✓${parseInfo}`, 3000);
-    }
-  } catch (e) {
-    outputChannel?.appendLine(`EXCEPTION in examineWorkspaceDiff: ${e}`);
-    vscode.window.showErrorMessage('Aspect Code examination failed: ' + (e as Error).message);
-  }
-}
-
-function renderDiagnostics(resp: any) {
-  outputChannel?.appendLine(`=== renderDiagnostics called ===`);
-
-  diag.clear();
-  const map = new Map<string, vscode.Diagnostic[]>();
-
-  for (const v of resp.violations || []) {
-    // Skip violations that have already been applied (idempotent diagnostics)
-    if (v.id && appliedViolationIds.has(v.id)) {
-      outputChannel?.appendLine(`Skipping already applied finding: ${v.id}`);
-      continue;
-    }
-
-    outputChannel?.appendLine(`Processing finding: ${v.rule} - ${v.explain}`);
-    const loc = (v.locations && v.locations[0]) || "";
-    outputChannel?.appendLine(`Finding location: ${loc}`);
-
-    // Try to parse "<path>:l1:c1-l2:c2" safely on Windows
-    let file = "";
-    let range = new vscode.Range(new vscode.Position(0, 0), new vscode.Position(0, 0));
-
-    if (loc) {
-      const m = loc.match(/^(.*):(\d+):(\d+)-(\d+):(\d+)$/);
-      if (m) {
-        file = m[1];
-        const l1 = Math.max(0, parseInt(m[2], 10) - 1);
-        const c1 = Math.max(0, parseInt(m[3], 10) - 1);
-        const l2 = Math.max(0, parseInt(m[4], 10) - 1);
-        const c2 = Math.max(0, parseInt(m[5], 10) - 1);
-        range = new vscode.Range(new vscode.Position(l1, c1), new vscode.Position(l2, c2));
-        outputChannel?.appendLine(`Parsed location: file=${file}, range=${l1}:${c1}-${l2}:${c2}`);
-      } else {
-        outputChannel?.appendLine(`Failed to parse location: ${loc}`);
-      }
-    }
-
-    // Fallback: pin to first touched file if server gave no location
-    if (!file) {
-      file = lastTouchedFiles[0] || vscode.window.activeTextEditor?.document.uri.fsPath || "";
-    }
-    if (!file) continue;
-
-    const d: AspectCodeDiagnostic = new vscode.Diagnostic(range, v.explain || 'Aspect Code issue', vscode.DiagnosticSeverity.Warning);
-    d.source = 'Aspect Code';
-    d.code = v.rule || 'ASPECT_CODE_RULE';
-
-    // Store violation ID in diagnostic for later tracking
-    if (v.id) {
-      d.violationId = v.id;
-    }
-
-    const arr = map.get(file) || [];
-    arr.push(d);
-    map.set(file, arr);
-  }
-}
+// Server-dependent functions (examineWorkspaceDiff, renderDiagnostics) removed.
 
 async function detectEOL(filePath: string): Promise<string> {
   try {
@@ -713,485 +551,10 @@ async function applyUnifiedDiffToWorkspace(repoRoot: string, patchedDiff: string
   }
 }
 
-// Helper function to send progress updates to the panel
-function sendProgressToPanel(state: AspectCodeState | undefined, phase: string, percentage: number, message: string) {
-  const panelProvider = (state as AspectCodeState & { _panelProvider?: AspectCodePanelProvider })?._panelProvider;
-  if (panelProvider) {
-    try {
-      panelProvider.post({ 
-        type: 'PROGRESS_UPDATE', 
-        phase, 
-        percentage, 
-        message 
-      });
-    } catch (error) {
-      // Ignore errors if panel is not available
-      console.warn('Failed to send progress to panel:', error);
-    }
-  }
-}
-
-async function examineFullRepository(
-  state?: AspectCodeState,
-  context?: vscode.ExtensionContext,
-  modesOverride?: string[]
-) {
-  outputChannel?.appendLine(`[examineFullRepository] Called with state: ${state ? 'YES' : 'NO'}`);
-  
-  // Check if API key is available - if not, skip server validation but still regenerate KB
-  const hasKey = await hasApiKeyConfigured();
-  if (!hasKey || isApiKeyBlocked()) {
-    outputChannel?.appendLine('[examineFullRepository] No API key configured - skipping server validation, regenerating KB only');
-    
-    // Still regenerate KB (works offline)
-    if (state) {
-      try {
-        const { regenerateEverything } = await import('./assistants/kb');
-        const result = await regenerateEverything(state, outputChannel!, context);
-        if (workspaceFingerprint && result.regenerated) {
-          // Pass discovered files to avoid rediscovery
-          await workspaceFingerprint.markKbFresh(result.files);
-        }
-      } catch (kbError) {
-        outputChannel?.appendLine(`[KB] Regeneration failed: ${kbError}`);
-      }
-      state.update({ busy: false });
-    }
-    return;
-  }
-  
-  const perfEnabled = vscode.workspace.getConfiguration().get<boolean>('aspectcode.devLogs', true);
-  const root = await getWorkspaceRoot();
-  if (!root) {
-    vscode.window.showErrorMessage('No workspace root found');
-    return;
-  }
-
-  // Respect the project-local enable/disable switch.
-  try {
-    const enabled = await getExtensionEnabledSetting(vscode.Uri.file(root));
-    if (!enabled) {
-      if (state) state.update({ busy: false });
-      return;
-    }
-  } catch {
-    // If settings read fails, default to enabled.
-  }
-
-  const enablementToken = getEnablementCancellationToken();
-
-  const apiUrl = getBaseUrl();
-
-  try {
-    outputChannel?.appendLine(`=== Full repository examination: ${root} ===`);
-
-    // Update panel state - start validation
-    if (state) {
-      state.update({ busy: true, error: undefined });
-    }
-
-    // Enhanced progress tracking with multiple phases
-    // NOTE: Using SourceControl location to hide the notification popup
-    const progressOptions = {
-      location: vscode.ProgressLocation.SourceControl, // Changed from Notification to hide popup
-      title: 'Validating entire repository...',
-      cancellable: false
-    };
-
-    await vscode.window.withProgress(progressOptions, async (progress) => {
-      if (enablementToken.isCancellationRequested) {
-        throw new Error('Aspect Code disabled');
-      }
-      // Phase 1: Preparing validation (10%)
-      progress.report({ increment: 0, message: 'Preparing examination...' });
-      sendProgressToPanel(state, 'examination', 10, 'Preparing examination...');
-      
-      await new Promise(resolve => setTimeout(resolve, 200));
-      
-      // Phase 2: Collecting files (20%)
-      progress.report({ increment: 10, message: 'Collecting source files...' });
-      sendProgressToPanel(state, 'examination', 20, 'Collecting source files...');
-
-      // Collect all source files and read their contents for remote validation
-      const tDiscover = Date.now();
-      const sourceFiles = await discoverWorkspaceSourceFiles();
-      outputChannel?.appendLine(`[examineFullRepository] Discovered ${sourceFiles.length} source files`);
-      outputChannel?.appendLine(`[Perf][EXAMINE] discoverWorkspaceSourceFiles tookMs=${Date.now() - tDiscover}`);
-      
-      // Read file contents (with size limit to prevent memory issues)
-      // Use parallel batching to avoid antivirus slowdowns
-      const maxFileSize = 100 * 1024; // 100KB per file
-      const maxTotalSize = 10 * 1024 * 1024; // 10MB total
-      const filesData: { path: string; content: string; language?: string }[] = [];
-      let totalSize = 0;
-
-      const tReadLoopStart = Date.now();
-      
-      // Helper to detect language from extension
-      const detectLanguage = (filePath: string): string | undefined => {
-        if (filePath.endsWith('.py')) return 'python';
-        if (filePath.endsWith('.ts') || filePath.endsWith('.tsx')) return 'typescript';
-        if (filePath.endsWith('.js') || filePath.endsWith('.jsx') || filePath.endsWith('.mjs') || filePath.endsWith('.cjs')) return 'javascript';
-        if (filePath.endsWith('.java')) return 'java';
-        if (filePath.endsWith('.cs')) return 'csharp';
-        return undefined;
-      };
-
-      // Process files in parallel batches for better performance
-      const BATCH_SIZE = 20;
-      let processedCount = 0;
-      let skippedLarge = 0;
-      
-      for (let i = 0; i < sourceFiles.length && totalSize < maxTotalSize; i += BATCH_SIZE) {
-        if (enablementToken.isCancellationRequested) {
-          throw new Error('Aspect Code disabled');
-        }
-        const batch = sourceFiles.slice(i, i + BATCH_SIZE);
-        
-        const batchResults = await Promise.allSettled(
-          batch.map(async (filePath) => {
-            if (enablementToken.isCancellationRequested) {
-              return { skipped: true, size: 0, path: filePath };
-            }
-            const uri = vscode.Uri.file(filePath);
-            const stat = await vscode.workspace.fs.stat(uri);
-            
-            // Skip files that are too large
-            if (stat.size > maxFileSize) {
-              return { skipped: true, size: stat.size, path: filePath };
-            }
-            
-            const content = await vscode.workspace.fs.readFile(uri);
-            const text = new TextDecoder().decode(content);
-            const relativePath = path.relative(root, filePath);
-            
-            return {
-              skipped: false,
-              size: stat.size,
-              data: {
-                path: relativePath,
-                content: text,
-                language: detectLanguage(filePath)
-              }
-            };
-          })
-        );
-
-        if (enablementToken.isCancellationRequested) {
-          throw new Error('Aspect Code disabled');
-        }
-        
-        // Collect results
-        for (const result of batchResults) {
-          if (result.status === 'fulfilled') {
-            const value = result.value;
-            if (value.skipped) {
-              skippedLarge++;
-            } else if (totalSize + value.size <= maxTotalSize) {
-              filesData.push(value.data!);
-              totalSize += value.size;
-            }
-          }
-          // Skip failed files silently
-        }
-        
-        processedCount += batch.length;
-        
-        // Log progress every 50 files
-        if (processedCount % 50 === 0 || i + BATCH_SIZE >= sourceFiles.length) {
-          const elapsed = Date.now() - tReadLoopStart;
-          outputChannel?.appendLine(`[Perf][EXAMINE] readLoop progress filesAdded=${filesData.length} examined=${processedCount}/${sourceFiles.length} totalKB=${(totalSize / 1024).toFixed(1)} elapsedMs=${elapsed}`);
-        }
-      }
-
-      if (skippedLarge > 0) {
-        outputChannel?.appendLine(`[examineFullRepository] Skipped ${skippedLarge} files exceeding ${maxFileSize / 1024}KB limit`);
-      }
-
-      outputChannel?.appendLine(`[Perf][EXAMINE] readLoop end filesAdded=${filesData.length} examined=${processedCount}/${sourceFiles.length} totalKB=${(totalSize / 1024).toFixed(1)} tookMs=${Date.now() - tReadLoopStart}`);
-      
-      outputChannel?.appendLine(`[examineFullRepository] Prepared ${filesData.length} files (${(totalSize / 1024).toFixed(1)} KB) for remote validation`);
-
-      // Build payload with file contents for remote validation
-      const payload = {
-        repo_root: root,
-        modes: (Array.isArray(modesOverride) && modesOverride.length > 0)
-          ? modesOverride
-          : ['structure', 'types'],
-        enable_project_graph: false, // Disabled for remote validation (no cross-file analysis yet)
-        files: filesData  // Send file contents for remote validation
-      };
-
-      // Phase 3: Sending to server (30%)
-      progress.report({ increment: 10, message: 'Sending to analysis server...' });
-      sendProgressToPanel(state, 'examination', 30, 'Sending to analysis server...');
-
-      // Phase 4: Server validation (30% -> 80%) with timeout protection
-      progress.report({ increment: 5, message: 'Server analyzing code...' });
-      sendProgressToPanel(state, 'examination', 35, 'Server analyzing code...');
-
-      // Create a timeout promise for large repositories  
-      const timeoutMs = 300000; // 5 minutes timeout for examination (more complex)
-      const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('Examination timeout - repository may be too large or complex')), timeoutMs);
-      });
-
-      const examFetchStart = Date.now();
-      
-      const fetchPromise = (async () => {
-        const headers = await getHeaders();
-        const response = await fetch(apiUrl + '/validate_tree_sitter', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(payload)
-        });
-        return response;
-      })();
-
-      const res = await Promise.race([fetchPromise, timeoutPromise]) as Response;
-      outputChannel?.appendLine(`[examineFullRepository] Server responded in ${Date.now() - examFetchStart}ms (${filesData.length} files)`);
-
-      if (!res.ok) {
-        handleHttpError(res.status, res.statusText);
-      }
-
-      // Phase 5: Processing results (80%)
-      progress.report({ increment: 45, message: 'Processing Examination results...' });
-      sendProgressToPanel(state, 'examination', 80, 'Processing Examination results...');
-
-      const result: any = await res.json();
-      const resultViolationCount = (result.violations || []).length;
-      outputChannel?.appendLine(`Full Examination result: ${resultViolationCount} violations returned`);
-
-      // Phase 6: Mapping findings (90%)
-      progress.report({ increment: 10, message: 'Mapping findings...' });
-      sendProgressToPanel(state, 'examination', 90, 'Mapping findings...');
-
-      // Update panel state if provided
-      if (state) {
-        try {
-          outputChannel?.appendLine(`[examineFullRepository] Entering state update block...`);
-          const rootAbs = await getWorkspaceRoot(); // already defined in this file
-          const violations = result.violations || [];
-
-          const sevMap: Record<string, 'info' | 'warn' | 'error'> = { low: 'info', medium: 'warn', high: 'error' };
-
-          const findings = violations.map((v: any) => {
-            // Prefer first location string from server
-            const loc0 = Array.isArray(v.locations) && typeof v.locations[0] === 'string' ? v.locations[0] : undefined;
-            const parsed = parseLocationToFileAndSpan(loc0 || undefined);
-
-            // File resolution:
-            // 1) from parsed location (absolute from server)
-            // 2) else from v.file* fields (may be relative) → make absolute if needed
-            let absFile = parsed?.file || v.filePath || v.file_path || v.file || '';
-            if (absFile && !path.isAbsolute(absFile) && rootAbs) {
-              absFile = path.join(rootAbs, absFile);
-            }
-
-            // Severity normalization (server: low|medium|high → panel: info|warn|error)
-            const severity = sevMap[v.severity] ?? (['info', 'warn', 'error'].includes(v.severity) ? v.severity : 'warn');
-
-            return {
-              id: v.violation_id ?? v.id,
-              code: v.rule ?? v.code ?? 'unknown',
-              severity,
-              file: absFile,
-              span: parsed?.span ?? (v.span ? {
-                start: { line: Math.max(1, v.span.start?.line ?? 1), column: Math.max(1, v.span.start?.column ?? 1) },
-                end: { line: Math.max(1, v.span.end?.line ?? 1), column: Math.max(1, v.span.end?.column ?? 1) }
-              } : undefined),
-              message: v.message ?? v.explain ?? '',
-              fixable: !!(v.fixable || v.suggested_patchlet),
-              suggested_patchlet: v.suggested_patchlet,
-              selected: false,
-              _raw: v
-            };
-          });
-
-          const validateStats = {
-            total: violations.length,
-            fixable: violations.filter((v: any) => v.suggested_patchlet || v.fixable).length,
-            byCode: violations.reduce((acc: any, v: any) => {
-              const key = v.rule ?? v.code ?? 'unknown';
-              acc[key] = (acc[key] || 0) + 1;
-              return acc;
-            }, {}),
-            tookMs: result.processing_time_ms || 0
-          };
-
-          outputChannel?.appendLine(`[examineFullRepository] CHECKPOINT 1: About to call state.update() with ${findings.length} findings`);
-          outputChannel?.appendLine(`[examineFullRepository] CHECKPOINT 2: state object is ${state ? 'DEFINED' : 'UNDEFINED'}`);
-          
-          state.update({
-            findings,
-            lastValidate: validateStats,
-            error: undefined,
-            busy: false,
-            ui: { ...(state.s.ui ?? {}), activeTab: (state.s.ui?.activeTab ?? "overview") }
-          });
-          outputChannel?.appendLine(`[examineFullRepository] CHECKPOINT 3: state.update() returned`);
-          outputChannel?.appendLine(`[examineFullRepository] CHECKPOINT 4: state.s.findings.length is now ${state.s.findings?.length}`);
-
-          state.update({
-            history: [
-              { ts: Date.now(), kind: 'validate' as 'validate', meta: { total: violations.length, fixable: validateStats.fixable } },
-              ...state.s.history
-            ].slice(0, 50)
-          });
-        } catch (stateUpdateError) {
-          outputChannel?.appendLine(`[examineFullRepository] ERROR during state update: ${stateUpdateError}`);
-          throw stateUpdateError;
-        }
-
-        // Phase 7: Finalizing (100%)
-        progress.report({ increment: 10, message: 'Finalizing examination...' });
-        sendProgressToPanel(state, 'examination', 100, 'Examination complete');
-      }
-
-      progress.report({ message: 'Rendering diagnostics...' });
-
-      // Render diagnostics same as diff validation
-      renderDiagnostics(result);
-
-      progress.report({ message: 'Examination complete!' });
-
-      // Always regenerate .aspect KB files after successful examination
-      if (state) {
-        try {
-          const { regenerateEverything } = await import('./assistants/kb');
-          const kbResult = await regenerateEverything(state, outputChannel!, context);
-          
-          // Mark KB as fresh after successful regeneration, reusing discovered files
-          if (workspaceFingerprint && kbResult.regenerated) {
-            await workspaceFingerprint.markKbFresh(kbResult.files);
-          }
-        } catch (kbError) {
-          outputChannel?.appendLine(`[KB] Auto-regeneration failed (non-critical): ${kbError}`);
-        }
-      }
-
-      // Check if we should auto-generate instruction files after successful examination
-      const assistantsSettings = await getAssistantsSettings(vscode.Uri.file(root));
-      const autoGenerate = assistantsSettings.autoGenerate;
-
-      if (autoGenerate) {
-        outputChannel?.appendLine('[Assistants] Auto-generating instruction files after examination...');
-        try {
-          await vscode.commands.executeCommand('aspectcode.generateInstructionFiles');
-        } catch (genError) {
-          outputChannel?.appendLine(`[Assistants] Auto-generation failed (non-critical): ${genError}`);
-          // Don't block validation on generation failure
-        }
-      }
-
-      // On first successful examination, offer to configure AI assistants
-      if (context) {
-        const hasBeenAsked = context.globalState.get<boolean>('aspectcode.assistants.firstTimeAsked', false);
-        if (!hasBeenAsked) {
-          await context.globalState.update('aspectcode.assistants.firstTimeAsked', true);
-          // Delay slightly so examination success message is visible first
-          setTimeout(async () => {
-            const answer = await vscode.window.showInformationMessage(
-              'Would you like to configure Aspect Code for your AI assistants (Copilot, Cursor, Claude)?',
-              'Configure', 'Later'
-            );
-            if (answer === 'Configure') {
-              await vscode.commands.executeCommand('aspectcode.configureAssistants');
-            }
-          }, 1500);
-        }
-      }
-
-      // Show summary
-      const violationCount = (result.violations || []).length;
-      if (violationCount > 0) {
-        // vscode.window.showWarningMessage(`Full repository examination found ${violationCount} issues (see Problems panel)`);
-        // vscode.window.setStatusBarMessage(`Aspect Code: ${violationCount} repo issues found`, 5000);
-      } else {
-        // vscode.window.showInformationMessage('Repository examination passed - no issues found!');
-        // vscode.window.setStatusBarMessage('Aspect Code: repository clean ✓', 3000);
-      }
-    });
-
-  } catch (e) {
-    outputChannel?.appendLine(`EXCEPTION in examineFullRepository: ${e}`);
-    if (state) {
-      state.update({ busy: false, error: `Examination failed: ${(e as Error).message}` });
-    }
-    vscode.window.showErrorMessage(`Full repository Examination failed: ${(e as Error).message}`);
-  }
-}
-
-async function showRepositoryStatus() {
-  const root = await getWorkspaceRoot();
-  if (!root) {
-    vscode.window.showErrorMessage('No workspace root found');
-    return;
-  }
-
-  const apiUrl = getBaseUrl();
-
-  try {
-    // Get snapshots
-    const snapshotsHeaders = await getHeaders();
-    const snapshotsRes = await fetch(apiUrl + '/snapshots', { headers: snapshotsHeaders });
-    if (!snapshotsRes.ok) {
-      handleHttpError(snapshotsRes.status, snapshotsRes.statusText);
-    }
-
-    const snapshots = await snapshotsRes.json() as SnapshotInfo[];
-
-    // Get storage stats
-    const statsHeaders = await getHeaders();
-    const statsRes = await fetch(apiUrl + '/storage/stats', { headers: statsHeaders });
-    if (!statsRes.ok) {
-      handleHttpError(statsRes.status, statsRes.statusText);
-    }
-
-    const stats = await statsRes.json() as StorageStats;
-
-    // Find current repo snapshot
-    const currentSnapshot = snapshots.find((s) => s.repo_root === root);
-
-    let message = 'Repository Status:\n\n';
-
-    if (currentSnapshot) {
-      message += `Current Index:\n`;
-      message += `• Snapshot ID: ${currentSnapshot.snapshot_id.substring(0, 8)}...\n`;
-      message += `• Created: ${new Date(currentSnapshot.created_at).toLocaleString()}\n`;
-      message += `• Files: ${currentSnapshot.file_count}\n`;
-      message += `• Dependencies: ${currentSnapshot.dependency_count}\n\n`;
-    } else {
-      message += `Current Index: Not indexed\n\n`;
-    }
-
-    message += `Storage Stats:\n`;
-    message += `• Total snapshots: ${stats.total_snapshots}\n`;
-    message += `• Memory usage: ${(stats.memory_usage_mb || 0).toFixed(1)} MB\n`;
-    message += `• Cache hits: ${stats.cache_stats?.hits || 0}\n`;
-    message += `• Cache misses: ${stats.cache_stats?.misses || 0}\n`;
-
-    if (!currentSnapshot) {
-      const result = await vscode.window.showInformationMessage(message, { modal: true }, 'Regenerate KB');
-      if (result === 'Regenerate KB') {
-        await vscode.commands.executeCommand('aspectcode.generateKB');
-      }
-    } else {
-      const actions = ['Regenerate KB', 'Examine Full Repo'];
-      const result = await vscode.window.showInformationMessage(message, { modal: true }, ...actions);
-      if (result === 'Regenerate KB') {
-        await vscode.commands.executeCommand('aspectcode.generateKB');
-      } else if (result === 'Examine Full Repo') {
-        await examineFullRepository();
-      }
-    }
-
-  } catch (e) {
-    outputChannel?.appendLine(`EXCEPTION in showRepositoryStatus: ${e}`);
-    vscode.window.showErrorMessage(`Failed to get repository status: ${(e as Error).message}`);
-  }
-}
+// Server-dependent functions removed:
+// - sendProgressToPanel (panel UI)
+// - examineFullRepository (server validation)
+// - showRepositoryStatus (server snapshots API)
 
 // Command implementations
 async function showParserStatus() {
@@ -1330,29 +693,7 @@ function parseLocationToFileAndSpan(loc?: string): { file: string; span?: { star
   };
 }
 
-/**
- * Fetch capabilities if not already cached.
- */
-async function fetchCapabilitiesIfNeeded(state: AspectCodeState, force: boolean = false) {
-  try {
-    // If we already have capabilities, don't fetch again (unless forced)
-    if (!force && state.getCapabilities()) {
-      outputChannel?.appendLine('Capabilities already cached');
-      const caps = state.getCapabilities();
-      outputChannel?.appendLine(`Cached ${caps?.fixable_rules?.length ?? 0} fixable rules`);
-      return;
-    }
-
-    outputChannel?.appendLine('Fetching capabilities...');
-    const capabilities = await fetchCapabilities();
-    state.setCapabilities(capabilities);
-    outputChannel?.appendLine(`Cached ${capabilities.fixable_rules.length} fixable rules`);
-    outputChannel?.appendLine(`Rules: ${capabilities.fixable_rules.map(r => r.rule).join(', ')}`);
-  } catch (error) {
-    outputChannel?.appendLine(`Failed to fetch capabilities: ${error}`);
-    // Don't fail activation if capabilities can't be fetched
-  }
-}
+// Server-dependent function fetchCapabilitiesIfNeeded removed.
 
 /**
  * Extract file paths from a unified diff.
@@ -1399,25 +740,19 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Create status bar item immediately on activation (icon only)
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, -100);
-  statusBarItem.command = "aspectcode.showPanel";
-  statusBarItem.tooltip = "Open Aspect Code Panel";
+  statusBarItem.command = "aspectcode.generateKB";
+  statusBarItem.tooltip = "Regenerate Aspect Code Knowledge Base";
   statusBarItem.text = "$(beaker)";
   statusBarItem.show();
   context.subscriptions.push(statusBarItem);
-
-  // Initialize HTTP module with secrets storage for API key management
-  initHttp(context);
 
   // Initialize state
   const state = new AspectCodeState(context);
   state.load();
 
-  // Register the panel provider
+  // Register panel provider
   const panelProvider = new AspectCodePanelProvider(context, state, outputChannel);
-  
-  // Store panel provider reference in state for progress updates
   (state as AspectCodeState & { _panelProvider?: AspectCodePanelProvider })._panelProvider = panelProvider;
-  
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider('aspectcode.panel', panelProvider, {
       webviewOptions: { retainContextWhenHidden: true }
@@ -1487,7 +822,7 @@ export async function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(aspectSettingsWatcher);
     
-    // Connect fingerprint staleness to panel indicator
+    // Update panel when KB staleness changes
     workspaceFingerprint.onStaleStateChanged(stale => {
       panelProvider.setKbStale(stale);
     });
@@ -1506,8 +841,7 @@ export async function activate(context: vscode.ExtensionContext) {
           // Pass the discovered files to markKbFresh to avoid rediscovery
           await workspaceFingerprint?.markKbFresh(result.files);
           
-          // Trigger a dependency graph refresh if panel is visible
-          // FileDiscoveryService will use cached files from KB generation
+          // Refresh dependency graph in panel
           panelProvider.refreshDependencyGraph();
 
           outputChannel.appendLine(`[KB] Auto-regeneration complete in ${Date.now() - regenStart}ms`);
@@ -1517,166 +851,17 @@ export async function activate(context: vscode.ExtensionContext) {
       }
     });
     
-    // Check KB staleness on startup and update panel
+    // Check KB staleness on startup
     const isStale = await workspaceFingerprint.isKbStale();
-    panelProvider.setKbStale(isStale);
     if (isStale) {
-      outputChannel.appendLine('[Startup] KB may be stale - will show indicator');
+      outputChannel.appendLine('[Startup] KB may be stale - will auto-regenerate if configured');
     } else {
       outputChannel.appendLine('[Startup] KB is up to date');
     }
   }
 
-  // ===== CORE Aspect Code COMMANDS (4 TOTAL) =====
-  
-  // Enter API Key - Allows users to input their API key manually
-  context.subscriptions.push(
-    vscode.commands.registerCommand('aspectcode.enterApiKey', async () => {
-      try {
-        // Check if already have a key
-        const existingKey = await context.secrets.get('aspectcode.apiKey');
-        if (existingKey) {
-          const choice = await vscode.window.showInformationMessage(
-            'You already have an API key configured. Do you want to replace it with a new one?',
-            'Enter new API key',
-            'Cancel'
-          );
-          if (choice !== 'Enter new API key') {
-            return;
-          }
-        }
-
-        // Prompt for API key
-        const apiKey = await vscode.window.showInputBox({
-          prompt: 'Enter your Aspect Code API key',
-          placeHolder: 'paste-your-api-key-here',
-          password: true, // Hide the input for security
-          validateInput: (value) => {
-            if (!value || value.trim().length === 0) {
-              return 'API key is required';
-            }
-            if (value.trim().length < 20) {
-              return 'API key appears too short - please check and try again';
-            }
-            return undefined;
-          }
-        });
-
-        if (!apiKey) {
-          return; // User cancelled
-        }
-
-        // Store the API key in SecretStorage
-        await context.secrets.store('aspectcode.apiKey', apiKey.trim());
-
-        // Key changed: clear any previous invalid/revoked banner until we validate again.
-        resetApiKeyAuthStatus();
-
-        outputChannel?.appendLine('[Auth] API key stored successfully');
-
-        vscode.window.showInformationMessage(
-          'API key saved! You can now use Aspect Code.',
-          'OK'
-        );
-
-      } catch (error: any) {
-        outputChannel?.appendLine(`[Auth] Error storing API key: ${error.message}`);
-        vscode.window.showErrorMessage(`Failed to save API key: ${error.message}`);
-      }
-    })
-  );
-
-  // Clear API Key - Deletes the stored API key from SecretStorage
-  context.subscriptions.push(
-    vscode.commands.registerCommand('aspectcode.clearApiKey', async () => {
-      try {
-        const existingKey = await context.secrets.get('aspectcode.apiKey');
-        if (!existingKey) {
-          vscode.window.showInformationMessage('No stored API key found to clear.');
-          return;
-        }
-
-        const choice = await vscode.window.showWarningMessage(
-          'This will remove your stored Aspect Code API key from VS Code. You will need to enter it again to use Aspect Code.',
-          'Clear API Key',
-          'Cancel'
-        );
-        if (choice !== 'Clear API Key') {
-          return;
-        }
-
-        await context.secrets.delete('aspectcode.apiKey');
-        outputChannel?.appendLine('[Auth] API key cleared from SecretStorage');
-
-        // Key changed: clear any previous invalid/revoked banner.
-        resetApiKeyAuthStatus();
-
-        const configApiKey = vscode.workspace.getConfiguration('aspectcode').get<string>('apiKey');
-        if (configApiKey && configApiKey.trim().length > 0) {
-          vscode.window.showInformationMessage(
-            "Stored API key cleared. Note: 'aspectcode.apiKey' is still set in Settings and will still be used.",
-            'Open Settings'
-          ).then(sel => {
-            if (sel === 'Open Settings') {
-              vscode.commands.executeCommand('workbench.action.openSettings', 'aspectcode.apiKey');
-            }
-          });
-          return;
-        }
-
-        vscode.window.showInformationMessage('Stored API key cleared.');
-      } catch (error: any) {
-        outputChannel?.appendLine(`[Auth] Error clearing API key: ${error.message}`);
-        vscode.window.showErrorMessage(`Failed to clear API key: ${error.message}`);
-      }
-    })
-  );
-
-  // 1. EXAMINE - Analyze entire repository for issues
-  context.subscriptions.push(
-    vscode.commands.registerCommand('aspectcode.examine', async (opts?: { modes?: string[] }) => {
-      try {
-        const rootUri = vscode.workspace.workspaceFolders?.[0]?.uri;
-        if (rootUri) {
-          const enabled = await getExtensionEnabledSetting(rootUri);
-          if (!enabled) {
-            vscode.window.showInformationMessage('Aspect Code is disabled.', 'Enable').then((sel) => {
-              if (sel === 'Enable') void vscode.commands.executeCommand('aspectcode.toggleExtensionEnabled');
-            });
-            return;
-          }
-        }
-        // Note: examineFullRepository will skip server validation if no API key (works offline)
-        outputChannel?.appendLine('=== EXAMINE: Starting repository examination ===');
-        
-        // Validate the entire repository
-        await examineFullRepository(state, context, opts?.modes);
-        
-        const total = state.s.lastValidate?.total ?? 0;
-        const fixable = state.s.findings?.filter(f => f.fixable)?.length ?? 0;
-        
-        outputChannel?.appendLine(`=== EXAMINE: Found ${total} total issues, ${fixable} fixable ===`);
-        
-        // Show the panel to display results
-        await vscode.commands.executeCommand('aspectcode.showPanel');
-        
-      } catch (error) {
-        outputChannel?.appendLine(`EXAMINE ERROR: ${error}`);
-        
-        // Clear progress state on error
-        if (state) {
-          state.update({ busy: false, error: `Examination failed: ${error}` });
-          sendProgressToPanel(state, 'examination', 0, 'Examination failed');
-        }
-        
-        if (error instanceof Error && error.message.includes('timeout')) {
-          vscode.window.showWarningMessage(`Examination timeout: ${error.message}. Try validating a smaller subset of files.`);
-        } else {
-          vscode.window.showErrorMessage(`Examination failed: ${error}`);
-        }
-      }
-    })
-  );
+  // ===== CORE Aspect Code COMMANDS =====
+  // Note: Server-dependent commands removed.
 
   // Generate/refresh KB files (.aspect/*.md) based on current state.
   // Used by the panel “Regenerate KB” button.
@@ -1695,7 +880,7 @@ export async function activate(context: vscode.ExtensionContext) {
         });
         return;
       }
-      // Note: KB generation works offline - no API key required
+      // Note: KB generation works offline
 
       try {
         const regenStart = Date.now();
@@ -1708,12 +893,6 @@ export async function activate(context: vscode.ExtensionContext) {
         if (result.regenerated) {
           // Mark KB as fresh after successful regeneration, reusing discovered files
           await workspaceFingerprint?.markKbFresh(result.files);
-          
-          // Notify panel that KB is no longer stale
-          panelProvider.setKbStale(false);
-
-          // Refresh dependency graph - FileDiscoveryService will use cached files
-          panelProvider.refreshDependencyGraph();
 
           outputChannel?.appendLine(`=== REGENERATE KB: Complete (${Date.now() - regenStart}ms) ===`);
           vscode.window.showInformationMessage('Knowledge base regenerated successfully.');
@@ -1724,6 +903,20 @@ export async function activate(context: vscode.ExtensionContext) {
       } catch (e) {
         outputChannel?.appendLine(`REGENERATE KB ERROR: ${e}`);
         vscode.window.showErrorMessage(`KB regeneration failed: ${e}`);
+      }
+    })
+  );
+
+  // Refresh dependency analysis caches and re-render the panel graph.
+  // This is a purely local operation (no KB generation, no network).
+  context.subscriptions.push(
+    vscode.commands.registerCommand('aspectcode.forceReindex', async () => {
+      try {
+        panelProvider.invalidateDependencyCache();
+        panelProvider.refreshDependencyGraph();
+        vscode.window.showInformationMessage('Aspect Code: dependency graph refreshed.');
+      } catch (e) {
+        vscode.window.showErrorMessage(`Aspect Code: failed to refresh dependency graph: ${e}`);
       }
     })
   );
@@ -1784,124 +977,13 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
   
-  // 2. SHOW PANEL - Display the main Aspect Code panel
-  context.subscriptions.push(
-    vscode.commands.registerCommand('aspectcode.showPanel', async () => {
-      // Focus the webview panel directly by its view ID
-      await vscode.commands.executeCommand('aspectcode.panel.focus');
-    })
-  );
-
-  // 5. COPY DEBUG INFO - Collect debug information for support
-  context.subscriptions.push(
-    vscode.commands.registerCommand('aspectcode.copyDebugInfo', async () => {
-      try {
-        const { getExtensionVersion, getNetworkEvents, getBaseUrl } = await import('./http');
-        
-        // Collect debug info
-        const debugInfo: Record<string, any> = {
-          timestamp: new Date().toISOString(),
-          extension_version: getExtensionVersion(),
-          server_url: getBaseUrl(),
-        };
-        
-        // Workspace fingerprint (hashed, no real path)
-        if (workspaceFingerprint) {
-          const stats = await workspaceFingerprint.getStats();
-          debugInfo.workspace = {
-            fingerprint_hash: stats.fingerprint?.substring(0, 12),
-            file_count: stats.fileCount,
-            kb_stale: stats.isStale,
-            last_kb_update: stats.lastKbUpdate,
-          };
-        }
-        
-        // KB mode from project-local settings
-        const root = await getWorkspaceRoot();
-        if (root) {
-          debugInfo.kb_mode = await getAutoRegenerateKbSetting(vscode.Uri.file(root));
-        } else {
-          debugInfo.kb_mode = 'unknown';
-        }
-        
-        // State summary
-        const panelState = state.get();
-        debugInfo.state = {
-          busy: panelState.busy,
-          findings_count: panelState.findings.length,
-          has_snapshot: !!panelState.snapshot,
-          last_validate_took_ms: panelState.lastValidate?.tookMs,
-          error: panelState.error?.substring(0, 100),
-        };
-        
-        // Last 20 network events
-        const events = getNetworkEvents();
-        debugInfo.network_events = events.map(e => ({
-          time: new Date(e.timestamp).toISOString(),
-          endpoint: e.endpoint,
-          status: e.status,
-          duration_ms: e.durationMs,
-          request_id: e.requestId?.substring(0, 8),
-          error: e.error?.substring(0, 50),
-        }));
-        
-        // Format and copy
-        const text = JSON.stringify(debugInfo, null, 2);
-        await vscode.env.clipboard.writeText(text);
-        
-        vscode.window.showInformationMessage(
-          'Aspect Code debug info copied to clipboard.',
-          'Show in Output'
-        ).then(choice => {
-          if (choice === 'Show in Output') {
-            outputChannel.appendLine('=== DEBUG INFO ===');
-            outputChannel.appendLine(text);
-            outputChannel.show();
-          }
-        });
-      } catch (e) {
-        vscode.window.showErrorMessage(`Failed to collect debug info: ${e}`);
-      }
-    })
-  );
-
-  // 6. FORCE REINDEX - Run full examination (same as startup) and regenerate KB
-  // This is a manual button - always runs regardless of staleness
-  context.subscriptions.push(
-    vscode.commands.registerCommand('aspectcode.forceReindex', async () => {
-      try {
-        outputChannel?.appendLine('=== FORCE REINDEX: Running full examination ===');
-        
-        // Invalidate FileDiscoveryService cache to force fresh file discovery
-        const { getFileDiscoveryService } = await import('./services/FileDiscoveryService');
-        const fileDiscovery = getFileDiscoveryService();
-        fileDiscovery?.invalidate();
-        
-        // Run full examination - this shows the "Validating..." toast,
-        // discovers files, validates, and regenerates KB at the end
-        // examineFullRepository already calls markKbFresh with discovered files
-        await examineFullRepository(state, context);
-        
-        // Refresh UI after examination completes
-        // No need to call markKbFresh again - examineFullRepository does it
-        panelProvider.setKbStale(false);
-        panelProvider.refreshDependencyGraph();
-        
-        outputChannel?.appendLine('=== FORCE REINDEX: Complete ===');
-      } catch (error) {
-        outputChannel?.appendLine(`FORCE REINDEX ERROR: ${error}`);
-        vscode.window.showErrorMessage(`Examination failed: ${error}`);
-      }
-    })
-  );
-  
+  // Note: Server-dependent commands (showPanel, copyDebugInfo, forceReindex) removed.
   // Note: Aspect Code.openFinding command is now registered in newCommandsIntegration.ts
 
   // ===== EXTENSION SETUP =====
   outputChannel.appendLine('Aspect Code extension activated');
   
-  // Show the panel on startup
-  vscode.commands.executeCommand('aspectcode.panel.focus');
+  // Load tree-sitter grammars for local parsing
   
   loadGrammarsOnce(context, outputChannel).then(() => {
     const summary = getLoadedGrammarsSummary();

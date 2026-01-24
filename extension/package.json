@@ -69,46 +69,18 @@
     },
     "commands": [
       {
-        "command": "aspectcode.enterApiKey",
-        "title": "Aspect Code: Enter API Key"
-      },
-      {
-        "command": "aspectcode.clearApiKey",
-        "title": "Aspect Code: Clear API Key"
-      },
-      {
-        "command": "aspectcode.showPanel",
-        "title": "Aspect Code: Show Panel"
-      },
-      {
         "command": "aspectcode.toggleExtensionEnabled",
         "title": "Aspect Code: Toggle Enabled"
       },
+
       {
-        "command": "aspectcode.openFinding",
-        "title": "Aspect Code: Open Finding"
-      },
-      {
-        "command": "aspectcode.insertSuppression",
-        "title": "Aspect Code: Insert Suppression Comment"
-      },
-      {
-        "command": "aspectcode.examine",
-        "title": "Aspect Code: Examine"
+        "command": "aspectcode.generateKB",
+        "title": "Aspect Code: Generate Knowledge Base",
+        "icon": "$(database)"
       },
       {
         "command": "aspectcode.copyImpactAnalysisCurrentFile",
         "title": "Aspect Code: Copy Impact Analysis for Current File",
-        "icon": "$(clippy)"
-      },
-      {
-        "command": "aspectcode.forceReindex",
-        "title": "Aspect Code: Force Reindex (Clear Cache)",
-        "icon": "$(sync)"
-      },
-      {
-        "command": "aspectcode.copyDebugInfo",
-        "title": "Aspect Code: Copy Debug Info",
         "icon": "$(clippy)"
       },
       {
@@ -134,6 +106,14 @@
         "title": "Aspect Code: Enable Permissive Mode"
       },
       {
+        "command": "aspectcode.enableCustomMode",
+        "title": "Aspect Code: Enable Custom Mode"
+      },
+      {
+        "command": "aspectcode.enableOffMode",
+        "title": "Aspect Code: Disable Instruction Files"
+      },
+      {
         "command": "aspectcode.editCustomInstructions",
         "title": "Aspect Code: Edit Custom Instructions"
       },
@@ -154,9 +134,9 @@
         },
         "aspectcode.instructions.mode": {
           "type": "string",
-          "enum": ["safe", "permissive"],
+          "enum": ["safe", "permissive", "custom", "off"],
           "default": "safe",
-          "description": "Instruction generation mode: 'safe' is more restrictive; 'permissive' is shorter and less restrictive."
+          "description": "Instruction generation mode: 'safe' is more restrictive; 'permissive' is shorter and less restrictive; 'custom' uses .aspect/instructions.md; 'off' disables instruction file generation."
         },
         "aspectcode.devLogs": {
           "type": "boolean",
@@ -169,14 +149,10 @@
   "main": "./dist/extension.js",
   "scripts": {
     "vscode:prepublish": "npm run build",
-    "build": "npm run build:extension && npm run build:webview && npm run copy:css",
+    "build": "npm run build:extension",
     "build:extension": "esbuild src/extension.ts --bundle --platform=node --outfile=dist/extension.js --external:vscode",
-    "build:webview": "esbuild src/panel/webview/main.ts --bundle --platform=browser --outfile=dist/panel-webview.js",
-    "copy:css": "node -e \"const fs=require('fs'); fs.mkdirSync('dist',{recursive:true}); fs.copyFileSync('src/panel/webview/style.css','dist/panel-webview.css');\"",
-    "watch": "npm run watch:extension & npm run watch:webview",
+    "watch": "npm run watch:extension",
     "watch:extension": "esbuild src/extension.ts --bundle --platform=node --outfile=dist/extension.js --external:vscode --watch",
-    "watch:webview": "esbuild src/panel/webview/main.ts --bundle --platform=browser --outfile=dist/panel-webview.js --watch",
-    "postinstall": "node ./scripts/fetch-parsers.cjs || echo \"(skip wasm fetch)\"",
     "compile": "npm run build",
     "test:e2e": "ts-node ./test/e2e/run.ts"
   },
@@ -193,7 +169,6 @@
   },
   "dependencies": {
     "diff": "^5.2.0",
-    "node-fetch": "^3.3.2",
     "tree-sitter-wasms": "0.1.13",
     "web-tree-sitter": "^0.21.0",
     "yaml": "2.8.1"

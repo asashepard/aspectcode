@@ -6,7 +6,7 @@
  */
 
 import * as vscode from 'vscode';
-import { AspectCodeCommands, AspectCodeCodeActionProvider } from './commands';
+import { AspectCodeCommands } from './commands';
 import { AspectCodeState } from './state';
 import { detectAssistants, AssistantId } from './assistants/detection';
 import { generateInstructionFiles, regenerateInstructionFilesOnly, AssistantsOverride } from './assistants/instructions';
@@ -27,7 +27,6 @@ export function activateNewCommands(
   // Reuse the main extension output channel so users only need to watch one.
   const channel = outputChannel ?? vscode.window.createOutputChannel('Aspect Code');
   const commands = new AspectCodeCommands(context, state);
-  const codeActionProvider = new AspectCodeCodeActionProvider(commands);
 
   const getWorkspaceRoot = (): vscode.Uri | undefined => vscode.workspace.workspaceFolders?.[0]?.uri;
 
@@ -79,14 +78,6 @@ export function activateNewCommands(
         nextEnabled ? 'Aspect Code enabled' : 'Aspect Code disabled'
       );
     }),
-    vscode.commands.registerCommand('aspectcode.openFinding', async (finding: any) => {
-      if (!(await requireExtensionEnabled())) return;
-      return commands.openFinding(finding);
-    }),
-    vscode.commands.registerCommand('aspectcode.insertSuppression', async (finding: any) => {
-      if (!(await requireExtensionEnabled())) return;
-      return commands.insertSuppression(finding);
-    }),
     vscode.commands.registerCommand('aspectcode.configureAssistants', async () => {
       if (!(await requireExtensionEnabled())) return;
       return await handleConfigureAssistants(context, state, commands, channel);
@@ -123,26 +114,6 @@ export function activateNewCommands(
       if (!(await requireExtensionEnabled())) return;
       return await stopIgnoringGeneratedFilesCommand(channel);
     })
-  );
-
-  // Register code action provider for all supported languages
-  context.subscriptions.push(
-    vscode.languages.registerCodeActionsProvider(
-      [
-        { language: 'python', scheme: 'file' },
-        { language: 'typescript', scheme: 'file' },
-        { language: 'javascript', scheme: 'file' },
-        { language: 'typescriptreact', scheme: 'file' },
-        { language: 'javascriptreact', scheme: 'file' }
-      ],
-      codeActionProvider,
-      {
-        providedCodeActionKinds: [
-          vscode.CodeActionKind.QuickFix,
-          vscode.CodeActionKind.SourceFixAll
-        ]
-      }
-    )
   );
 
   // Watch for .aspect/ folder and instruction file changes to update the '+' button visibility
@@ -427,9 +398,8 @@ async function handleConfigureAssistants(
           assistants: assistantsOverride,
           // Initialize default exclusion settings so users can see/edit them
           excludeDirectories: {
-            auto: true,
-            alwaysExclude: [],
-            neverExclude: []
+            always: [],
+            never: []
           }
       });
       if (perfEnabled) {
@@ -451,7 +421,7 @@ async function handleConfigureAssistants(
 /**
  * Handle aspectcode.generateInstructionFiles command.
  * Generates KB files and instruction files based on settings.
- * If no findings exist yet, runs INDEX and EXAMINE first.
+ * Uses fully local analysis (tree-sitter + dependency analysis) - no server required.
  * 
  * @param assistantsOverride Optional assistants selection. If provided, uses these
  *   values instead of reading from .aspect/.settings.json. This enables
@@ -468,7 +438,7 @@ async function handleGenerateInstructionFiles(
     const perfEnabled = vscode.workspace.getConfiguration().get<boolean>('aspectcode.devLogs', true);
     const tStart = Date.now();
     if (perfEnabled) {
-      outputChannel.appendLine(`[Perf][Instructions][cmd] start findingsCount=${state.s.findings?.length ?? 0}`);
+      outputChannel.appendLine(`[Perf][Instructions][cmd] start`);
     }
 
     const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -479,37 +449,8 @@ async function handleGenerateInstructionFiles(
 
     const workspaceRoot = workspaceFolders[0].uri;
 
-    // If no findings exist, run INDEX and EXAMINE first
-    let findings = state.s.findings;
-    if (!findings || findings.length === 0) {
-      outputChannel.appendLine('[Instructions] No findings exist, running INDEX and EXAMINE first...');
-      if (perfEnabled) {
-        outputChannel.appendLine('[Perf][Instructions][cmd] triggering INDEX+EXAMINE');
-      }
-      
-      // Show progress notification
-      await vscode.window.withProgress({
-        location: vscode.ProgressLocation.Notification,
-        title: 'Aspect Code',
-        cancellable: false
-      }, async (progress) => {
-        // INDEX is disabled for remote servers (always the case now)
-        // Just run EXAMINE which sends file contents to the server
-        
-        const tExam = Date.now();
-        progress.report({ message: 'Running examination...' });
-        // For instruction generation, structure-only is usually sufficient
-        // (entry points, data models, external integrations) and is typically faster.
-        await vscode.commands.executeCommand('aspectcode.examine', { modes: ['structure'] });
-        outputChannel.appendLine(`[Perf][Instructions][cmd] EXAMINE tookMs=${Date.now() - tExam}`);
-      });
-      
-      // Re-fetch findings after examination
-      findings = state.s.findings;
-      outputChannel.appendLine(`[Instructions] Examination complete, ${findings.length} findings`);
-    }
-
-    // Generate instruction files (pass assistants override if provided)
+    // Generate instruction files directly using local analysis (no server needed)
+    // The generateInstructionFiles function handles KB generation internally
     const tGen = Date.now();
     await generateInstructionFiles(workspaceRoot, state, outputChannel, context, assistantsOverride);
     if (perfEnabled) {
