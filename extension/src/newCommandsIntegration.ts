@@ -7,12 +7,10 @@
 
 import * as vscode from 'vscode';
 import { AspectCodeCommands, AspectCodeCodeActionProvider } from './commands';
-import { PromptGenerationService } from './services/PromptGenerationService';
 import { AspectCodeState } from './state';
 import { detectAssistants, AssistantId } from './assistants/detection';
 import { generateInstructionFiles, regenerateInstructionFilesOnly, AssistantsOverride } from './assistants/instructions';
 import { generateKnowledgeBase } from './assistants/kb';
-import { getBaseUrl, hasApiKeyConfigured, isApiKeyBlocked, hasValidApiKey } from './http';
 import { stopIgnoringGeneratedFilesCommand } from './services/gitignoreService';
 import { InstructionsMode, getAssistantsSettings, getInstructionsModeSetting, setInstructionsModeSetting, updateAspectSettings, getExtensionEnabledSetting, setExtensionEnabledSetting, aspectDirExists } from './services/aspectSettings';
 import { cancelAndResetAllInFlightWork } from './services/enablementCancellation';
@@ -30,7 +28,6 @@ export function activateNewCommands(
   const channel = outputChannel ?? vscode.window.createOutputChannel('Aspect Code');
   const commands = new AspectCodeCommands(context, state);
   const codeActionProvider = new AspectCodeCodeActionProvider(commands);
-  const promptGenerationService = new PromptGenerationService({ outputChannel: channel, state });
 
   const getWorkspaceRoot = (): vscode.Uri | undefined => vscode.workspace.workspaceFolders?.[0]?.uri;
 
@@ -82,14 +79,6 @@ export function activateNewCommands(
         nextEnabled ? 'Aspect Code enabled' : 'Aspect Code disabled'
       );
     }),
-    vscode.commands.registerCommand('aspectcode.scanWorkspace', async () => {
-      if (!(await requireExtensionEnabled())) return;
-      return commands.scanWorkspace();
-    }),
-    vscode.commands.registerCommand('aspectcode.scanActiveFile', async () => {
-      if (!(await requireExtensionEnabled())) return;
-      return commands.scanActiveFile();
-    }),
     vscode.commands.registerCommand('aspectcode.openFinding', async (finding: any) => {
       if (!(await requireExtensionEnabled())) return;
       return commands.openFinding(finding);
@@ -97,14 +86,6 @@ export function activateNewCommands(
     vscode.commands.registerCommand('aspectcode.insertSuppression', async (finding: any) => {
       if (!(await requireExtensionEnabled())) return;
       return commands.insertSuppression(finding);
-    }),
-    vscode.commands.registerCommand('aspectcode.configureRules', async () => {
-      if (!(await requireExtensionEnabled())) return;
-      return commands.configureRules();
-    }),
-    vscode.commands.registerCommand('aspectcode.generatePrompt', async () => {
-      if (!(await requireExtensionEnabled())) return;
-      return await handleGeneratePrompt(promptGenerationService, state);
     }),
     vscode.commands.registerCommand('aspectcode.configureAssistants', async () => {
       if (!(await requireExtensionEnabled())) return;
@@ -163,61 +144,6 @@ export function activateNewCommands(
       }
     )
   );
-
-  // Register file watcher for debounced scanning
-  const fileWatcher = vscode.workspace.createFileSystemWatcher('**/*.{py,ts,tsx,js,jsx,mjs,cjs}');
-  let debounceTimer: NodeJS.Timeout | undefined;
-
-  const debouncedScan = () => {
-    if (debounceTimer) {
-      clearTimeout(debounceTimer);
-    }
-    
-    const config = vscode.workspace.getConfiguration('aspectcode');
-    const debounceMs = config.get<number>('validation.debounceMs', 400);
-    const validateOnSave = config.get<boolean>('validation.onSave', true);
-    const enableLegacyPreflight = config.get<boolean>('enableLegacyPreflight', false);
-    
-    if (!validateOnSave || !enableLegacyPreflight) {
-      return;
-    }
-    
-    debounceTimer = setTimeout(() => {
-      // Only scan active file on save for performance
-      if (!hasValidApiKey()) {
-        return;
-      }
-      void isExtensionEnabled().then((enabled) => {
-        if (!enabled) return;
-        const activeEditor = vscode.window.activeTextEditor;
-        if (activeEditor) {
-          commands.scanActiveFile();
-        }
-      });
-    }, debounceMs);
-  };
-
-  fileWatcher.onDidChange(debouncedScan);
-  fileWatcher.onDidCreate(debouncedScan);
-  
-  // Also scan on document save
-  const saveListener = vscode.workspace.onDidSaveTextDocument((document) => {
-    const config = vscode.workspace.getConfiguration('aspectcode');
-    const validateOnSave = config.get<boolean>('validation.onSave', true);
-    const enableLegacyPreflight = config.get<boolean>('enableLegacyPreflight', false);
-    
-    if (validateOnSave && enableLegacyPreflight) {
-      if (!hasValidApiKey()) {
-        return;
-      }
-      void isExtensionEnabled().then((enabled) => {
-        if (!enabled) return;
-        debouncedScan();
-      });
-    }
-  });
-
-  context.subscriptions.push(fileWatcher, saveListener);
 
   // Watch for .aspect/ folder and instruction file changes to update the '+' button visibility
   // Track if we've recently shown the notification to avoid spamming
@@ -360,28 +286,6 @@ export function activateNewCommands(
   context.subscriptions.push(cursorWatcher, cursorFolderWatcher);
 
   // Startup check intentionally disabled: panel UI handles setup prompts.
-
-  // Add legacy scan status bar items (only if enabled)
-  const config = vscode.workspace.getConfiguration('aspectcode');
-  const enableLegacyPreflight = config.get<boolean>('enableLegacyPreflight', false);
-  
-  if (enableLegacyPreflight) {
-    // Add to status bar for easy access
-    const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-    statusBarItem.text = '$(search) Scan Workspace';
-    statusBarItem.command = 'aspectcode.scanWorkspace';
-    statusBarItem.tooltip = 'Scan workspace with Aspect Code (Legacy)';
-    statusBarItem.show();
-    
-    // Add rule configuration button to status bar
-    const configStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
-    configStatusBarItem.text = '$(settings-gear)';
-    configStatusBarItem.command = 'aspectcode.configureRules';
-    configStatusBarItem.tooltip = 'Configure Aspect Code rule categories (Legacy)';
-    configStatusBarItem.show();
-    
-    context.subscriptions.push(statusBarItem, configStatusBarItem);
-  }
 }
 
 /**
@@ -447,13 +351,6 @@ async function handleConfigureAssistants(
         description: detected.has('other') ? '(detected)' : '',
         picked: detected.has('other')
       }
-      // TEMPORARILY DISABLED: ALIGNMENTS.json feature
-      // {
-      //   id: 'alignments',
-      //   label: '$(question) Issue Alignments (ALIGNMENTS.json)',
-      //   description: detected.has('alignments') ? '(detected)' : '',
-      //   picked: detected.has('alignments')
-      // }
     ];
 
     if (perfEnabled) {
@@ -639,67 +536,6 @@ async function handleGenerateInstructionFiles(
   } catch (error) {
     outputChannel.appendLine(`[Instructions] Error: ${error}`);
     vscode.window.showErrorMessage(`Failed to generate instruction files: ${error}`);
-  }
-}
-
-/**
- * Generate a deterministic, offline, context-aware planning prompt
- * from user-provided text and local dependency graph.
- */
-async function handleGeneratePrompt(promptService: PromptGenerationService, state: AspectCodeState): Promise<void> {
-  const MAX_CONTEXT_LENGTH = 2000;
-
-  try {
-    const userText = await vscode.window.showInputBox({
-      prompt: 'What do you want the AI to do?',
-      placeHolder: 'e.g., "Refactor auth module to reduce coupling"',
-      ignoreFocusOut: true,
-      validateInput: (value) => {
-        if (!value || value.trim().length === 0) {
-          return 'Please enter a short task description.';
-        }
-        if (value.length > MAX_CONTEXT_LENGTH) {
-          return `Context too long (${value.length}/${MAX_CONTEXT_LENGTH} characters)`;
-        }
-        return null;
-      }
-    });
-
-    // User cancelled the input box (pressed Escape)
-    if (userText === undefined) {
-      return;
-    }
-
-    const activeFileUri = vscode.window.activeTextEditor?.document?.uri;
-
-    await vscode.window.withProgress(
-      {
-        location: vscode.ProgressLocation.Notification,
-        title: 'Aspect Code: Generating prompt',
-        cancellable: false
-      },
-      async (progress) => {
-        const report = (message: string) => progress.report({ message });
-        report('Starting...');
-        state.update({ busy: true });
-        try {
-          const prompt = await promptService.buildUserPrompt({
-            userText: userText.trim(),
-            activeFileUri,
-            onProgress: report
-          });
-          report('Copying to clipboard...');
-          await vscode.env.clipboard.writeText(prompt);
-        } finally {
-          state.update({ busy: false });
-        }
-      }
-    );
-
-    vscode.window.showInformationMessage('Planning prompt copied to clipboard (offline)');
-  } catch (error) {
-    state.update({ busy: false });
-    vscode.window.showErrorMessage(`Failed to generate plan: ${error}`);
   }
 }
 

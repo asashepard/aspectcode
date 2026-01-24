@@ -85,27 +85,12 @@
         "title": "Aspect Code: Toggle Enabled"
       },
       {
-        "command": "aspectcode.scanWorkspace",
-        "title": "Aspect Code: Scan Workspace",
-        "icon": "$(search)"
-      },
-      {
-        "command": "aspectcode.scanActiveFile",
-        "title": "Aspect Code: Scan Active File",
-        "icon": "$(file)"
-      },
-      {
         "command": "aspectcode.openFinding",
         "title": "Aspect Code: Open Finding"
       },
       {
         "command": "aspectcode.insertSuppression",
         "title": "Aspect Code: Insert Suppression Comment"
-      },
-      {
-        "command": "aspectcode.configureRules",
-        "title": "Aspect Code: Configure Rule Categories",
-        "icon": "$(settings-gear)"
       },
       {
         "command": "aspectcode.examine",

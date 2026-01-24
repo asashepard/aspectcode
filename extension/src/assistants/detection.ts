@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 
-export type AssistantId = 'copilot' | 'cursor' | 'claude' | 'other' | 'alignments' | 'aspectKB';
+export type AssistantId = 'copilot' | 'cursor' | 'claude' | 'other' | 'aspectKB';
 
 /**
  * Detects which AI assistants are likely in use by checking for their config files.
@@ -16,8 +16,7 @@ export async function detectAssistants(workspaceRoot: vscode.Uri): Promise<Set<A
     { id: 'copilot', paths: ['.github/copilot-instructions.md'] },
     { id: 'cursor', paths: ['.cursor', '.cursorrules'] },
     { id: 'claude', paths: ['CLAUDE.md'] },
-    { id: 'other', paths: ['AGENTS.md'] },
-    { id: 'alignments', paths: ['ALIGNMENTS.json'] }
+    { id: 'other', paths: ['AGENTS.md'] }
   ];
 
   const allPromises = checks.flatMap(check => 

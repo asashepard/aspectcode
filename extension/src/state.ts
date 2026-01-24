@@ -34,7 +34,7 @@ type ValidateStats = {
 
 type HistoryItem = {
   ts: number;
-  kind: "index" | "reindex" | "validate" | "autofix";
+  kind: "index" | "reindex" | "validate";
   meta: Record<string, any>;
 };
 
@@ -178,7 +178,7 @@ export class AspectCodeState {
   }
 
   /**
-   * Returns a set of safe rule codes that can be auto-fixed.
+   * Returns a set of rule codes that have fix capabilities.
    */
   getSafeRuleSet(): Set<string> {
     const capabilities = this._state.capabilities;

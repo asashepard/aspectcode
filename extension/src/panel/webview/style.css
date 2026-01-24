@@ -468,42 +468,11 @@ body {
   font-weight: 500;
 }
 
-.finding-autofix-v1 {
-  background: var(--vscode-charts-purple);
-  color: white;
-  padding: 2px 8px;
-  border-radius: 12px;
-  font-size: 10px;
-  font-weight: 500;
-  cursor: help;
-  animation: pulse-subtle 2s ease-in-out infinite;
-}
-
-@keyframes pulse-subtle {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.8; }
-}
-
 .finding-message {
   font-size: 12px;
   color: var(--vscode-foreground);
   margin-bottom: 6px;
   line-height: 1.4;
-}
-
-.autofix-ready-line {
-  margin: 4px 0;
-}
-
-.autofix-ready-badge {
-  background: var(--vscode-charts-green);
-  color: white;
-  padding: 2px 8px;
-  border-radius: 12px;
-  font-size: 9px;
-  font-weight: bold;
-  cursor: help;
-  display: inline-block;
 }
 
 .finding-location {

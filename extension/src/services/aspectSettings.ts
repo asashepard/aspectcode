@@ -20,7 +20,6 @@ export interface AssistantsSettings {
   cursor?: boolean;
   claude?: boolean;
   other?: boolean;
-  alignments?: boolean;
   autoGenerate?: boolean;
 }
 
@@ -284,7 +283,6 @@ export async function migrateAspectSettingsFromVSCode(
     'cursor',
     'claude',
     'other',
-    'alignments',
     'autoGenerate'
   ];
 
@@ -376,7 +374,6 @@ export async function getAssistantsSettings(
     cursor: a.cursor ?? false,
     claude: a.claude ?? false,
     other: a.other ?? false,
-    alignments: a.alignments ?? false,
     autoGenerate: a.autoGenerate ?? false
   };
 }

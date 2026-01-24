@@ -7,10 +7,18 @@ type RunFlowMsg = { type: 'RUN_FLOW'; steps: string[] };
 type RequestStateMsg = { type: 'REQUEST_STATE' };
 type CaptureSnapshotMsg = { type: 'CAPTURE_SNAPSHOT' };
 type PanelReadyMsg = { type: 'PANEL_READY' };
-type AutofixOneMsg = { type: 'AUTOFIX_ONE'; id: string };
 type OpenFindingMsg = { type: 'OPEN_FINDING'; file: string; line?: number; column?: number };
 type FixSafeMsg = { type: 'FIX_SAFE' };
 type RegenerateKbMsg = { type: 'REGENERATE_KB' };
+
+type ToExt =
+  | RunFlowMsg
+  | RequestStateMsg
+  | CaptureSnapshotMsg
+  | PanelReadyMsg
+  | OpenFindingMsg
+  | FixSafeMsg
+  | RegenerateKbMsg;
 
 type FromExt =
   | { type: 'STATE_UPDATE'; state: StateSnapshot }
@@ -18,6 +26,10 @@ type FromExt =
   | { type: 'SNAPSHOT_RESULT'; snapshot: Snapshot }
   | { type: 'DEPENDENCY_GRAPH'; graph: DependencyGraphData }
   | { type: 'ACTIVE_FILE_CHANGED'; file: string };
+
+function postToExtension(message: ToExt) {
+  vscode.postMessage(message);
+}
 
 export type Finding = {
   id?: string;
@@ -29,25 +41,6 @@ export type Finding = {
   severity?: 'info'|'warn'|'error';
   priority?: 'P0'|'P1'|'P2'|'P3';
 };
-
-// Auto-Fix v1 compatible rules (mirrors backend constant)
-const AUTO_FIX_V1_RULE_IDS = [
-  'imports.unused',
-  'deadcode.unused_variable', 
-  'lang.ts_loose_equality',
-  'memory.return_address_check',
-  'style.trailing_whitespace',
-  'style.consecutive_blank_lines',
-  'style.missing_final_newline',
-  'style.tab_vs_space_mixed',
-  'style.line_length_exceeded',
-  'types.ts_any_overuse'
-] as const;
-
-// Helper function to check if a finding is Auto-Fix v1 compatible
-function isAutoFixV1Compatible(finding: Finding): boolean {
-  return AUTO_FIX_V1_RULE_IDS.includes(finding.rule as any);
-}
 
 export type StateSnapshot = {
   busy: boolean;
@@ -84,7 +77,6 @@ let findingsToggle: HTMLElement;
 let findingsContent: HTMLElement;
 let findingsList: HTMLElement;
 let btnAnalyze: HTMLElement;
-let btnAutoFix: HTMLElement;
 let btnRefresh: HTMLElement;
 
 // Graph visualization
@@ -131,7 +123,6 @@ function initializeElements() {
   findingsContent = document.getElementById('findings-content')!;
   findingsList = document.getElementById('findings-list')!;
   btnAnalyze = document.getElementById('btn-analyze')!;
-  btnAutoFix = document.getElementById('auto-fix-safe-button')!;
   btnRefresh = document.getElementById('btn-refresh')!;
 }
 
@@ -148,10 +139,6 @@ function setupEventListeners() {
     if (!currentState.busy) {
       startAutoAnalysis();
     }
-  });
-
-  btnAutoFix.addEventListener('click', () => {
-    vscode.postMessage({ type: 'FIX_SAFE' });
   });
 
   btnRefresh.addEventListener('click', () => {
@@ -181,7 +168,7 @@ function setupEventListeners() {
 
 function startAutoAnalysis() {
   showProcessing('Indexing repository...', 0);
-  vscode.postMessage({ type: 'RUN_FLOW', steps: ['index', 'validate'] });
+  postToExtension({ type: 'RUN_FLOW', steps: ['index', 'validate'] });
 }
 
 function showProcessing(text: string, progress: number) {
@@ -220,13 +207,6 @@ function updateStats(state: StateSnapshot) {
   
   const criticalCount = state.findings.filter(f => f.severity === 'error').length;
   criticalCountEl.textContent = criticalCount.toString();
-  
-  // Update Auto-Fix v1 compatible count
-  const autofixV1Count = state.findings.filter(isAutoFixV1Compatible).length;
-  const autofixV1El = document.getElementById('autofix-v1-count');
-  if (autofixV1El) {
-    autofixV1El.textContent = autofixV1Count.toString();
-  }
   
   // Update repository score based on findings
   updateRepositoryScore(state);
@@ -347,15 +327,11 @@ function createFindingElement(finding: Finding): HTMLElement {
   const locationText = finding.file + 
     (finding.span ? `:${finding.span.start.line}:${finding.span.start.column}` : '');
   
-  // Check if finding is Auto-Fix v1 compatible
-  const isV1Compatible = isAutoFixV1Compatible(finding);
-  
   div.innerHTML = `
     <div class="finding-header">
       <span class="finding-rule">${finding.rule}</span>
       <span class="finding-severity severity-${finding.severity || 'warn'}">${finding.severity || 'warn'}</span>
       ${finding.fixable ? '<span class="finding-fixable">Auto-fixable</span>' : ''}
-      ${isV1Compatible ? '<span class="finding-autofix-v1" title="Compatible with Auto-Fix v1 pipeline">⚡ Auto-Fix v1</span>' : ''}
     </div>
     <div class="finding-message">${escapeHtml(finding.message)}</div>
     <div class="finding-location">${escapeHtml(locationText)}</div>
@@ -364,12 +340,7 @@ function createFindingElement(finding: Finding): HTMLElement {
   div.addEventListener('click', () => {
     const line = finding.span?.start?.line;
     const column = finding.span?.start?.column;
-    vscode.postMessage({
-      type: 'OPEN_FINDING',
-      file: finding.file,
-      line,
-      column
-    });
+    postToExtension({ type: 'OPEN_FINDING', file: finding.file, line, column });
   });
   
   return div;
@@ -468,7 +439,7 @@ function updateDependencyGraph(data: DependencyGraphData) {
     circle.addEventListener('click', () => {
       if (node.file) {
         highlightFile(node.file);
-        vscode.postMessage({ type: 'OPEN_FINDING', file: node.file });
+        postToExtension({ type: 'OPEN_FINDING', file: node.file });
       }
     });
     
@@ -486,7 +457,7 @@ function updateDependencyGraph(data: DependencyGraphData) {
     text.addEventListener('click', () => {
       if (node.file) {
         highlightFile(node.file);
-        vscode.postMessage({ type: 'OPEN_FINDING', file: node.file });
+        postToExtension({ type: 'OPEN_FINDING', file: node.file });
       }
     });
     
@@ -625,7 +596,7 @@ function updateKbStaleIndicator(isStale: boolean) {
  * Handle regenerate KB button click.
  */
 function handleRegenerateKb() {
-  vscode.postMessage({ type: 'REGENERATE_KB' } as RegenerateKbMsg);
+  postToExtension({ type: 'REGENERATE_KB' });
 }
 
 // Initialize on script load
@@ -636,7 +607,7 @@ if (document.readyState === 'loading') {
     if (regenBtn) {
       regenBtn.addEventListener('click', handleRegenerateKb);
     }
-    vscode.postMessage({ type: 'PANEL_READY' });
+    postToExtension({ type: 'PANEL_READY' });
   });
 } else {
   // Wire up regenerate button
@@ -644,7 +615,7 @@ if (document.readyState === 'loading') {
   if (regenBtn) {
     regenBtn.addEventListener('click', handleRegenerateKb);
   }
-  vscode.postMessage({ type: 'PANEL_READY' });
+  postToExtension({ type: 'PANEL_READY' });
 }
 
 

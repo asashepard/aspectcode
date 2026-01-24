@@ -491,7 +491,6 @@ async function examineWorkspaceDiff(context?: vscode.ExtensionContext) {
     ir,
     type_facts,
     modes: ['structure', 'types'],
-    autofix: false,
     assumptions: {
       pythonpath: [root] // simple hint; extend later if you want
     }
@@ -1756,8 +1755,9 @@ export async function activate(context: vscode.ExtensionContext) {
           title: 'Aspect Code: Computing impact analysis...',
           cancellable: false
         },
-        async () => computeImpactSummaryForFile(workspaceRoot, absPath, channel, context)
+        async () => computeImpactSummaryForFile(workspaceRoot, absPath, channel)
       );
+
 
       if (!summary) {
         vscode.window.showWarningMessage('Impact analysis unavailable. Try running “Aspect Code: Examine” first.');
@@ -1783,8 +1783,6 @@ export async function activate(context: vscode.ExtensionContext) {
       vscode.window.showInformationMessage('Impact analysis copied to clipboard.');
     })
   );
-  
-  // 3. FIX SAFE - Removed legacy auto-fix command
   
   // 2. SHOW PANEL - Display the main Aspect Code panel
   context.subscriptions.push(
@@ -2008,7 +2006,6 @@ export async function activate(context: vscode.ExtensionContext) {
   const codeActionProvider: vscode.CodeActionProvider = {
     provideCodeActions(doc, range, ctx) {
       const actions: vscode.CodeAction[] = [];
-      // NOTE: Autofix actions removed - feature disabled
       return actions;
     }
   };

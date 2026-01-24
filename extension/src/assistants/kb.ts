@@ -107,17 +107,12 @@ async function preloadFileContents(files: string[]): Promise<Map<string, string>
 }
 
 /**
- * Aspect Code Knowledge Base v3 - Architectural Intelligence for AI Coding Agents
+ * Aspect Code Knowledge Base - Architectural Intelligence for AI Coding Agents
  * 
  * STRUCTURE (3 files):
  * - architecture.md: The Guardrail - Project layout, high-risk hubs, entry points
  * - map.md: The Context - Symbol index with signatures, data models, conventions
  * - context.md: The Flow - Module clusters, data flows, external integrations
- * 
- * Design philosophy:
- * - DEFENSIVE GUARDRAILS: Orgalion-style warnings on high-risk hubs ("load-bearing walls")
- * - CONTEXTUAL DENSITY: V2-style symbol mapping with signatures for complex edits
- * - NO LINTING DISTRACTIONS: No awareness.md, no findings lists that cause regressions
  * 
  * KB-Enriching Rules (architectural intelligence, not issues):
  * - arch.entry_point: HTTP handlers, CLI commands, main functions, event listeners
@@ -257,7 +252,7 @@ export async function generateKnowledgeBase(
   }
 
   const kbStart = Date.now();
-  outputChannel.appendLine('[KB] Generating V3 knowledge base in .aspect/');
+  outputChannel.appendLine('[KB] Generating knowledge base in .aspect/');
 
   // Load tree-sitter grammars if context is available
   let grammars: LoadedGrammars | null = null;
@@ -328,8 +323,7 @@ export type ImpactSummary = {
 export async function computeImpactSummaryForFile(
   workspaceRoot: vscode.Uri,
   absoluteFilePath: string,
-  outputChannel: vscode.OutputChannel,
-  context?: vscode.ExtensionContext
+  outputChannel: vscode.OutputChannel
 ): Promise<ImpactSummary | null> {
   try {
     const files = await discoverWorkspaceFiles(workspaceRoot);
@@ -406,11 +400,6 @@ export async function computeImpactSummaryForFile(
  * 
  * Purpose: Defensive guide to project structure and high-risk zones.
  * Answers: "Where are the load-bearing walls?" and "What should I not break?"
- * 
- * Combines:
- * - V2 structure.md directory layout
- * - Orgalion hotspot ranking (in-degree + out-degree + finding count)
- * - Strong defensive language on hubs
  */
 async function generateArchitectureFile(
   aspectCodeDir: vscode.Uri,
@@ -441,7 +430,7 @@ async function generateArchitectureFile(
     const testFiles = files.filter(f => classifyFile(f, workspaceRoot.fsPath) === 'test');
     const findings = state.s.findings;
 
-    // Build finding counts per file for Orgalion-style hotspot ranking
+    // Build finding counts per file for hotspot ranking
     // Note: findings are used as a lightweight "friction" signal; severity is not used.
     const findingCounts = new Map<string, number>();
     for (const finding of findings) {
@@ -450,7 +439,7 @@ async function generateArchitectureFile(
     }
 
     // ============================================================
-    // HIGH-RISK ARCHITECTURAL HUBS (Orgalion + V2 merged)
+    // HIGH-RISK ARCHITECTURAL HUBS
     // ============================================================
     // Ranking: (inDegree + outDegree) * 2 + findingCount
     const hubs = Array.from(depData.entries())
@@ -3784,116 +3773,4 @@ function dedupe<T>(items: T[], keyFn?: (item: T) => string): T[] {
     seen.add(key);
     return true;
   });
-}
-
-// ============================================================================
-// File Classification - Project vs Test vs Third-Party
-// ============================================================================
-// ALIGNMENTS.json - Issue Tracking & Resolution Log (in workspace root)
-// ============================================================================
-
-export interface AlignmentEntry {
-  timestamp: string;
-  issue: string;
-  files: string[];
-  resolution: string;
-}
-
-interface AlignmentsFile {
-  description: string;
-  alignments: AlignmentEntry[];
-}
-
-/**
- * Add a new alignment entry to ALIGNMENTS.json in workspace root
- * 
- * This file tracks issues users have encountered and (once edited by human)
- * how they were resolved. Sorted by reverse timestamp so most recent 
- * entries are at the top for easy reference.
- */
-export async function addAlignmentEntry(
-  workspaceRoot: vscode.Uri,
-  entry: { issue: string; files: string[]; resolution: string },
-  outputChannel: vscode.OutputChannel
-): Promise<void> {
-  const alignmentsFile = vscode.Uri.joinPath(workspaceRoot, 'ALIGNMENTS.json');
-
-  // Read existing file or create new structure
-  let alignments: AlignmentsFile;
-  try {
-    const bytes = await vscode.workspace.fs.readFile(alignmentsFile);
-    alignments = JSON.parse(Buffer.from(bytes).toString('utf-8'));
-  } catch {
-    // File doesn't exist yet - create initial structure
-    alignments = {
-      description: "Issue tracking log - records problems encountered and their resolutions (edit 'resolution' field after verifying fix)",
-      alignments: []
-    };
-  }
-
-  // Create new entry with timestamp
-  const newEntry: AlignmentEntry = {
-    timestamp: new Date().toISOString(),
-    issue: entry.issue,
-    files: entry.files,
-    resolution: entry.resolution
-  };
-
-  // Add to beginning (most recent first)
-  alignments.alignments.unshift(newEntry);
-
-  // Keep only last 50 entries to prevent file from growing too large
-  if (alignments.alignments.length > 50) {
-    alignments.alignments = alignments.alignments.slice(0, 50);
-  }
-
-  // Write back with pretty formatting for human editability
-  const content = JSON.stringify(alignments, null, 2);
-  await vscode.workspace.fs.writeFile(alignmentsFile, Buffer.from(content, 'utf-8'));
-
-  outputChannel.appendLine(`[KB] Added alignment entry to ALIGNMENTS.json: "${entry.issue.substring(0, 50)}..."`);
-}
-
-/**
- * Check if ALIGNMENTS.json exists in workspace root
- */
-export async function alignmentsFileExists(
-  workspaceRoot: vscode.Uri
-): Promise<boolean> {
-  const alignmentsFile = vscode.Uri.joinPath(workspaceRoot, 'ALIGNMENTS.json');
-  try {
-    await vscode.workspace.fs.stat(alignmentsFile);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Initialize ALIGNMENTS.json in workspace root if it doesn't exist.
- * Creates the proper structure for tracking AI issues.
- */
-export async function initializeAlignmentsFile(
-  workspaceRoot: vscode.Uri,
-  outputChannel: vscode.OutputChannel
-): Promise<void> {
-  const alignmentsFile = vscode.Uri.joinPath(workspaceRoot, 'ALIGNMENTS.json');
-  
-  // Check if file already exists
-  try {
-    await vscode.workspace.fs.stat(alignmentsFile);
-    outputChannel.appendLine('[KB] ALIGNMENTS.json already exists');
-    return;
-  } catch {
-    // File doesn't exist, create it
-  }
-  
-  // Create alignments file with proper structure
-  const initialContent: AlignmentsFile = {
-    description: "Issue tracking log - records problems encountered and their resolutions (edit 'resolution' field after verifying fix)",
-    alignments: []
-  };
-  const content = JSON.stringify(initialContent, null, 2);
-  await vscode.workspace.fs.writeFile(alignmentsFile, Buffer.from(content, 'utf-8'));
-  outputChannel.appendLine('[KB] Created ALIGNMENTS.json');
 }

@@ -32,7 +32,6 @@ export interface Edit {
 export interface FindingMeta {
   tier?: number;
   category?: string;
-  autofix_safety?: "safe" | "caution" | "suggest-only";
   priority?: string;
   suggestions?: string[];
   [key: string]: any;  // Allow additional metadata
@@ -48,7 +47,6 @@ export interface Finding {
   range: Range;
   severity: "error" | "warning" | "info";
   code_frame?: string;
-  autofix?: Edit[];
   suppression_hint?: string;
   meta?: FindingMeta;
 }
@@ -135,21 +133,6 @@ function validateRange(value: any): value is Range {
 }
 
 /**
- * Validates an Edit object.
- */
-function validateEdit(value: any): value is Edit {
-  if (!isObject(value)) return false;
-  
-  return (
-    isString(value.file_path) &&
-    isNumber(value.start_byte) && value.start_byte >= 0 &&
-    isNumber(value.end_byte) && value.end_byte >= 0 &&
-    isString(value.replacement) &&
-    validateRange(value.range)
-  );
-}
-
-/**
  * Validates a Finding object.
  */
 function validateFinding(value: any): value is Finding {
@@ -172,12 +155,6 @@ function validateFinding(value: any): value is Finding {
   // Optional fields
   if (value.code_frame !== undefined && !isString(value.code_frame)) {
     return false;
-  }
-  
-  if (value.autofix !== undefined) {
-    if (!isArray(value.autofix) || !value.autofix.every(validateEdit)) {
-      return false;
-    }
   }
   
   if (value.suppression_hint !== undefined && !isString(value.suppression_hint)) {
@@ -332,20 +309,6 @@ export function decodeScanResult(rawJson: string): ValidationResult {
     success: true,
     data: parsed as ScanResult
   };
-}
-
-/**
- * Helper function to extract safe autofixes from findings.
- * 
- * @param findings - Array of findings
- * @returns Array of findings with safe autofixes
- */
-export function extractSafeAutofixes(findings: Finding[]): Finding[] {
-  return findings.filter(finding => 
-    finding.autofix && 
-    finding.autofix.length > 0 &&
-    finding.meta?.autofix_safety === "safe"
-  );
 }
 
 /**

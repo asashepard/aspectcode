@@ -49,11 +49,6 @@ function removeAspectCodeSection(existingContent: string): string {
  * Generates the canonical instruction content.
  * All assistant-specific exports are derived from this single source.
  */
-function generateCanonicalContent(): string {
-  // Backwards-compat default. Call generateCanonicalContentForMode() instead.
-  return generateCanonicalContentForMode('safe');
-}
-
 function generateCanonicalContentForMode(mode: InstructionsMode): string {
   if (mode === 'permissive') {
     return generateCanonicalContentPermissive();

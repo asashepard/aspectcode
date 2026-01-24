@@ -1547,28 +1547,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
 
         case 'COMMAND':
           if (msg?.command) {
-                        // Server-only commands that truly require API key (local Python engine)
-                        const serverOnlyCommands = [
-                            'aspectcode.scanWorkspace',
-                            'aspectcode.scanActiveFile'
-                        ];
-                        // Note: aspectcode.examine is NOT in this list - it gracefully skips
-                        // server validation when no API key (still useful for local KB refresh)
-                        
-                        const isServerCommand = serverOnlyCommands.includes(msg.command);
-                        
-                        // Only gate API key management and actual server commands
-                        if (msg.command !== 'aspectcode.enterApiKey' && msg.command !== 'aspectcode.clearApiKey' && isServerCommand) {
-                            const hasApiKey = await this.computeHasApiKey();
-                            const authStatus = getApiKeyAuthStatus();
-                            const blocked = !hasApiKey || authStatus === 'invalid' || authStatus === 'revoked';
-                            if (blocked) {
-                                vscode.window.showErrorMessage('Aspect Code: Server features require an API key.', 'Enter API Key').then(sel => {
-                                    if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
-                                });
-                                break;
-                            }
-                        }
                         const perfEnabled = vscode.workspace.getConfiguration().get<boolean>('aspectcode.devLogs', true);
                         const t0 = Date.now();
                         if (perfEnabled) {
@@ -1670,34 +1648,15 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
           }
           break;
 
-        case 'AUTO_FIX_SAFE':
-          // Feature not currently enabled
-          break;
-
         case 'EXPLAIN_FILE': {
           // Note: This command may not be registered - kept for future use
           await vscode.commands.executeCommand('aspectcode.explainFile');
           break;
         }
 
-        case 'PROPOSE_FIXES': {
-                    // Propose Fixes was removed; keep the panel button working by invoking
-                    // the single user-input prompt generator command.
-                    // Note: aspectcode.generatePrompt works offline - no API key required
-                    await vscode.commands.executeCommand('aspectcode.generatePrompt');
-          break;
-        }
-
         case 'ALIGN_ISSUE': {
           // Note: This command may not be registered - kept for future use
           await vscode.commands.executeCommand('aspectcode.alignIssue');
-          break;
-        }
-
-        case 'GENERATE_AUTO_FIX_PROMPT': {
-          // Auto-Fix feature disabled
-          // const findings = msg.payload?.findings || [];
-          // await vscode.commands.executeCommand('aspectcode.generateAutoFixPrompt', findings);
           break;
         }
         
@@ -1834,10 +1793,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
       else if (step === 'preview_fixes') {
         this._bridgeState.lastDiffMeta = { files: 1, hunks: 2 };
         this.pushState();
-      }
-
-      else if (step === 'apply') {
-        await vscode.commands.executeCommand('aspectcode.autofixSelected');
       }
 
       else if (step === 'revalidate') {
@@ -2891,31 +2846,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             width: 100%;
         }
         
-        .finding-autofix-btn {
-            background: none;
-            color: var(--vscode-input-foreground);
-            border: 1px solid var(--vscode-input-border);
-            border-radius: 3px;
-            padding: 4px 8px;
-            font-size: 11px;
-            font-weight: 500;
-            cursor: pointer;
-            flex-shrink: 0;
-            margin-left: auto;
-            min-width: 30px;
-            height: 24px;
-        }
-        
-        .finding-autofix-btn:hover {
-            background: var(--vscode-list-hoverBackground);
-            border-color: var(--vscode-focusBorder);
-        }
-        
-        .finding-autofix-btn:active {
-            background: var(--vscode-button-background);
-            opacity: 0.8;
-        }
-        
         /* Compact severity dots instead of pills */
         .severity-dot {
             width: 8px;
@@ -3350,15 +3280,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             border: 2px solid var(--vscode-charts-orange);
             width: 10px;
             height: 10px;
-        }
-
-        .autofix-potential {
-            color: #ff9500;
-            font-weight: 500;
-            flex-shrink: 0;
-            margin-left: 8px;
-            white-space: nowrap;
-            display: none;
         }
 
         /* Link analysis panel styles */
@@ -4345,24 +4266,16 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
 
                 const extensionDisabled = !!(currentState && currentState.extensionEnabled === false);
 
-                // Replace graph prompt-generation button with spinner when spinner is active.
-                const proposeBtn = document.getElementById('propose-button');
-                if (proposeBtn) {
-                    proposeBtn.style.display = graphSpinnerActive ? 'none' : '';
-                }
-
                 // Gray out/disable relevant buttons while processing.
                 const ids = [
                     // Simple view
                     'simple-generate-btn',
-                    'simple-propose-btn',
                     'simple-auto-regen-kb-btn',
                     'simple-expand-btn',
                     'simple-reindex-btn',
                     'simple-edit-instructions',
                     // Graph view header
                     'generate-instructions-btn',
-                    'propose-button',
                     'complex-auto-regen-kb-btn',
                     'collapse-view-btn',
                     'complex-reindex-btn',
@@ -4412,7 +4325,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 const disableIds = ids.filter((id) => id !== 'simple-enable-toggle-btn');
                 disableIds.push(
                     'generate-instructions-btn',
-                    'propose-button',
                     'complex-auto-regen-kb-btn',
                     'collapse-view-btn',
                     'complex-reindex-btn',
@@ -4459,8 +4371,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                     'simple-generate-btn',
                     'generate-instructions-btn',
                     'regenerate-assistant-files',
-                    'simple-propose-btn',
-                    'propose-button',
                     'simple-auto-regen-kb-btn',
                     'complex-auto-regen-kb-btn',
                     'btn-regenerate-kb',
@@ -5515,13 +5425,6 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                         renderFindings(currentFindings, '', currentState);
                     }
                     break;
-                case 'AUTO_FIX_SAFE_COMPLETE':
-                    // Re-enable the auto-fix button immediately when command completes
-                    const btn = document.getElementById('auto-fix-safe-button');
-                    if (btn) {
-                        btn.disabled = false;
-                    }
-                    break;
                 case 'INSTRUCTION_FILES_STATUS':
                     // Show/hide the generate instructions button based on whether files exist
                     // But only if graph is ready - otherwise keep hidden until GRAPH_READY
@@ -5816,12 +5719,8 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
             if (manualProcessingActive && !state.busy && currentFindings.length > 0) {
                 manualProcessingActive = false;
                 // Also ensure action buttons are enabled
-                const autoFixBtn = document.getElementById('auto-fix-safe-button');
                 const explainBtn = document.getElementById('explain-button');
-                const proposeBtn = document.getElementById('propose-button');
-                if (autoFixBtn) autoFixBtn.disabled = false;
                 if (explainBtn) explainBtn.disabled = false;
-                if (proposeBtn) proposeBtn.disabled = false;
                 hideProgress();
             }
             
@@ -5857,18 +5756,9 @@ export class AspectCodePanelProvider implements vscode.WebviewViewProvider {
                 }
             }
             
-            // Update button state and score improvement badge
-            const autoFixBtn = document.getElementById('auto-fix-safe-button');
+            // Update button state
             const explainBtn = document.getElementById('explain-button');
-            const proposeBtn = document.getElementById('propose-button');
-            if (autoFixBtn) {
-                autoFixBtn.disabled = !!state.busy || manualProcessingActive;
-                
-                // Update score improvement badge
-                // updateAutoFixBadge(autoFixBtn, state); // Removed - score now in summary bar
-            }
             if (explainBtn) explainBtn.disabled = !!state.busy || manualProcessingActive;
-            if (proposeBtn) proposeBtn.disabled = !!state.busy || manualProcessingActive;
         }
         
         function showProgress(phase, progress) {

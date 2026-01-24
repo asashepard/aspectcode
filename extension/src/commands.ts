@@ -10,12 +10,12 @@ import * as path from 'path';
 import { AspectCodeEngineService } from './engineService';
 import { Finding, ScanResult, createSuppressionComment } from './types/protocol';
 import { AspectCodeState } from './state';
-import { hasApiKeyConfigured, isApiKeyBlocked } from './http';
 
 export class AspectCodeCommands {
   private engineService: AspectCodeEngineService;
   private outputChannel: vscode.OutputChannel;
   private diagnostics: vscode.DiagnosticCollection;
+  private statusBarItem: vscode.StatusBarItem;
   private state: AspectCodeState;
   private currentOperationCts: vscode.CancellationTokenSource | null = null;
 
@@ -23,12 +23,17 @@ export class AspectCodeCommands {
     this.outputChannel = vscode.window.createOutputChannel('Aspect Code');
     this.engineService = new AspectCodeEngineService({}, this.outputChannel);
     this.diagnostics = vscode.languages.createDiagnosticCollection('aspectcode');
+    this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+    this.statusBarItem.text = '$(beaker) Aspect Code';
+    this.statusBarItem.tooltip = 'Aspect Code';
+    this.statusBarItem.show();
     this.state = state;
 
     // Register for cleanup
     context.subscriptions.push(
       this.outputChannel,
       this.diagnostics,
+      this.statusBarItem,
       this.engineService
     );
   }
@@ -183,7 +188,6 @@ export class AspectCodeCommands {
             endLine: f.span.end.line + 1,
             endCol: f.span.end.column
           } : (f.range || { startLine: 1, startCol: 0, endLine: 1, endCol: 0 }),
-          autofix: f.autofix || [],
           meta: f.meta || {}
         } as Finding;
       });
@@ -206,148 +210,8 @@ export class AspectCodeCommands {
   }
 
   /**
-   * Scan workspace command with category filtering.
-   * Note: This uses the local Python engine which requires server/ folder.
-   * Not available in OSS builds. For OSS, use dependency graph + KB instead.
+   * Scan commands removed (OSS-only): Aspect Code uses dependency graph + KB.
    */
-  async scanWorkspace(): Promise<void> {
-    if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
-      vscode.window.showErrorMessage('Aspect Code: Scanning requires server setup or API key.', 'Enter API Key').then(sel => {
-        if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
-      });
-      return;
-    }
-
-    this.outputChannel.show();
-    this.outputChannel.appendLine('=== Scanning workspace ===');
-    this.statusBarItem.text = '$(loading~spin) Aspect Code: Scanning...';
-
-    try {
-      // Get configuration for rule filtering
-      const config = vscode.workspace.getConfiguration('aspectcode');
-      const enabledRules = config.get<string[]>('rules.enabled', ['*']);
-      const categories = config.get<string[]>('rules.categories', []);
-      const maxJobs = config.get<number>('engine.maxJobs', 4);
-
-      const result = await vscode.window.withProgress({
-        location: vscode.ProgressLocation.Notification,
-        title: 'Aspect Code: Scanning workspace...',
-        cancellable: true
-      }, async (progress, token) => {
-        // Allow programmatic cancellation (e.g., disable toggle) while still
-        // honoring the user-cancellable progress token.
-        this.currentOperationCts?.dispose();
-        this.currentOperationCts = new vscode.CancellationTokenSource();
-        token.onCancellationRequested(() => this.currentOperationCts?.cancel());
-
-        const scanOptions = {
-          categories: categories.length > 0 ? categories : undefined,
-          rules: enabledRules.length > 0 && enabledRules[0] !== '*' ? enabledRules.join(',') : undefined,
-          jobs: maxJobs
-        };
-        
-        // Combine scanOptions with the engine service call
-        return await this.engineService.scanWorkspace(this.currentOperationCts.token);
-      });
-
-      if (result.success && result.data) {
-        this.updateDiagnostics(result.data);
-        
-        // Enhanced reporting with category breakdown
-        const findings = result.data.findings;
-        const categories = new Map<string, number>();
-        
-        findings.forEach(f => {
-          const category = f.rule_id.split('.')[0];
-          categories.set(category, (categories.get(category) || 0) + 1);
-        });
-        
-        const categoryReport = Array.from(categories.entries())
-          .map(([cat, count]) => `${cat}: ${count}`)
-          .join(', ');
-        
-        this.outputChannel.appendLine(`Category breakdown: ${categoryReport}`);
-        
-        vscode.window.showInformationMessage(
-          `Aspect Code: Found ${result.data.findings.length} issues in ${result.data.files_scanned} files`
-        );
-      } else {
-        this.statusBarItem.text = '$(beaker) Aspect Code: Error';
-        this.statusBarItem.tooltip = result.error?.message || 'Unknown error';
-        vscode.window.showErrorMessage(`Aspect Code scan failed: ${result.error?.message || 'Unknown error'}`);
-        this.outputChannel.appendLine(`Scan failed: ${result.error?.message}`);
-      }
-    } catch (error) {
-      this.statusBarItem.text = '$(beaker) Aspect Code: Error';
-      vscode.window.showErrorMessage(`Aspect Code scan failed: ${error}`);
-      this.outputChannel.appendLine(`Scan error: ${error}`);
-    }
-    finally {
-      this.currentOperationCts?.dispose();
-      this.currentOperationCts = null;
-    }
-  }
-
-  /**
-   * Scan active file command.
-   * Note: This uses the local Python engine which requires server/ folder.
-   * Not available in OSS builds.
-   */
-  async scanActiveFile(): Promise<void> {
-    if (isApiKeyBlocked() || !(await hasApiKeyConfigured())) {
-      vscode.window.showErrorMessage('Aspect Code: Scanning requires server setup or API key.', 'Enter API Key').then(sel => {
-        if (sel === 'Enter API Key') void vscode.commands.executeCommand('aspectcode.enterApiKey');
-      });
-      return;
-    }
-
-    const activeEditor = vscode.window.activeTextEditor;
-    if (!activeEditor) {
-      vscode.window.showWarningMessage('No active file to scan');
-      return;
-    }
-
-    this.outputChannel.appendLine(`=== Scanning active file: ${path.basename(activeEditor.document.fileName)} ===`);
-
-    try {
-      const result = await vscode.window.withProgress({
-        location: vscode.ProgressLocation.Window,
-        title: 'Aspect Code: Scanning file...',
-        cancellable: true
-      }, async (progress, token) => {
-        this.currentOperationCts?.dispose();
-        this.currentOperationCts = new vscode.CancellationTokenSource();
-        token.onCancellationRequested(() => this.currentOperationCts?.cancel());
-
-        return await this.engineService.scanActiveFile(this.currentOperationCts.token);
-      });
-
-      if (result.success && result.data) {
-        // Only update diagnostics for the active file
-        const diagnosticsMap = this.findingsToDiagnostics(result.data.findings);
-        const activeUri = activeEditor.document.uri;
-        
-        // Clear diagnostics for active file and set new ones
-        const fileDiagnostics = diagnosticsMap.get(activeUri.toString()) || [];
-        this.diagnostics.set(activeUri, fileDiagnostics);
-
-        vscode.window.showInformationMessage(
-          `Aspect Code: Found ${result.data.findings.length} issues in ${path.basename(activeEditor.document.fileName)}`
-        );
-        this.outputChannel.appendLine(`File scan complete: ${result.data.findings.length} findings`);
-      } else {
-        vscode.window.showErrorMessage(`Aspect Code file scan failed: ${result.error?.message || 'Unknown error'}`);
-        this.outputChannel.appendLine(`File scan failed: ${result.error?.message}`);
-      }
-    } catch (error) {
-      vscode.window.showErrorMessage(`Aspect Code file scan failed: ${error}`);
-      this.outputChannel.appendLine(`File scan error: ${error}`);
-    }
-    finally {
-      this.currentOperationCts?.dispose();
-      this.currentOperationCts = null;
-    }
-  }
 
   /**
    * Open finding command.
@@ -421,72 +285,6 @@ export class AspectCodeCommands {
     } catch (error) {
       vscode.window.showErrorMessage(`Failed to insert suppression: ${error}`);
       this.outputChannel.appendLine(`Suppression error: ${error}`);
-    }
-  }
-
-  /**
-   * Re-run full repository analysis (same as "Analyze workspace" command)
-   */
-  async rerunAnalysis(modifiedFiles?: string[]): Promise<void> {
-    // Always run full validation (no incremental)
-    this.outputChannel.appendLine('[Auto-Fix v1] Running full validation...');
-    
-    try {
-      // Trigger the validate command which calls validateFullRepository
-      await vscode.commands.executeCommand('aspectcode.examine');
-      
-    } catch (error) {
-      this.outputChannel.appendLine(`[Auto-Fix v1] Analysis failed: ${error}`);
-    }
-  }
-
-  async configureRules(): Promise<void> {
-    const availableCategories = [
-      { label: 'imports.*', description: 'Import analysis (unused, cycles, side effects)', value: 'imports' },
-      { label: 'security.*', description: 'Security vulnerabilities (XSS, SQL injection, etc.)', value: 'security' },
-      { label: 'memory.*', description: 'Memory management issues (leaks, use-after-free)', value: 'memory' },
-      { label: 'deadcode.*', description: 'Dead code detection (unused variables, functions)', value: 'deadcode' },
-      { label: 'style.*', description: 'Code style issues (formatting, conventions)', value: 'style' },
-      { label: 'complexity.*', description: 'Code complexity metrics', value: 'complexity' },
-      { label: 'concurrency.*', description: 'Concurrency issues (race conditions, locks)', value: 'concurrency' },
-      { label: 'types.*', description: 'Type-related issues (TypeScript)', value: 'types' },
-      { label: 'errors.*', description: 'Error handling patterns', value: 'errors' },
-      { label: 'naming.*', description: 'Naming conventions and consistency', value: 'naming' },
-      { label: 'performance.*', description: 'Performance anti-patterns', value: 'performance' }
-    ];
-
-    const config = vscode.workspace.getConfiguration('aspectcode');
-    const currentCategories = config.get<string[]>('rules.categories', []);
-
-    const selectedItems = await vscode.window.showQuickPick(availableCategories, {
-      canPickMany: true,
-      title: 'Select Rule Categories to Enable',
-      placeHolder: 'Choose which categories of rules to run',
-      ignoreFocusOut: true
-    });
-
-    if (selectedItems && selectedItems.length > 0) {
-      const selectedCategories = selectedItems.map(item => item.value);
-      
-      // Update configuration
-      await config.update('rules.categories', selectedCategories, vscode.ConfigurationTarget.Workspace);
-      
-      // Show confirmation
-      vscode.window.showInformationMessage(
-        `Enabled rule categories: ${selectedCategories.join(', ')}`
-      );
-      
-      this.outputChannel.appendLine(`Updated rule categories: ${selectedCategories.join(', ')}`);
-      
-      // Offer to re-scan with new settings
-      const rescan = await vscode.window.showInformationMessage(
-        'Re-scan workspace with new rule categories?',
-        'Yes', 'No'
-      );
-      
-      if (rescan === 'Yes') {
-        this.scanWorkspace();
-      }
     }
   }
 }
